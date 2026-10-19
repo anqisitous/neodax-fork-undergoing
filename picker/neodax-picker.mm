@@ -1,19 +1,19 @@
 
 /*
- * neodax-picker.mm â è§£æå¯¾è±¡ããã«ã¼ (åä¸ãã¡ã¤ã«ã»ä¾å­ã¼ã­)
+ * neodax-picker.mm — 解析対象ピッカー (単一ファイル・依存ゼロ)
  *
- *   å®è¡ä¸­ã¢ããª / æè¿ä½¿ã£ãã¢ããª / ã»ãã·ã§ã³åã®èµ·åã»çµäºã¤ãã³ã
- *   ãä¸è¦§è¡¨ç¤ºããé¸ãã ã¢ããªã®æ¬ä½ãã¤ããªã«å¯¾ãã¦ neodax ãå®è¡ãã¦
- *   çµæãè¡¨ç¤ºãããC++ ãã Objective-C++ æ¡å¼µã§ NSWorkspace / CoreFoundation
- *   ãç´æ¥å¼ã¶ãããSwift ãå¤é¨GUIã©ã¤ãã©ãªãä¸è¦ã
+ *   実行中アプリ / 最近使ったアプリ / セッション内の起動・終了イベント
+ *   を一覧表示し、選んだアプリの本体バイナリに対して neodax を実行して
+ *   結果を表示する。C++ から Objective-C++ 拡張で NSWorkspace / CoreFoundation
+ *   を直接呼ぶため、Swift も外部GUIライブラリも不要。
  *
- *   ãã«ã:
+ *   ビルド:
  *     clang++ -std=c++17 -ObjC++ -framework Cocoa -framework CoreServices \
  *            neodax-picker.mm -o neodax-picker
  *
- *   å®è¡:
+ *   実行:
  *     ./neodax-picker
- *     ï¼ä¸ã®ãã£ã¼ã«ãã« neodax ã¸ã®ãã¹ã¨å¼æ°ãæå® â è¡ãé¸æ â ãè§£æå®è¡ãï¼
+ *     （上のフィールドに neodax へのパスと引数を指定 → 行を選択 → 「解析実行」）
  */
 
 #import <Cocoa/Cocoa.h>
@@ -21,28 +21,28 @@
 #include <string>
 #include <algorithm>
 
-/* ââ ã¨ã³ããªã¢ãã« ââââââââââââââââââââââââââââââââââââââââââââ */
+/* ── エントリモデル ──────────────────────────────────────────── */
 
 struct AppEntry {
     std::string name;
-    std::string status;   /* "å®è¡ä¸­" / "å±¥æ­´" / "èµ·å(ä»å)" / "çµäº(ä»å)" */
-    std::string binPath;  /* Contents/MacOS/ ä¸ã®æ¬ä½ãã¤ããª */
-    int         rowKind;  /* 0=å®è¡ä¸­ 1=å±¥æ­´ 2=ä»åã®èµ·å 3=ä»åã®çµäº */
+    std::string status;   /* "実行中" / "履歴" / "起動(今回)" / "終了(今回)" */
+    std::string binPath;  /* Contents/MacOS/ 下の本体バイナリ */
+    int         rowKind;  /* 0=実行中 1=履歴 2=今回の起動 3=今回の終了 */
 };
 
-/* ãã³ãã«URL â å®è¡ãã¤ããªã®ãã¹ */
+/* バンドルURL → 実行バイナリのパス */
 static std::string executablePathOfBundle(NSURL *bundleURL) {
     if (!bundleURL) return {};
     NSBundle *b = [NSBundle bundleWithURL:bundleURL];
     NSString *exe = b.executablePath;
     if (!exe) {
-        /* å®è¡ä¸­ã¢ããªããç´æ¥åã */
+        /* 実行中アプリから直接取る */
         return {};
     }
     return exe.UTF8String;
 }
 
-/* ââ æè¿ä½¿ã£ãã¢ããª (com.apple.recentitems.plist) âââââââââââââ */
+/* ── 最近使ったアプリ (com.apple.recentitems.plist) ───────────── */
 
 static std::vector<AppEntry> recentAppsFromPlist() {
     std::vector<AppEntry> out;
@@ -68,42 +68,45 @@ static std::vector<AppEntry> recentAppsFromPlist() {
         NSData   *bookmark = item[@"Bookmark"];
         if (!name || !bookmark) continue;
 
-        BOOL stale = NO;
+        Boolean isStale = false;
         CFErrorRef bErr = NULL;
         CFURLRef cfURL = CFURLCreateByResolvingBookmarkData(
-            NULL, (__bridge CFDataRef)bookmark, 0, NULL, NULL, NULL, &stale);
-        NSURL *url = cfURL ? (__bridge NSURL *)cfURL : nil;
-        if (cfURL) {
-            std::string exe = executablePathOfBundle(url);
-            AppEntry e;
-            e.name = name.UTF8String;
-            e.status = "å±¥æ­´";
-            e.binPath = exe.empty()
-                ? (std::string)url.path.UTF8String
-                : exe;
-            e.rowKind = 1;
-            if (!e.binPath.empty()) out.push_back(e);
-            CFRelease(cfURL);
+            kCFAllocatorDefault, (__bridge CFDataRef)bookmark,
+            kCFURLBookmarkResolutionWithoutUIMask, NULL, NULL,
+            &isStale, &bErr);
+        if (!cfURL) {
             if (bErr) CFRelease(bErr);
+            continue;
         }
+        NSURL *url = (__bridge NSURL *)cfURL;
+        std::string exe = executablePathOfBundle(url);
+        AppEntry e;
+        e.name = name.UTF8String;
+        e.status = "履歴";
+        e.binPath = exe.empty()
+            ? (std::string)url.path.UTF8String
+            : exe;
+        e.rowKind = 1;
+        if (!e.binPath.empty()) out.push_back(e);
+        CFRelease(cfURL);
     }
     CFRelease(pl);
     return out;
 }
 
-/* ââ å®è¡ä¸­ã¢ããª âââââââââââââââââââââââââââââââââââââââââââââââ */
+/* ── 実行中アプリ ─────────────────────────────────────────────── */
 
 static std::vector<AppEntry> runningApps() {
     std::vector<AppEntry> out;
     for (NSRunningApplication *ra in
              [NSWorkspace sharedWorkspace].runningApplications) {
         if (ra.activationPolicy != NSApplicationActivationPolicyRegular)
-            continue;   /* Launchdããã«ãã¼ã¯é¤å¤ */
+            continue;   /* Launchdやヘルパーは除外 */
         NSString *exe = ra.executableURL.path;
         if (!exe) continue;
         AppEntry e;
         e.name    = ra.localizedName ? ra.localizedName.UTF8String : "?";
-        e.status  = "å®è¡ä¸­";
+        e.status  = "実行中";
         e.binPath = exe.UTF8String;
         e.rowKind = 0;
         out.push_back(e);
@@ -111,18 +114,19 @@ static std::vector<AppEntry> runningApps() {
     return out;
 }
 
-/* ââ ã¢ããªããªã²ã¼ã + UI ââââââââââââââââââââââââââââââââââââââ */
+/* ── アプリデリゲート + UI ────────────────────────────────────── */
 
 @interface PickerAppDelegate : NSObject <NSApplicationDelegate,
                                             NSTableViewDataSource,
-                                            NSTableViewDelegate>
+                                            NSTableViewDelegate> {
+    std::vector<AppEntry> _entries;
+}
 @property (nonatomic, strong) NSWindow        *window;
 @property (nonatomic, strong) NSTableView     *table;
 @property (nonatomic, strong) NSTextField     *pathLabel;
 @property (nonatomic, strong) NSTextField     *neodaxPathField;
 @property (nonatomic, strong) NSTextField     *argsField;
 @property (nonatomic, strong) NSTextView      *outputView;
-@property (nonatomic, assign) std::vector<AppEntry> entries;
 - (void)runAnalysis:(id)sender;
 - (void)reloadData;
 @end
@@ -132,41 +136,41 @@ static std::vector<AppEntry> runningApps() {
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
     (void)n;
 
-    /* ââ ã¡ãã¥ã¼ (Cmd-Q ç¨ã®æå°æ§æ) ââ */
+    /* ── メニュー (Cmd-Q 用の最小構成) ── */
     NSMenu *menuBar = [[NSMenu alloc] init];
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
     NSMenu *appMenu = [[NSMenu alloc] init];
-    [appMenu addItemWithTitle:@"NeoDAX Picker ãçµäº"
+    [appMenu addItemWithTitle:@"NeoDAX Picker を終了"
                        action:@selector(terminate:)
                 keyEquivalent:@"q"];
     appItem.submenu = appMenu;
     [menuBar addItem:appItem];
     NSApp.menu = menuBar;
 
-    /* ââ ã¦ã£ã³ãã¦ ââ */
+    /* ── ウィンドウ ── */
     NSRect frame = NSMakeRect(0, 0, 980, 640);
     self.window = [[NSWindow alloc] initWithContentRect:frame
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                    NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable)
         backing:NSBackingStoreBuffered defer:NO];
-    self.window.title = @"NeoDAX Picker â è§£æå¯¾è±¡ãé¸æ";
-    self.window.center;
+    self.window.title = @"NeoDAX Picker — 解析対象を選択";
+    [self.window center];
 
     NSView *c = self.window.contentView;
 
-    /* ââ ãã¼ãã« ââ */
+    /* ── テーブル ── */
     NSTableColumn *colName = [[NSTableColumn alloc]
         initWithIdentifier:@"name"];
     colName.width = 260;
-    [colName.headerCell setStringValue:@"ã¢ããª"];
+    [colName.headerCell setStringValue:@"アプリ"];
     NSTableColumn *colStatus = [[NSTableColumn alloc]
         initWithIdentifier:@"status"];
     colStatus.width = 120;
-    [colStatus.headerCell setStringValue:@"ç¶æ"];
+    [colStatus.headerCell setStringValue:@"状態"];
     NSTableColumn *colPath = [[NSTableColumn alloc]
         initWithIdentifier:@"path"];
     colPath.width = 560;
-    [colPath.headerCell setStringValue:@"ãã¤ããª"];
+    [colPath.headerCell setStringValue:@"バイナリ"];
 
     NSScrollView *tableScroll = [[NSScrollView alloc]
         initWithFrame:NSMakeRect(16, 260, frame.size.width - 32, 250)];
@@ -183,13 +187,13 @@ static std::vector<AppEntry> runningApps() {
     tableScroll.hasVerticalScroller = YES;
     [c addSubview:tableScroll];
 
-    /* ââ é¸æä¸­ãã¹è¡¨ç¤º ââ */
-    self.pathLabel = [NSTextField labelWithString:@"â"];
+    /* ── 選択中パス表示 ── */
+    self.pathLabel = [NSTextField labelWithString:@"—"];
     self.pathLabel.frame = NSMakeRect(16, 236, frame.size.width - 32, 20);
     self.pathLabel.font = [NSFont systemFontOfSize:12];
     [c addSubview:self.pathLabel];
 
-    /* ââ neodax ãã¹ / å¼æ° ââ */
+    /* ── neodax パス / 引数 ── */
     NSTextField *lp = [NSTextField labelWithString:@"neodax:"];
     lp.frame = NSMakeRect(16, 206, 60, 20);
     [c addSubview:lp];
@@ -198,7 +202,7 @@ static std::vector<AppEntry> runningApps() {
     self.neodaxPathField.stringValue = @"./neodax";
     [c addSubview:self.neodaxPathField];
 
-    NSTextField *la = [NSTextField labelWithString:@"å¼æ°:"];
+    NSTextField *la = [NSTextField labelWithString:@"引数:"];
     la.frame = NSMakeRect(352, 206, 42, 20);
     [c addSubview:la];
     self.argsField = [[NSTextField alloc]
@@ -206,17 +210,16 @@ static std::vector<AppEntry> runningApps() {
     self.argsField.stringValue = @"--funcs --callgraph --depflow";
     [c addSubview:self.argsField];
 
-    /* ââ å®è¡ãã¿ã³ ââ */
+    /* ── 実行ボタン ── */
     NSButton *run = [[NSButton alloc]
         initWithFrame:NSMakeRect(844, 202, 120, 28)];
-    run.title = @"è§£æå®è¡";
-    run.bezelStyle = NSBezelStyleRoundedBevel;
+    run.title = @"解析実行";
     run.font = [NSFont boldSystemFontOfSize:13];
     [run setTarget:self];
     [run setAction:@selector(runAnalysis:)];
     [c addSubview:run];
 
-    /* ââ åºåãã¥ã¼ ââ */
+    /* ── 出力ビュー ── */
     NSScrollView *outScroll = [[NSScrollView alloc]
         initWithFrame:NSMakeRect(16, 16, frame.size.width - 32, 178)];
     self.outputView = [[NSTextView alloc]
@@ -228,19 +231,19 @@ static std::vector<AppEntry> runningApps() {
     outScroll.hasVerticalScroller = YES;
     [c addSubview:outScroll];
 
-    /* ââ åæãã¼ã¿: å®è¡ä¸­ + å±¥æ­´ ââ */
-    self.entries = runningApps();
+    /* ── 初期データ: 実行中 + 履歴 ── */
+    _entries = runningApps();
     {
         std::vector<AppEntry> rec = recentAppsFromPlist();
         for (auto &e : rec) {
-            auto dup = std::find_if(self.entries.begin(), self.entries.end(),
+            auto dup = std::find_if(_entries.begin(), _entries.end(),
                 [&](const AppEntry &r){ return r.binPath == e.binPath; });
-            if (dup == self.entries.end()) self.entries.push_back(e);
+            if (dup == _entries.end()) _entries.push_back(e);
         }
     }
     [self reloadData];
 
-    /* ââ ã»ãã·ã§ã³åã®èµ·å/çµäºã¤ãã³ããæ¾ã ââ */
+    /* ── セッション内の起動/終了イベントを拾う ── */
     NSWorkspace *ws = [NSWorkspace sharedWorkspace];
     [[ws notificationCenter]
         addObserver:self
@@ -257,52 +260,52 @@ static std::vector<AppEntry> runningApps() {
     [NSApp activateIgnoringOtherApps:YES];
 }
 
-/* èµ·åã¤ãã³ã */
+/* 起動イベント */
 - (void)appDidLaunch:(NSNotification *)n {
     NSRunningApplication *ra = n.userInfo[NSWorkspaceApplicationKey];
     if (!ra || ra.activationPolicy != NSApplicationActivationPolicyRegular)
         return;
     AppEntry e;
     e.name    = ra.localizedName ? ra.localizedName.UTF8String : "?";
-    e.status  = "èµ·å(ä»å)";
+    e.status  = "起動(今回)";
     e.binPath = ra.executableURL.path.UTF8String;
     e.rowKind = 2;
     if (e.binPath.empty()) return;
-    self.entries.insert(self.entries.begin(), e);
+    _entries.insert(_entries.begin(), e);
     [self reloadData];
 }
 
-/* çµäºã¤ãã³ã */
+/* 終了イベント */
 - (void)appDidTerminate:(NSNotification *)n {
     NSRunningApplication *ra = n.userInfo[NSWorkspaceApplicationKey];
     if (!ra) return;
     AppEntry e;
     e.name    = ra.localizedName ? ra.localizedName.UTF8String : "?";
-    e.status  = "çµäº(ä»å)";
+    e.status  = "終了(今回)";
     e.binPath = ra.executableURL.path.UTF8String;
     e.rowKind = 3;
     if (e.binPath.empty()) return;
-    self.entries.insert(self.entries.begin(), e);
+    _entries.insert(_entries.begin(), e);
     [self reloadData];
 }
 
 - (void)reloadData {
-    /* ç¶æåã®åè¨ç®: çµäºæ¸ã¿ãªãå®è¡ä¸­ãã©ã°ãå¤ã */
+    /* 状態列の再計算: 終了済みなら実行中フラグを外す */
     [self.table reloadData];
 }
 
-/* ââ NSTableViewDataSource ââ */
+/* ── NSTableViewDataSource ── */
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tv {
     (void)tv;
-    return (NSInteger)self.entries.size();
+    return (NSInteger)_entries.size();
 }
 
 - (id)tableView:(NSTableView *)tv
         objectValueForTableColumn:(NSTableColumn *)col
         row:(NSInteger)row {
     (void)tv;
-    if (row < 0 || (size_t)row >= self.entries.size()) return @"";
-    const AppEntry &e = self.entries[(size_t)row];
+    if (row < 0 || (size_t)row >= _entries.size()) return @"";
+    AppEntry e = _entries[(size_t)row];
     NSString *id = col.identifier;
     if ([id isEqualToString:@"name"])   return @(e.name.c_str());
     if ([id isEqualToString:@"status"]) return @(e.status.c_str());
@@ -312,21 +315,21 @@ static std::vector<AppEntry> runningApps() {
 - (void)tableViewSelectionDidChange:(NSNotification *)n {
     (void)n;
     NSInteger r = self.table.selectedRow;
-    if (r < 0 || (size_t)r >= self.entries.size()) return;
+    if (r < 0 || (size_t)r >= _entries.size()) return;
     self.pathLabel.stringValue =
-        @(self.entries[(size_t)r].binPath.c_str());
+        @(_entries[(size_t)r].binPath.c_str());
 }
 
-/* ââ neodax å®è¡ ââ */
+/* ── neodax 実行 ── */
 - (void)runAnalysis:(id)sender {
     (void)sender;
     NSInteger r = self.table.selectedRow;
-    if (r < 0 || (size_t)r >= self.entries.size()) {
+    if (r < 0 || (size_t)r >= _entries.size()) {
         self.outputView.string =
-            @"è¡ãé¸æãã¦ãããè§£æå®è¡ããæ¼ãã¦ãã ããã";
+            @"行を選択してから「解析実行」を押してください。";
         return;
     }
-    const AppEntry &e = self.entries[(size_t)r];
+    AppEntry e = _entries[(size_t)r];
 
     NSString *neodaxPath = self.neodaxPathField.stringValue;
     NSArray  *args = [self.argsField.stringValue
@@ -380,7 +383,7 @@ static std::vector<AppEntry> runningApps() {
 
 @end
 
-/* ââ main âââââââââââââââââââââââââââââââââââââââââââââââââââââââ */
+/* ── main ─────────────────────────────────────────────────────── */
 
 int main(int argc, const char *argv[]) {
     (void)argc; (void)argv;
