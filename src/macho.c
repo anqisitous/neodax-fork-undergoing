@@ -122,6 +122,18 @@ int dax_parse_macho(dax_binary_t *bin)
     uint64_t total_data  = 0;
     uint64_t image_end   = 0;
 
+    /* symtab/dysymtab for indirect (stub) symbol resolution */
+    uint32_t g_symoff = 0, g_nsyms = 0, g_stroff = 0, g_strsz = 0;
+    int      g_have_symtab = 0;
+    uint32_t g_indirectoff = 0, g_nindirect = 0;
+    int      g_have_dysym = 0;
+
+    /* S_SYMBOL_STUBS sections (__stubs): resolved after the load-command
+     * loop via the indirect symbol table so pthread_create / dispatch_async
+     * etc. get real names at their stub addresses. */
+    struct { uint64_t addr; uint64_t size; uint32_t r1; uint32_t r2; } stubsecs[16];
+    int nstubsecs = 0;
+
     for (uint32_t ci = 0; ci < ncmds; ci++) {
         if (cmd_off + sizeof(macho_load_cmd_t) > sz) break;
         const macho_load_cmd_t *lc = (const macho_load_cmd_t *)(data + cmd_off);
@@ -170,6 +182,16 @@ int dax_parse_macho(dax_binary_t *bin)
                 ds->size   = LE64(sec->size);
                 ds->offset = (uint64_t)LE32(sec->offset);
                 ds->flags  = LE32(sec->flags);
+
+                /* record symbol-stub sections for the post-pass */
+                if ((ds->flags & 0xFF) == MACHO_S_SYMBOL_STUBS &&
+                    nstubsecs < 16 && LE32(sec->reserved2) > 0) {
+                    stubsecs[nstubsecs].addr  = LE64(sec->addr);
+                    stubsecs[nstubsecs].size  = LE64(sec->size);
+                    stubsecs[nstubsecs].r1    = LE32(sec->reserved1);
+                    stubsecs[nstubsecs].r2    = LE32(sec->reserved2);
+                    nstubsecs++;
+                }
 
                 
                 uint32_t stype = ds->flags & 0xFF;
@@ -220,6 +242,10 @@ int dax_parse_macho(dax_binary_t *bin)
             symoff += (uint32_t)slice_base;
             stroff += (uint32_t)slice_base;
 
+            g_symoff = symoff; g_nsyms = nsyms;
+            g_stroff = stroff; g_strsz = strsz;
+            g_have_symtab = 1;
+
             if (nsyms > 0 && nsyms < DAX_MAX_SYMBOLS &&
                 symoff + nsyms * sizeof(macho_nlist64_t) <= bin->size &&
                 stroff + strsz <= bin->size) {
@@ -257,6 +283,21 @@ int dax_parse_macho(dax_binary_t *bin)
             sym_done:;
         }
 
+        /* LC_DYSYMTAB — indirect symbol table, used to name __stubs entries */
+        else if (cmd == MACHO_LC_DYSYMTAB && is64) {
+            const macho_dysymtab_cmd_t *dy =
+                (const macho_dysymtab_cmd_t *)(data + cmd_off);
+            size_t slice_base = (size_t)(data - bin->data);
+            uint32_t ioff = LE32(dy->indirectoff) + (uint32_t)slice_base;
+            uint32_t nind  = LE32(dy->nindirectsyms);
+            if (nind > 0 &&
+                (uint64_t)ioff + (uint64_t)nind * 4u <= bin->size) {
+                g_indirectoff = ioff;
+                g_nindirect   = nind;
+                g_have_dysym  = 1;
+            }
+        }
+
         cmd_off += cmdsize;
     }
 
@@ -265,6 +306,60 @@ int dax_parse_macho(dax_binary_t *bin)
         bin->entry = text_vmbase + entry_off;
     else if (text_vmbase > 0)
         bin->entry = text_vmbase;   
+
+    /* ── Stub symbol resolution ───────────────────────────────────────
+     * For every __stubs entry (S_SYMBOL_STUBS), look up the matching
+     * indirect symbol table entry (index = section reserved1 + stub no.),
+     * map it to a symtab entry and register the imported name at the stub
+     * address as SYM_IMPORT. This makes pthread_create / dispatch_async /
+     * pthread_join etc. resolvable by name on real Mach-O binaries, which
+     * the depflow spawn/join detection and the call graph rely on. */
+    if (g_have_dysym && g_have_symtab && nstubsecs > 0) {
+        int ssi;
+        for (ssi = 0; ssi < nstubsecs; ssi++) {
+            uint32_t stub_sz = stubsecs[ssi].r2;
+            uint32_t nstub = stub_sz ? (uint32_t)(stubsecs[ssi].size / stub_sz) : 0;
+            uint32_t k;
+            if (stubsecs[ssi].r1 >= g_nindirect) continue;
+            for (k = 0; k < nstub; k++) {
+                uint32_t ind_idx = stubsecs[ssi].r1 + k;
+                uint32_t raw_isym, isym;
+                const macho_nlist64_t *nl;
+                uint32_t strx;
+                const char *name;
+                dax_symbol_t *ns;
+                dax_symbol_t *grown;
+
+                if (ind_idx >= g_nindirect) break;
+                if (bin->nsymbols >= DAX_MAX_SYMBOLS) break;
+                raw_isym = LE32(*(const uint32_t *)(bin->data + g_indirectoff + (size_t)ind_idx * 4));
+                if (raw_isym & 0x80000000u) continue; /* INDIRECT_SYMBOL_LOCAL */
+                if (raw_isym & 0x40000000u) continue; /* INDIRECT_SYMBOL_ABS   */
+                isym = raw_isym & 0x00FFFFFFu;
+                if (isym >= g_nsyms) continue;
+
+                nl = (const macho_nlist64_t *)(bin->data + g_symoff +
+                                               (size_t)isym * sizeof(macho_nlist64_t));
+                strx = LE32(nl->n_strx);
+                if (strx >= g_strsz) continue;
+                name = (const char *)(bin->data + g_stroff + strx);
+                if (name[0] == '_') name++;
+                if (!name[0]) continue;
+
+                grown = (dax_symbol_t *)realloc(bin->symbols,
+                        (size_t)(bin->nsymbols + 1) * sizeof(dax_symbol_t));
+                if (!grown) break;
+                bin->symbols = grown;
+                ns = &bin->symbols[bin->nsymbols++];
+                memset(ns, 0, sizeof(*ns));
+                strncpy(ns->name, name, sizeof(ns->name) - 1);
+                ns->address = stubsecs[ssi].addr + (uint64_t)k * stub_sz;
+                ns->type    = SYM_IMPORT;
+            }
+        }
+        if (bin->nsymbols > 0) bin->is_stripped = 0;
+    }
+
 
     
     bin->base       = text_vmbase;

@@ -131,6 +131,29 @@ typedef struct {
     uint32_t strsize;
 } macho_symtab_cmd_t;
 
+/* LC_DYSYMTAB — dynamic symbol info incl. the indirect symbol table
+ * used to name __stubs entries. */
+typedef struct {
+    uint32_t cmd;
+    uint32_t cmdsize;
+    uint32_t ilocalsym;
+    uint32_t nlocalsym;
+    uint32_t iextdefsym;
+    uint32_t nextdefsym;
+    uint32_t iundefsym;
+    uint32_t nundefsym;
+    uint32_t indirectoff;
+    uint32_t nindirectsyms;
+    uint32_t extreloff;
+    uint32_t nextrel;
+    uint32_t locreloff;
+    uint32_t nlocrel;
+} macho_dysymtab_cmd_t;
+
+#define MACHO_INDIRECT_SYMBOL_LOCAL 0x80000000u
+#define MACHO_INDIRECT_SYMBOL_ABS   0x40000000u
+#define MACHO_S_SYMBOL_STUBS       0x8u
+
 #pragma pack(pop)
 
 int dax_parse_macho(dax_binary_t *bin);
