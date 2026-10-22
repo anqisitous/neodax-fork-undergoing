@@ -292,6 +292,24 @@ typedef struct {
     char     depflow_target_var[20];  /* --depflow-var name: 追跡開始変数(空なら戻り値) */
     int      depflow_depth;        /* --depflow-depth N: 逆向きトレースの最大深さ */
     char     depflow_dot[512];     /* --depflow-dot path: .dot出力先    */
+
+    /* 静的解析フレームワーク (Shogi AI / Bend 互換) */
+    int      static_analysis;       /* 静的解析パイプラインを有効化 */
+    int      classify_vars;         /* 変数分類を有効化 */
+    int      predict_execution;    /* 実行順序予測を有効化 */
+    int      detect_parallel;      /* 並列実行検出を有効化 */
+    int      track_state;           /* 状態追跡を有効化 */
+    int      beam_search;           /* ビームサーチ分析を有効化 */
+    int      shogi_mode;           /* 将棋AI特化モード */
+    int      bend_mode;            /* Bend言語風分析モード */
+    int      proof_based;          /* 証明ベースの状態追跡 */
+    int      parallel_complement;  /* 並列処理による未知領域補完 */
+    int      num_threads;          /* 並列処理スレッド数 */
+    char     dot_output[512];       /* DOT出力ファイルパス */
+    int      show_dep_graph;        /* 依存グラフを表示 */
+    int      show_exec_graph;       /* 実行グラフを表示 */
+    int      show_state_graph;      /* 状態グラフを表示 */
+    int      show_classification;   /* 変数分類を表示 */
 } dax_opts_t;
 
 #pragma pack(push,1)
