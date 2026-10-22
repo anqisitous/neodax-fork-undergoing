@@ -788,6 +788,19 @@ int main(int argc, char **argv) {
             if (!strcmp(argv[i], "--detect-parallel")) { opts.detect_parallel = 1; continue; }
             if (!strcmp(argv[i], "--track-state"))    { opts.track_state = 1; continue; }
             if (!strcmp(argv[i], "--beam-search"))    { opts.beam_search = 1; continue; }
+
+            if (!strcmp(argv[i], "--advanced") || !strcmp(argv[i], "--ai")) {
+                opts.static_analysis = 1;
+                opts.classify_vars = 1;
+                opts.predict_execution = 1;
+                opts.detect_parallel = 1;
+                opts.track_state = 1;
+                opts.beam_search = 1;
+
+                continue;
+            }
+                continue;
+            }
             if (!strcmp(argv[i], "--shogi"))        { opts.shogi_mode = 1; continue; }
             if (!strcmp(argv[i], "--bend"))         { opts.bend_mode = 1; continue; }
             if (!strcmp(argv[i], "--proof-based"))   { opts.proof_based = 1; continue; }
@@ -1404,8 +1417,14 @@ int main(int argc, char **argv) {
                     neodax_track_state(&ibin, &static_opts, stdout));
             }
             if (static_opts.dot_output[0]) {
-                DAX_RUN_PASS("dot-generate", opts.color,
-                    neodax_generate_dot(&ibin, &static_opts, static_opts.dot_output));
+                char svg_filename[512];
+                strncpy(svg_filename, static_opts.dot_output, sizeof(svg_filename) - 1);
+                char *ext = strrchr(svg_filename, '.');
+                if (!ext || strcmp(ext, ".svg") != 0) {
+                    strcat(svg_filename, ".svg");
+                }
+                DAX_RUN_PASS("svg-generate", opts.color,
+                    neodax_generate_svg(&ibin, &static_opts, svg_filename));
             }
             neodax_bridge_free(&ibin);
         }

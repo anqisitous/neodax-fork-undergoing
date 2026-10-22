@@ -8,6 +8,8 @@
 #include "static_analysis/parallel_detection.h"
 #include "static_analysis/state_tracking.h"
 
+#include "neodax_svg.h"
+
 /* Bend-inspired parallel execution types */
 typedef enum {
     BEND_PARALLEL_NONE = 0,
