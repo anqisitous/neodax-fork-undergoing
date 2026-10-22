@@ -1,0 +1,25 @@
+# Build artifacts
+.build/
+*.o
+*.dSYM/
+neodax
+js/neodax.node
+
+# npm
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# Analysis output
+*.daxc
+*.svg
+*.dot
+*.gdb
+out.txt
+analysis.txt
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
