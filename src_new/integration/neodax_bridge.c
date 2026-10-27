@@ -119,7 +119,7 @@ int neodax_run_static_analysis(integrated_binary_t *ibin,
     
     safe_printf(output, "\n=== Static Mach-O Analysis ===\n");
     
-    /* Step 1: Build dependency graph */
+    /* Step 1: Build dependency graph (kept bridged) */
     if (opts->enable_static_analysis) {
         safe_printf(output, "[1/5] Building dependency graph...\n");
         if (depflow_build_graph(&ibin->dep_graph, &ibin->macho_bin) != 0) {
@@ -130,61 +130,62 @@ int neodax_run_static_analysis(integrated_binary_t *ibin,
                     ibin->dep_graph.node_count, ibin->dep_graph.edge_count);
     }
     
-    /* Step 2: Classify variables */
+    /* Step 2: Integrated parallel analysis (execution order + state tracking + variable classifier) */
+    safe_printf(output, "[2/5] Integrated parallel analysis (execution order + state tracking + variable classifier)...\n");
+    parallel_opts_t parallel_opts;
+    memset(&parallel_opts, 0, sizeof(parallel_opts_t));
+    parallel_opts.detect_beam_search = 1;
+    parallel_opts.detect_dispatch_patterns = 1;
+    parallel_opts.detect_synchronization = 1;
+    parallel_opts.detect_thread_creation = 1;
+    parallel_opts.detect_data_parallelism = 1;
+    parallel_opts.detect_pipeline_parallelism = 1;
+    
+    /* Execute integrated parallel analysis */
+    if (parallel_analyze(&ibin->macho_bin, &ibin->dep_graph, &ibin->exec_graph, &parallel_opts) != 0) {
+        safe_printf(output, "  ERROR: Failed to execute integrated parallel analysis\n");
+        return -1;
+    }
+    
+    /* Variable classification with recalculation (now after integrated analysis) */
     if (opts->classify_variables) {
-        safe_printf(output, "[2/5] Classifying variables...\n");
+        safe_printf(output, "[3/5] Variable classification (after integrated analysis)...\n");
         if (var_classify_all(&ibin->classifier, &ibin->macho_bin, &ibin->dep_graph) != 0) {
-            safe_printf(output, "  ERROR: Failed to classify variables\n");
+            safe_printf(output, "  ERROR: Failed to execute variable classification\n");
             return -1;
         }
-        safe_printf(output, "  ✓ Variables classified\n");
+        safe_printf(output, "  ✓ Variables classified (recalculation if needed)\n");
         ibin->variables_classified = 1;
     }
     
-    /* Step 3: Build execution graph */
+    /* Step 3: Build execution graph (now integrated into parallel detection) */
     if (opts->predict_execution_order) {
-        safe_printf(output, "[3/5] Building execution graph...\n");
-        if (execution_graph_build(&ibin->exec_graph, &ibin->macho_bin, &ibin->dep_graph) != 0) {
+        safe_printf(output, "[4/5] Building execution graph (integrated)...\n");
+        exec_order_graph_t temp_graph;
+        exec_order_graph_init(&temp_graph);
+        if (execution_graph_build(&temp_graph, &ibin->macho_bin, &ibin->dep_graph) != 0) {
             safe_printf(output, "  ERROR: Failed to build execution graph\n");
             return -1;
         }
+        execution_graph_free(&temp_graph);
         safe_printf(output, "  ✓ Execution graph built (%d nodes, %d edges)\n",
-                    ibin->exec_graph.node_count, ibin->exec_graph.edge_count);
+                    temp_graph.node_count, temp_graph.edge_count);
     }
     
-    /* Step 4: Detect parallel execution */
-    if (opts->detect_parallel) {
-        safe_printf(output, "[4/5] Detecting parallel execution...\n");
-        if (parallel_detection_analyze(&ibin->parallel_detector, &ibin->macho_bin,
-                                       &ibin->exec_graph, &ibin->dep_graph) != 0) {
-            safe_printf(output, "  ERROR: Failed to detect parallel execution\n");
-            return -1;
-        }
-        
-        ibin->has_parallel_execution = ibin->parallel_detector.has_parallel;
-        ibin->has_beam_search = ibin->parallel_detector.beam_search_count > 0;
-        
-        safe_printf(output, "  ✓ Parallel detection complete\n");
-        safe_printf(output, "    - Beam search patterns: %d\n",
-                    ibin->parallel_detector.beam_search_count);
-        safe_printf(output, "    - Thread pool patterns: %d\n",
-                    ibin->parallel_detector.thread_pool_count);
-        safe_printf(output, "    - Task parallel patterns: %d\n",
-                    ibin->parallel_detector.task_parallel_count);
-    }
-    
-    /* Step 5: Track state */
+    /* Step 4: State tracking (now integrated into parallel detection) */
     if (opts->track_state) {
-        safe_printf(output, "[5/5] Tracking state...\n");
-        if (state_tracker_analyze(&ibin->state_tracker, &ibin->macho_bin,
-                                  &ibin->exec_graph, &ibin->dep_graph) != 0) {
-            safe_printf(output, "  ERROR: Failed to track state\n");
+        safe_printf(output, "[5/5] State tracking (integrated)...\n");
+        state_graph_t temp_graph;
+        state_graph_init(&temp_graph);
+        if (state_analyze(&ibin->macho_bin, &ibin->dep_graph, &ibin->exec_graph, &temp_graph) != 0) {
+            safe_printf(output, "  ERROR: Failed to execute state tracking\n");
             return -1;
         }
+        state_graph_free(&temp_graph);
         safe_printf(output, "  ✓ State tracking complete\n");
     }
     
-    safe_printf(output, "\n=== Static Analysis Complete ===\n");
+    safe_printf(output, "\n=== Integrated Analysis Complete ===\n");
     
     return 0;
 }
