@@ -1,8 +1,8 @@
 #ifndef EXECUTION_ORDER_H
 #define EXECUTION_ORDER_H
 
-#include "../core/macho_static.h"
-#include "../analysis/depflow.h"
+#include "macho_static.h"
+#include "depflow.h"
 
 // ============================================================================
 // Execution Order Prediction Module

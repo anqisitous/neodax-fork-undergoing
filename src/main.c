@@ -99,6 +99,7 @@ static void print_usage(void) {
     FLAGL("--poly",     NULL, "polymorphic obfuscation map  (mutation cluster detection)");
     FLAGL("--aire",     NULL, "AIRE: Assisted Intelligence Reverse Engineering insights");
     FLAGL("--vm-trace", NULL, "VM dispatch flow trace  (requires -I or prior emulation)");
+    FLAGL("--advanced-analysis", NULL, "advanced analysis: dependency flow, execution order, state tracking");
     FLAGL("--dsa",      NULL, "DSA: Dynamic Single Assignment over all functions");
     fprintf(o, "\n");
     fprintf(o, "  %s  -x%s   %senable standard suite%s  %s(-y -d -f -g -r -t -u -C -L -G -W)%s\n",
@@ -783,28 +784,26 @@ int main(int argc, char **argv) {
 
             /* 静的解析フレームワーク */
             if (!strcmp(argv[i], "--static-analysis")) { opts.static_analysis = 1; continue; }
-            if (!strcmp(argv[i], "--classify-vars"))  { opts.classify_vars = 1; continue; }
+            if (!strcmp(argv[i], "--classify-vars")) { opts.classify_vars = 1; continue; }
             if (!strcmp(argv[i], "--predict-execution")) { opts.predict_execution = 1; continue; }
             if (!strcmp(argv[i], "--detect-parallel")) { opts.detect_parallel = 1; continue; }
-            if (!strcmp(argv[i], "--track-state"))    { opts.track_state = 1; continue; }
-            if (!strcmp(argv[i], "--beam-search"))    { opts.beam_search = 1; continue; }
-
-            if (!strcmp(argv[i], "--advanced") || !strcmp(argv[i], "--ai")) {
-                opts.static_analysis = 1;
-                opts.classify_vars = 1;
-                opts.predict_execution = 1;
-                opts.detect_parallel = 1;
-                opts.track_state = 1;
-                opts.beam_search = 1;
-
-                continue;
-            }
-                continue;
-            }
-            if (!strcmp(argv[i], "--shogi"))        { opts.shogi_mode = 1; continue; }
-            if (!strcmp(argv[i], "--bend"))         { opts.bend_mode = 1; continue; }
-            if (!strcmp(argv[i], "--proof-based"))   { opts.proof_based = 1; continue; }
+            if (!strcmp(argv[i], "--track-state")) { opts.track_state = 1; continue; }
+            if (!strcmp(argv[i], "--beam-search")) { opts.beam_search = 1; continue; }
+            if (!strcmp(argv[i], "--shogi")) { opts.shogi_mode = 1; continue; }
             if (!strcmp(argv[i], "--parallel-complement")) { opts.parallel_complement = 1; continue; }
+            if (!strcmp(argv[i], "--bend")) { opts.use_bend_concepts = 1; continue; }
+            if (!strcmp(argv[i], "--proof-based")) { opts.proof_based_analysis = 1; continue; }
+
+            if (!strcmp(argv[i], "--advanced-analysis") ||
+                !strcmp(argv[i], "--advanced")) {
+                opts.static_analysis   = 1;
+                opts.classify_vars     = 1;
+                opts.predict_execution = 1;
+                opts.detect_parallel   = 1;
+                opts.track_state       = 1;
+                opts.beam_search       = 1;
+                continue;
+            }
             if (!strcmp(argv[i], "--threads")) {
                 if (i + 1 < argc) { opts.num_threads = atoi(argv[++i]); if (opts.num_threads <= 0) opts.num_threads = 4; }
                 continue;
@@ -1357,12 +1356,14 @@ int main(int argc, char **argv) {
 
     /* 静的解析フレームワーク (src_new/ 統合) */
     if (opts.static_analysis || opts.classify_vars || opts.predict_execution ||
-        opts.detect_parallel || opts.track_state || opts.shogi_mode || opts.bend_mode) {
+        opts.detect_parallel || opts.track_state || opts.beam_search ||
+        opts.shogi_mode || opts.parallel_complement || opts.use_bend_concepts ||
+        opts.proof_based_analysis) {
         integrated_binary_t ibin;
         static_analysis_opts_t static_opts;
         memset(&ibin, 0, sizeof(ibin));
         memset(&static_opts, 0, sizeof(static_opts));
-        
+
         /* オプション変換 */
         static_opts.enable_static_analysis = opts.static_analysis;
         static_opts.classify_variables = opts.classify_vars;
@@ -1371,34 +1372,24 @@ int main(int argc, char **argv) {
         static_opts.track_state = opts.track_state;
         static_opts.beam_search_analysis = opts.beam_search;
         static_opts.shogi_mode = opts.shogi_mode;
-        static_opts.bend_mode = opts.bend_mode;
-        static_opts.proof_based_analysis = opts.proof_based;
         static_opts.parallel_complement = opts.parallel_complement;
+        static_opts.use_bend_concepts = opts.use_bend_concepts;
+        static_opts.proof_based_analysis = opts.proof_based_analysis;
         static_opts.num_threads = opts.num_threads;
         static_opts.show_dependency_graph = opts.show_dep_graph;
         static_opts.show_execution_graph = opts.show_exec_graph;
         static_opts.show_state_graph = opts.show_state_graph;
         static_opts.show_classification = opts.show_classification;
         strncpy(static_opts.dot_output, opts.dot_output, sizeof(static_opts.dot_output) - 1);
-        
+
         /* 初期化 */
         if (neodax_bridge_init(&ibin, bin.data, bin.size) == 0) {
             if (opts.static_analysis || opts.classify_vars || opts.predict_execution ||
-                opts.detect_parallel || opts.track_state) {
+                opts.detect_parallel || opts.track_state || opts.beam_search ||
+                opts.shogi_mode || opts.parallel_complement || opts.use_bend_concepts ||
+                opts.proof_based_analysis) {
                 DAX_RUN_PASS("static-analysis", opts.color,
                     neodax_run_static_analysis(&ibin, &static_opts, stdout));
-            }
-            if (opts.parallel_complement) {
-                DAX_RUN_PASS("parallel-complement", opts.color,
-                    neodax_parallel_complement(&ibin, &static_opts, stdout));
-            }
-            if (opts.shogi_mode) {
-                DAX_RUN_PASS("shogi-analysis", opts.color,
-                    neodax_shogi_analysis(&ibin, &static_opts, stdout));
-            }
-            if (opts.bend_mode) {
-                DAX_RUN_PASS("bend-analysis", opts.color,
-                    neodax_bend_analysis(&ibin, &static_opts, stdout));
             }
             if (opts.classify_vars || opts.show_classification) {
                 DAX_RUN_PASS("classify-vars", opts.color,
@@ -1415,6 +1406,18 @@ int main(int argc, char **argv) {
             if (opts.track_state) {
                 DAX_RUN_PASS("track-state", opts.color,
                     neodax_track_state(&ibin, &static_opts, stdout));
+            }
+            if (opts.shogi_mode) {
+                DAX_RUN_PASS("shogi-analysis", opts.color,
+                    neodax_shogi_analysis(&ibin, &static_opts, stdout));
+            }
+            if (opts.use_bend_concepts || opts.proof_based_analysis) {
+                DAX_RUN_PASS("bend-analysis", opts.color,
+                    neodax_bend_analysis(&ibin, &static_opts, stdout));
+            }
+            if (opts.parallel_complement) {
+                DAX_RUN_PASS("parallel-complement", opts.color,
+                    neodax_parallel_complement(&ibin, &static_opts, stdout));
             }
             if (static_opts.dot_output[0]) {
                 char svg_filename[512];

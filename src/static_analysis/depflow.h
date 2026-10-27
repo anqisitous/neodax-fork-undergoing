@@ -1,7 +1,7 @@
 #ifndef DEPFLOW_H
 #define DEPFLOW_H
 
-#include "../core/macho_static.h"
+#include "macho_static.h"
 
 // ============================================================================
 // Data Dependency Flow Analysis (依存性追跡システム)

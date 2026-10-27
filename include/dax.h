@@ -9,7 +9,7 @@
 #define DAX_MAX_INSN_LEN   15
 #define DAX_MAX_MNEMONIC   32
 #define DAX_MAX_OPERANDS   256
-#define DAX_MAX_SECTIONS   128
+#define DAX_MAX_SECTIONS   256
 #define DAX_BANNER_WIDTH   72
 #define DAX_MAX_SYMBOLS    8192
 #define DAX_MAX_XREFS      16384
@@ -83,12 +83,21 @@ typedef struct {
     dax_sym_type_t  type;
     uint64_t        size;
     int             is_entry;
+    /* macho_symbol_t compatibility fields */
+    int             is_global;
+    int             is_weak;
+    int             is_undefined;
+    uint32_t        section_idx;
 } dax_symbol_t;
 
 typedef struct {
     uint64_t    from;
     uint64_t    to;
+    int         type;        /* macho_xref_type_t */
     int         is_call;
+    int         is_conditional;
+    int         is_indirect;
+    uint64_t    resolved_target;
 } dax_xref_t;
 
 typedef struct {
@@ -100,6 +109,12 @@ typedef struct {
     uint32_t    block_count;
     uint8_t     has_loops;
     uint8_t     has_calls;
+    uint8_t     has_branches;
+    uint8_t     has_indirect_calls;
+    uint64_t    stack_frame_size;
+    uint64_t    local_vars_size;
+    uint64_t    arg_count;
+    uint64_t    return_type;
 } dax_func_t;
 
 typedef struct {
@@ -124,10 +139,21 @@ typedef struct {
     uint8_t     length;
     char        mnemonic[DAX_MAX_MNEMONIC];
     char        operands[DAX_MAX_OPERANDS];
+    /* macho_insn_t compatibility fields */
+    uint8_t     is_call;
+    uint8_t     is_branch;
+    uint8_t     is_conditional;
+    uint8_t     is_indirect;
+    uint8_t     is_return;
+    uint8_t     is_nop;
+    uint8_t     affects_flags;
+    uint8_t     reads_memory;
+    uint8_t     writes_memory;
 } dax_insn_t;
 
 typedef struct {
     char            name[64];
+    char            segname[16];
     uint64_t        offset;
     uint64_t        vaddr;
     uint64_t        size;
@@ -135,6 +161,10 @@ typedef struct {
     dax_sec_type_t  type;
     uint32_t        insn_count;
     uint64_t        file_offset;
+    /* macho_section_t compatibility fields */
+    int             executable;
+    int             writable;
+    int             readable;
 } dax_section_t;
 
 typedef struct {
@@ -184,6 +214,28 @@ typedef struct {
     int                 count;
 } aire_memory_t;
 
+/* ── Static Analysis Engine handles ── */
+typedef struct depflow_graph_t          depflow_graph_t;
+typedef struct exec_order_graph_t       exec_order_graph_t;
+typedef struct parallel_analysis_t      parallel_analysis_t;
+typedef struct state_tracker_t          state_tracker_t;
+typedef struct var_classifier_t         var_classifier_t;
+
+/* Static analysis results attached to the binary */
+typedef struct {
+    depflow_graph_t      *dep_graph;
+    exec_order_graph_t   *exec_graph;
+    parallel_analysis_t  *parallel;
+    state_tracker_t      *state_tracker;
+    var_classifier_t     *classifier;
+
+    int has_beam_search;
+    int has_parallel_execution;
+    int execution_order_determined;
+    int variables_classified;
+    int static_analysis_done;
+} dax_static_state_t;
+
 typedef struct {
     uint8_t         *data;
     size_t           size;
@@ -203,13 +255,20 @@ typedef struct {
     dax_xref_t      *xrefs;
     int              nxrefs;
     dax_func_t      *functions;
-    int              nfunctions;
+    int             nfunctions;
     dax_block_t     *blocks;
-    int              nblocks;
+    int             nblocks;
+    dax_insn_t      *insns;
     dax_comment_t   *comments;
-    int              ncomments;
+    int             ncomments;
     dax_ustring_t   *ustrings;
-    int              nustrings;
+    int             nustrings;
+    void            *dependencies;
+    void            *call_chains;
+    void            *execution_paths;
+    void            *parallel_info;
+    void            *variables;
+    void            *state_checkpoints;
     uint32_t         total_insns;
     uint64_t         code_size;
     uint64_t         data_size;
@@ -241,6 +300,34 @@ typedef struct {
     int       obf_score_opaque;
     int       obf_score_indirect;
     int       obf_score_antidebug;
+
+    /* ── Mach-O static analysis compatibility fields ── */
+    uint32_t   filetype;
+    uint32_t   cputype;
+    uint32_t   cpusubtype;
+    uint32_t   flags;
+    int        symbols_allocated;
+    int        functions_allocated;
+    int        xrefs_allocated;
+    int        blocks_allocated;
+    int        ninsns;
+    int        insns_allocated;
+    int        ndependencies;
+    int        dependencies_allocated;
+    int        ncall_chains;
+    int        call_chains_allocated;
+    int        nexecution_paths;
+    int        execution_paths_allocated;
+    int        nparallel_info;
+    int        parallel_info_allocated;
+    int        nvariables;
+    int        variables_allocated;
+    int        nstate_checkpoints;
+    int        state_checkpoints_allocated;
+    int        is_analyzed;
+
+    /* ── Static Analysis Engine (NeoDAX Static Framework) ── */
+    dax_static_state_t *static_state;
 
     /* ── polymorphic obfuscation map ── */
     dax_poly_region_t poly_regions[DAX_POLY_MAX];
@@ -293,17 +380,17 @@ typedef struct {
     int      depflow_depth;        /* --depflow-depth N: 逆向きトレースの最大深さ */
     char     depflow_dot[512];     /* --depflow-dot path: .dot出力先    */
 
-    /* 静的解析フレームワーク (Shogi AI / Bend 互換) */
+    /* 静的解析フレームワーク (汎用的高度分析) */
     int      static_analysis;       /* 静的解析パイプラインを有効化 */
     int      classify_vars;         /* 変数分類を有効化 */
     int      predict_execution;    /* 実行順序予測を有効化 */
     int      detect_parallel;      /* 並列実行検出を有効化 */
     int      track_state;           /* 状態追跡を有効化 */
     int      beam_search;           /* ビームサーチ分析を有効化 */
-    int      shogi_mode;           /* 将棋AI特化モード */
-    int      bend_mode;            /* Bend言語風分析モード */
-    int      proof_based;          /* 証明ベースの状態追跡 */
-    int      parallel_complement;  /* 並列処理による未知領域補完 */
+    int      shogi_mode;            /* 将棋AI特化解析を有効化 */
+    int      parallel_complement;   /* 並列補完（欠落情報の並列読み取り）を有効化 */
+    int      use_bend_concepts;     /* Bend言語概念（並列実行・状態証明）を有効化 */
+    int      proof_based_analysis;  /* 証明ベース状態追跡を有効化 */
     int      num_threads;          /* 並列処理スレッド数 */
     char     dot_output[512];       /* DOT出力ファイルパス */
     int      show_dep_graph;        /* 依存グラフを表示 */

@@ -142,7 +142,13 @@ typedef struct {
     uint32_t nextdefsym;
     uint32_t iundefsym;
     uint32_t nundefsym;
-    uint32_t indirectoff;
+    uint32_t tocoff;
+    uint32_t ntoc;
+    uint32_t modtaboff;
+    uint32_t nmodtab;
+    uint32_t extrefsymoff;
+    uint32_t nextrefsyms;
+    uint32_t indirectsymoff;
     uint32_t nindirectsyms;
     uint32_t extreloff;
     uint32_t nextrel;

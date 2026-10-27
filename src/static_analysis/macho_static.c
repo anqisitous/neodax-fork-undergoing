@@ -20,6 +20,10 @@ static uint64_t bswap64(uint64_t v) {
            (uint64_t)bswap32((uint32_t)(v >> 32));
 }
 
+#define min(a, b) (((a) < (b)) ? (a) : (b))
+
+#define LE16(p) (((uint16_t)(p)[0]) | ((uint16_t)(p)[1] << 8))
+
 // ============================================================================
 // Initialization and Cleanup
 // ============================================================================
@@ -493,11 +497,11 @@ int macho_parse_sections(macho_binary_t *bin, const uint8_t *data, size_t size) 
                 
                 const macho_section64_t *sec = (const macho_section64_t *)(data + sec_off);
                 
-                macho_section_t *s = &bin->sections[bin->nsections++];
+                dax_section_t *s = &bin->sections[bin->nsections++];
                 
                 // Copy section name
                 strncpy(s->segname, seg->segname, 16);
-                s->segname[16] = '\0';
+                s->segname[15] = '\0';
                 strncpy(s->name, sec->sectname, 16);
                 s->name[16] = '\0';
                 
@@ -556,10 +560,10 @@ int macho_parse_sections(macho_binary_t *bin, const uint8_t *data, size_t size) 
                 
                 const macho_section32_t *sec = (const macho_section32_t *)(data + sec_off);
                 
-                macho_section_t *s = &bin->sections[bin->nsections++];
+                dax_section_t *s = &bin->sections[bin->nsections++];
                 
                 strncpy(s->segname, seg->segname, 16);
-                s->segname[16] = '\0';
+                s->segname[15] = '\0';
                 strncpy(s->name, sec->sectname, 16);
                 s->name[16] = '\0';
                 
@@ -728,7 +732,7 @@ int macho_parse_symbols(macho_binary_t *bin, const uint8_t *data, size_t size) {
         uint32_t str_idx = LE32(nlist->n_strx);
         uint8_t n_type = nlist->n_type;
         uint8_t n_sect = nlist->n_sect;
-        int16_t n_desc = LE16(nlist->n_desc);
+        int16_t n_desc = nlist->n_desc;
         
         if (str_idx >= strsize) continue;
         
@@ -757,34 +761,34 @@ int macho_parse_symbols(macho_binary_t *bin, const uint8_t *data, size_t size) {
         
         switch (n_type & MACHO_N_TYPE) {
             case MACHO_N_UNDF:
-                sym->type = MACHO_SYMBOL_TYPE_UNKNOWN;
+                sym->type = SYM_UNKNOWN;
                 if ((n_type & MACHO_N_EXT) && (n_desc & 0x10)) {
-                    sym->type = MACHO_SYMBOL_TYPE_WEAK;
+                    sym->type = SYM_WEAK;
                 }
                 sym->is_undefined = 1;
                 break;
             case MACHO_N_ABS:
-                sym->type = MACHO_SYMBOL_TYPE_OBJECT;
+                sym->type = SYM_OBJECT;
                 break;
             case MACHO_N_SECT:
                 if (n_sect > 0 && n_sect <= bin->nsections) {
                     // Check if this is in a code section
-                    macho_section_t *sec = &bin->sections[n_sect - 1];
+                    dax_section_t *sec = &bin->sections[n_sect - 1];
                     if (sec->type == MACHO_SEC_TYPE_CODE) {
-                        sym->type = MACHO_SYMBOL_TYPE_FUNC;
+                        sym->type = SYM_FUNC;
                     } else {
-                        sym->type = MACHO_SYMBOL_TYPE_OBJECT;
+                        sym->type = SYM_OBJECT;
                     }
                 } else {
-                    sym->type = MACHO_SYMBOL_TYPE_OBJECT;
+                    sym->type = SYM_OBJECT;
                 }
                 break;
             case MACHO_N_INDR:
-                sym->type = MACHO_SYMBOL_TYPE_IMPORT;
+                sym->type = SYM_IMPORT;
                 sym->is_undefined = 1;
                 break;
             default:
-                sym->type = MACHO_SYMBOL_TYPE_UNKNOWN;
+                sym->type = SYM_UNKNOWN;
                 break;
         }
         
@@ -793,7 +797,7 @@ int macho_parse_symbols(macho_binary_t *bin, const uint8_t *data, size_t size) {
         sym->is_entry = 0;
         
         // Check if this is the entry point
-        if (sym->address == bin->entry && sym->type == MACHO_SYMBOL_TYPE_FUNC) {
+        if (sym->address == bin->entry && sym->type == SYM_FUNC) {
             sym->is_entry = 1;
         }
     }
@@ -850,24 +854,24 @@ int macho_analyze(macho_binary_t *bin, macho_opts_t *opts) {
     }
     
     // Execution order analysis
-    if (opts && opts->execution_order) {
-        if (macho_analyze_execution_order(bin) != 0) {
+    if (opts && opts->predict_execution) {
+        if (exec_order_analyze(bin) != 0) {
             fprintf(stderr, "macho: Failed to analyze execution order\n");
             // Non-fatal
         }
     }
     
     // Parallel execution detection
-    if (opts && opts->parallel_detection) {
-        if (macho_detect_parallel_execution(bin) != 0) {
+    if (opts && opts->detect_parallel) {
+        if (parallel_detect_analyze(bin) != 0) {
             fprintf(stderr, "macho: Failed to detect parallel execution\n");
             // Non-fatal
         }
     }
     
     // Beam search pattern analysis
-    if (opts && opts->beam_search_analysis) {
-        if (macho_analyze_beam_search_patterns(bin) != 0) {
+    if (opts && opts->beam_search) {
+        if (parallel_detect_beam_search(bin) != 0) {
             fprintf(stderr, "macho: Failed to analyze beam search patterns\n");
             // Non-fatal
         }
@@ -894,7 +898,7 @@ int macho_detect_functions(macho_binary_t *bin) {
         for (int i = 0; i < bin->nsymbols; i++) {
             macho_symbol_t *sym = &bin->symbols[i];
             
-            if (sym->type == MACHO_SYMBOL_TYPE_FUNC) {
+            if (sym->type == SYM_FUNC) {
                 macho_function_t *func = &bin->functions[bin->nfunctions++];
                 
                 func->start = sym->address;
@@ -965,7 +969,7 @@ int macho_analyze_dependencies(macho_binary_t *bin, macho_opts_t *opts) {
 // Execution Order Analysis (Stub)
 // ============================================================================
 
-int macho_analyze_execution_order(macho_binary_t *bin) {
+int exec_order_analyze(macho_binary_t *bin) {
     // Placeholder
     return 0;
 }
@@ -974,7 +978,7 @@ int macho_analyze_execution_order(macho_binary_t *bin) {
 // Parallel Execution Detection (Stub)
 // ============================================================================
 
-int macho_detect_parallel_execution(macho_binary_t *bin) {
+int parallel_detect_analyze(macho_binary_t *bin) {
     // Placeholder
     return 0;
 }
@@ -983,7 +987,7 @@ int macho_detect_parallel_execution(macho_binary_t *bin) {
 // Beam Search Pattern Analysis (Stub)
 // ============================================================================
 
-int macho_analyze_beam_search_patterns(macho_binary_t *bin) {
+int parallel_detect_beam_search(macho_binary_t *bin) {
     // Placeholder
     return 0;
 }
@@ -1011,6 +1015,20 @@ int macho_analyze_regression(macho_binary_t *bin) {
 // ============================================================================
 
 int macho_build_state_checkpoints(macho_binary_t *bin) {
+    // Placeholder
+    return 0;
+}
+
+// ============================================================================
+// Cross-module Analysis Stubs
+// ============================================================================
+
+int exec_order_analyze(macho_binary_t *bin) {
+    // Placeholder
+    return 0;
+}
+
+int parallel_detect_analyze(macho_binary_t *bin) {
     // Placeholder
     return 0;
 }

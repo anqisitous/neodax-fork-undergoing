@@ -1,7 +1,7 @@
 #ifndef VARIABLE_CLASSIFIER_H
 #define VARIABLE_CLASSIFIER_H
 
-#include "../core/macho_static.h"
+#include "macho_static.h"
 #include "depflow.h"
 
 // ============================================================================

@@ -10,26 +10,7 @@
 
 #include "neodax_svg.h"
 
-/* Bend-inspired parallel execution types */
-typedef enum {
-    BEND_PARALLEL_NONE = 0,
-    BEND_PARALLEL_BEAM_SEARCH,
-    BEND_PARALLEL_TASK,
-    BEND_PARALLEL_DATA,
-    BEND_PARALLEL_PIPELINE,
-    BEND_PARALLEL_MAP_REDUCE
-} bend_parallel_type_t;
 
-/* Shogi AI specific analysis types */
-typedef enum {
-    SHOGI_ANALYSIS_NONE = 0,
-    SHOGI_ANALYSIS_BOARD_STATE,
-    SHOGI_ANALYSIS_MOVE_GENERATION,
-    SHOGI_ANALYSIS_SEARCH_TREE,
-    SHOGI_ANALYSIS_EVALUATION,
-    SHOGI_ANALYSIS_BEAM_SEARCH,
-    SHOGI_ANALYSIS_FULL
-} shogi_analysis_type_t;
 
 /* Static analysis options */
 typedef struct {
@@ -39,8 +20,6 @@ typedef struct {
     int predict_execution_order;
     int track_state;
     int beam_search_analysis;
-    int shogi_mode;
-    int parallel_complement;
     int num_threads;
     
     /* Output options */
@@ -54,16 +33,8 @@ typedef struct {
     int max_depth;
     int max_iterations;
     
-    /* Bend-specific options */
-    int use_bend_concepts;
+    /* Generic analysis options */
     int proof_based_analysis;
-    
-    /* Shogi-specific options */
-    shogi_analysis_type_t shogi_analysis;
-    int track_board_state;
-    int track_move_history;
-    int track_search_tree;
-    int track_evaluation;
 } static_analysis_opts_t;
 
 /* Integrated binary structure */
@@ -81,8 +52,7 @@ typedef struct {
     int execution_order_determined;
     int variables_classified;
     
-    /* Bend-inspired state */
-    bend_parallel_type_t parallel_type;
+    /* Generic state fields */
     int has_proof_based_analysis;
 } integrated_binary_t;
 
@@ -96,21 +66,6 @@ void neodax_bridge_free(integrated_binary_t *ibin);
 int neodax_run_static_analysis(integrated_binary_t *ibin, 
                                 static_analysis_opts_t *opts,
                                 FILE *output);
-
-/* Parallel processing for complementing unknown areas */
-int neodax_parallel_complement(integrated_binary_t *ibin,
-                               static_analysis_opts_t *opts,
-                               FILE *output);
-
-/* Shogi AI specific analysis */
-int neodax_shogi_analysis(integrated_binary_t *ibin,
-                          static_analysis_opts_t *opts,
-                          FILE *output);
-
-/* Bend-inspired analysis */
-int neodax_bend_analysis(integrated_binary_t *ibin,
-                         static_analysis_opts_t *opts,
-                         FILE *output);
 
 /* Variable classification wrapper */
 int neodax_classify_variables(integrated_binary_t *ibin,

@@ -154,6 +154,7 @@ detect_compiler() {
         -Wno-unused-function \
         -Wno-format-truncation \
         -I./include \
+        -I./src/static_analysis \
         -std=c99 \
         -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0"
 
@@ -197,7 +198,14 @@ SRCS="src/main.c src/loader.c src/disasm.c src/x86_decode.c \
       src/cfg.c src/daxc.c src/plugin.c src/interactive.c src/loops.c \
       src/callgraph.c src/correct.c src/riscv_decode.c src/unicode.c \
       src/sha256.c src/symexec.c src/decomp.c src/emulate.c \
-      src/entropy.c src/dsa.c src/macho.c src/hardening.c src/config.c"
+      src/entropy.c src/dsa.c src/macho.c src/hardening.c src/config.c \
+      src/integration/neodax_bridge.c src/integration/neodax_svg.c \
+      src/static_analysis/macho_static.c \
+      src/static_analysis/depflow.c \
+      src/static_analysis/variable_classifier.c \
+      src/static_analysis/execution_order.c \
+      src/static_analysis/parallel_detection.c \
+      src/static_analysis/state_tracking.c"
 
 do_compile() {
     detect_compiler

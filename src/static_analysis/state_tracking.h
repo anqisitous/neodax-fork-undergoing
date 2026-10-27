@@ -2,9 +2,9 @@
 #define STATE_TRACKING_H
 
 #include <string.h>
-#include "../core/macho_static.h"
-#include "../analysis/depflow.h"
-#include "../flow/execution_order.h"
+#include "macho_static.h"
+#include "depflow.h"
+#include "execution_order.h"
 
 // ============================================================================
 // State Tracking and Regression Analysis Module
