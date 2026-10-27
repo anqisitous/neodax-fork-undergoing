@@ -1,8 +1,10 @@
 #include "macho_static.h"
+#include "arm64.h"   /* 旧 neodax エンジンの ARM64 デコーダ (src/arm64_decode.c) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#define min(a,b) (((a)<(b))?(a):(b))
 
 // ============================================================================
 // Mach-O Static Analysis Implementation
@@ -237,13 +239,16 @@ int macho_parse_header(macho_binary_t *bin, const uint8_t *data, size_t size) {
     int is64 = 0;
     int swap = 0;
     
-    if (magic == MACHO_MAGIC_64_LE) {
+    /* magic は LE ホストでの読み値。
+       MH_MAGIC(MACHO_MAGIC_*) = ファイルもホストと同じ LE → swap 不要。
+       MH_CIGAM(MACHO_MAGIC_*_LE) = ファイルは BE → swap 必要。 */
+    if (magic == MACHO_MAGIC_64) {
         is64 = 1; swap = 0;
-    } else if (magic == MACHO_MAGIC_64) {
+    } else if (magic == MACHO_MAGIC_64_LE) {
         is64 = 1; swap = 1;
-    } else if (magic == MACHO_MAGIC_32_LE) {
-        is64 = 0; swap = 0;
     } else if (magic == MACHO_MAGIC_32) {
+        is64 = 0; swap = 0;
+    } else if (magic == MACHO_MAGIC_32_LE) {
         is64 = 0; swap = 1;
     } else {
         fprintf(stderr, "macho: unrecognized Mach-O magic 0x%08X\n", magic);
@@ -323,7 +328,7 @@ int macho_parse_load_commands(macho_binary_t *bin, const uint8_t *data, size_t s
     
     uint32_t magic = *(const uint32_t *)data;
     int is64 = (magic == MACHO_MAGIC_64 || magic == MACHO_MAGIC_64_LE) ? 1 : 0;
-    int swap = (magic == MACHO_MAGIC_64 || magic == MACHO_MAGIC_32) ? 1 : 0;
+    int swap = (magic == MACHO_MAGIC_64_LE || magic == MACHO_MAGIC_32_LE) ? 1 : 0;
     
     #define LE32(v) (swap ? bswap32(v) : (v))
     #define LE64(v) (swap ? bswap64(v) : (v))
@@ -461,7 +466,7 @@ int macho_parse_sections(macho_binary_t *bin, const uint8_t *data, size_t size) 
     
     uint32_t magic = *(const uint32_t *)data;
     int is64 = (magic == MACHO_MAGIC_64 || magic == MACHO_MAGIC_64_LE) ? 1 : 0;
-    int swap = (magic == MACHO_MAGIC_64 || magic == MACHO_MAGIC_32) ? 1 : 0;
+    int swap = (magic == MACHO_MAGIC_64_LE || magic == MACHO_MAGIC_32_LE) ? 1 : 0;
     
     #define LE32(v) (swap ? bswap32(v) : (v))
     #define LE64(v) (swap ? bswap64(v) : (v))
@@ -497,7 +502,7 @@ int macho_parse_sections(macho_binary_t *bin, const uint8_t *data, size_t size) 
                 
                 // Copy section name
                 strncpy(s->segname, seg->segname, 16);
-                s->segname[16] = '\0';
+                s->segname[15] = '\0';
                 strncpy(s->name, sec->sectname, 16);
                 s->name[16] = '\0';
                 
@@ -559,7 +564,7 @@ int macho_parse_sections(macho_binary_t *bin, const uint8_t *data, size_t size) 
                 macho_section_t *s = &bin->sections[bin->nsections++];
                 
                 strncpy(s->segname, seg->segname, 16);
-                s->segname[16] = '\0';
+                s->segname[15] = '\0';
                 strncpy(s->name, sec->sectname, 16);
                 s->name[16] = '\0';
                 
@@ -671,7 +676,7 @@ int macho_parse_symbols(macho_binary_t *bin, const uint8_t *data, size_t size) {
     
     uint32_t magic = *(const uint32_t *)data;
     int is64 = (magic == MACHO_MAGIC_64 || magic == MACHO_MAGIC_64_LE) ? 1 : 0;
-    int swap = (magic == MACHO_MAGIC_64 || magic == MACHO_MAGIC_32) ? 1 : 0;
+    int swap = (magic == MACHO_MAGIC_64_LE || magic == MACHO_MAGIC_32_LE) ? 1 : 0;
     
     #define LE32(v) (swap ? bswap32(v) : (v))
     #define LE64(v) (swap ? bswap64(v) : (v))
@@ -728,7 +733,7 @@ int macho_parse_symbols(macho_binary_t *bin, const uint8_t *data, size_t size) {
         uint32_t str_idx = LE32(nlist->n_strx);
         uint8_t n_type = nlist->n_type;
         uint8_t n_sect = nlist->n_sect;
-        int16_t n_desc = LE16(nlist->n_desc);
+        int16_t n_desc = nlist->n_desc;
         
         if (str_idx >= strsize) continue;
         
@@ -884,6 +889,9 @@ int macho_analyze(macho_binary_t *bin, macho_opts_t *opts) {
 int macho_detect_functions(macho_binary_t *bin) {
     // This is a placeholder - actual implementation would use
     // symbol information and heuristic analysis
+
+    /* 既に検出済みなら再確保しない (冪等) */
+    if (bin->functions) return 0;
     
     if (bin->nsymbols > 0) {
         // Allocate function array
@@ -916,21 +924,244 @@ int macho_detect_functions(macho_binary_t *bin) {
 }
 
 // ============================================================================
-// CFG Building (Stub)
+// Cross-reference / function-bound analysis
+//
+// 旧 neodax エンジンの ARM64 デコーダ (arm64_decode.c の a64_decode) を呼び、
+// 分岐/呼び出しから xref を構築する。depflow はこの xref からのみ
+// 制御フロー edges を作るため、xref が無いと edges=0 になる。
 // ============================================================================
 
-int macho_build_cfg(macho_binary_t *bin) {
-    // Placeholder - actual implementation would disassemble
-    // and build control flow graph
+static int nx_add_xref(macho_binary_t *bin, uint64_t from, uint64_t to,
+                       macho_xref_type_t type, int is_call, int is_cond, int is_indirect) {
+    if (bin->nxrefs >= bin->xrefs_allocated) {
+        int ncap = bin->xrefs_allocated ? bin->xrefs_allocated * 2 : 4096;
+        macho_xref_t *nx = (macho_xref_t *)realloc(bin->xrefs,
+                                                   (size_t)ncap * sizeof(macho_xref_t));
+        if (!nx) return -1;
+        bin->xrefs = nx;
+        bin->xrefs_allocated = ncap;
+    }
+    macho_xref_t *x = &bin->xrefs[bin->nxrefs++];
+    memset(x, 0, sizeof(*x));
+    x->from = from;
+    x->to = to;
+    x->type = type;
+    x->is_call = is_call;
+    x->is_conditional = is_cond;
+    x->is_indirect = is_indirect;
+    x->resolved_target = is_indirect ? 0 : to;
+    return 0;
+}
+
+static int nx_addr_in_image(macho_binary_t *bin, uint64_t a) {
+    uint64_t hi = bin->image_size;
+    if (hi == 0) {
+        for (int s = 0; s < bin->nsections; s++) {
+            uint64_t e = bin->sections[s].vaddr + bin->sections[s].size;
+            if (e > hi) hi = e;
+        }
+    }
+    return hi != 0 && a >= bin->base && a < hi;
+}
+
+/* 関数 end を「次に大きい関数/シンボル先頭」で確定する。
+   depflow の関数↔変数エッジは func->end を使うため必須。 */
+static void nx_compute_function_bounds(macho_binary_t *bin) {
+    uint64_t limit = bin->image_size;
+    if (limit == 0) {
+        for (int s = 0; s < bin->nsections; s++) {
+            uint64_t e = bin->sections[s].vaddr + bin->sections[s].size;
+            if (e > limit) limit = e;
+        }
+    }
+    for (int i = 0; i < bin->nfunctions; i++) {
+        uint64_t start = bin->functions[i].start;
+        uint64_t end = (limit > start) ? limit : start + 4;
+        for (int j = 0; j < bin->nfunctions; j++) {
+            uint64_t s = bin->functions[j].start;
+            if (s > start && s < end) end = s;
+        }
+        for (int j = 0; j < bin->nsymbols; j++) {
+            uint64_t s = bin->symbols[j].address;
+            if (s > start && s < end) end = s;
+        }
+        bin->functions[i].end = end;
+    }
+}
+
+static int nx_build_xrefs_arm64(macho_binary_t *bin) {
+    if (!bin->data) return -1;
+    for (int s = 0; s < bin->nsections; s++) {
+        macho_section_t *sec = &bin->sections[s];
+        if (!(sec->executable || sec->type == MACHO_SEC_TYPE_CODE)) continue;
+
+        for (uint64_t off = 0; off + 4 <= sec->size; off += 4) {
+            size_t fpos = (size_t)sec->file_offset + (size_t)off;
+            if (fpos + 4 > bin->size) break;
+
+            uint32_t raw = (uint32_t)bin->data[fpos]
+                         | ((uint32_t)bin->data[fpos + 1] << 8)
+                         | ((uint32_t)bin->data[fpos + 2] << 16)
+                         | ((uint32_t)bin->data[fpos + 3] << 24);
+            uint64_t addr = sec->vaddr + off;
+
+            a64_insn_t insn;
+            a64_decode(raw, addr, &insn);
+            const char *m = insn.mnemonic;
+
+            if (!strcmp(m, "bl") || !strcmp(m, "b") ||
+                !strcmp(m, "cbz") || !strcmp(m, "cbnz") ||
+                !strcmp(m, "tbz") || !strcmp(m, "tbnz") ||
+                !strncmp(m, "b.", 2)) {
+                uint64_t target = 0;
+                const char *p = strstr(insn.operands, "0x");
+                if (p && sscanf(p, "0x%llx", (unsigned long long *)&target) == 1 &&
+                    nx_addr_in_image(bin, target)) {
+                    int is_call = !strcmp(m, "bl");
+                    int is_cond = (m[0] == 'b' && m[1] == '.') ||
+                                  !strcmp(m, "cbz") || !strcmp(m, "cbnz") ||
+                                  !strcmp(m, "tbz") || !strcmp(m, "tbnz");
+                    nx_add_xref(bin, addr, target,
+                                is_call ? MACHO_XREF_TYPE_CALL : MACHO_XREF_TYPE_BRANCH,
+                                is_call, is_cond, 0);
+                }
+            } else if (!strcmp(m, "blr") || !strcmp(m, "br")) {
+                int is_call = !strcmp(m, "blr");
+                nx_add_xref(bin, addr, 0,
+                            is_call ? MACHO_XREF_TYPE_CALL : MACHO_XREF_TYPE_BRANCH,
+                            is_call, 0, 1);
+            }
+        }
+    }
     return 0;
 }
 
 // ============================================================================
-// Call Graph Building (Stub)
+// Call Graph Building
 // ============================================================================
 
 int macho_build_callgraph(macho_binary_t *bin) {
-    // Placeholder - actual implementation would analyze cross-references
+    if (!bin) return -1;
+    if (bin->arch == MACHO_ARCH_ARM64 && bin->nxrefs == 0)
+        nx_build_xrefs_arm64(bin);
+    return 0;
+}
+
+// ============================================================================
+// CFG Building
+// ============================================================================
+
+int macho_build_cfg(macho_binary_t *bin) {
+    if (!bin || !bin->data) return -1;
+    if (bin->arch != MACHO_ARCH_ARM64) return 0;
+
+    nx_compute_function_bounds(bin);
+    if (bin->nxrefs == 0) nx_build_xrefs_arm64(bin);
+
+    /* 関数ごとに基本ブロックを構築する。
+       境界 = 関数先頭 ∪ 関数内の分岐先 ∪ 条件分岐直後のフォールスルー。 */
+    int cap = 4096;
+    if (!bin->blocks) {
+        bin->blocks = (macho_block_t *)calloc((size_t)cap, sizeof(macho_block_t));
+        if (!bin->blocks) return -1;
+        bin->blocks_allocated = cap;
+    }
+
+    for (int i = 0; i < bin->nfunctions; i++) {
+        macho_function_t *f = &bin->functions[i];
+        if (f->end <= f->start) continue;
+
+        uint64_t bounds[512];
+        int nb = 0;
+        bounds[nb++] = f->start;
+
+        for (int x = 0; x < bin->nxrefs; x++) {
+            macho_xref_t *xr = &bin->xrefs[x];
+            /* 分岐先 */
+            if (!xr->is_indirect && xr->to != 0 &&
+                xr->to >= f->start && xr->to < f->end) {
+                int dup = 0;
+                for (int b = 0; b < nb; b++) if (bounds[b] == xr->to) { dup = 1; break; }
+                if (!dup && nb < 512) bounds[nb++] = xr->to;
+            }
+            /* 条件分岐直後のフォールスルー */
+            if (xr->is_conditional) {
+                uint64_t nxt = xr->from + 4;
+                if (nxt >= f->start && nxt < f->end) {
+                    int dup = 0;
+                    for (int b = 0; b < nb; b++) if (bounds[b] == nxt) { dup = 1; break; }
+                    if (!dup && nb < 512) bounds[nb++] = nxt;
+                }
+            }
+        }
+
+        for (int a = 0; a < nb; a++)
+            for (int b = a + 1; b < nb; b++)
+                if (bounds[b] < bounds[a]) { uint64_t t = bounds[a]; bounds[a] = bounds[b]; bounds[b] = t; }
+
+        int first_idx = bin->nblocks;
+        for (int b = 0; b < nb && bin->nblocks < bin->blocks_allocated; b++) {
+            uint64_t bstart = bounds[b];
+            uint64_t bend = (b + 1 < nb) ? bounds[b + 1] : f->end;
+            if (bend <= bstart) continue;
+            macho_block_t *blk = &bin->blocks[bin->nblocks];
+            memset(blk, 0, sizeof(*blk));
+            blk->id = bin->nblocks;
+            blk->start = bstart;
+            blk->end = bend;
+            blk->func_idx = i;
+            blk->block_type = (b == 0) ? MACHO_BLOCK_TYPE_ENTRY : MACHO_BLOCK_TYPE_REGULAR;
+            blk->is_entry = (b == 0);
+            bin->nblocks++;
+        }
+
+        /* ブロック間 succ を xref から張る */
+        for (int b = first_idx; b < bin->nblocks; b++) {
+            macho_block_t *blk = &bin->blocks[b];
+            uint64_t last = blk->end - 4;   /* ARM64 は固定長 */
+            for (int x = 0; x < bin->nxrefs; x++) {
+                macho_xref_t *xr = &bin->xrefs[x];
+                if (xr->from != last) continue;
+                if (!xr->is_indirect && xr->to != 0) {
+                    for (int t = first_idx; t < bin->nblocks; t++) {
+                        if (bin->blocks[t].start <= xr->to && xr->to < bin->blocks[t].end) {
+                            if (blk->nsucc < 16) {
+                                blk->succ[blk->nsucc] = t;
+                                blk->edge_type[blk->nsucc] = xr->is_conditional
+                                    ? MACHO_EDGE_TYPE_COND_TRUE : MACHO_EDGE_TYPE_JUMP;
+                                blk->nsucc++;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (xr->is_conditional && last + 4 < blk->end) {
+                    for (int t = first_idx; t < bin->nblocks; t++) {
+                        if (bin->blocks[t].start == last + 4) {
+                            if (blk->nsucc < 16) {
+                                blk->succ[blk->nsucc] = t;
+                                blk->edge_type[blk->nsucc] = MACHO_EDGE_TYPE_COND_FALSE;
+                                blk->nsucc++;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            if (blk->nsucc == 0 && blk->end >= f->end) blk->is_exit = 1;
+        }
+        f->block_count = (uint32_t)(bin->nblocks - first_idx);
+    }
+
+    /* pred を succ から逆算 */
+    for (int b = 0; b < bin->nblocks; b++) {
+        macho_block_t *blk = &bin->blocks[b];
+        for (int k = 0; k < blk->nsucc; k++) {
+            int t = blk->succ[k];
+            if (t >= 0 && t < bin->nblocks && bin->blocks[t].npred < 16)
+                bin->blocks[t].pred[bin->blocks[t].npred++] = b;
+        }
+    }
     return 0;
 }
 

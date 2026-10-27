@@ -122,7 +122,7 @@
 #define MACHO_LC_BUILD_VERSION 0x32
 
 // Symbol table flags
-#define MACHO_N_STAB 0x00FE
+#define MACHO_N_STAB 0xE0
 #define MACHO_N_PEXT 0x0010
 #define MACHO_N_TYPE 0x000E
 #define MACHO_N_EXT 0x0001
@@ -154,6 +154,7 @@ typedef struct {
 } macho_fat_arch_t;
 
 typedef struct {
+    uint32_t magic;
     uint32_t cputype;
     uint32_t cpusubtype;
     uint32_t filetype;
@@ -163,6 +164,7 @@ typedef struct {
 } macho_header32_t;
 
 typedef struct {
+    uint32_t magic;
     uint32_t cputype;
     uint32_t cpusubtype;
     uint32_t filetype;
@@ -178,6 +180,8 @@ typedef struct {
 } macho_load_cmd_t;
 
 typedef struct {
+    uint32_t cmd;
+    uint32_t cmdsize;
     char segname[16];
     uint32_t vmaddr;
     uint32_t vmsize;
@@ -190,6 +194,8 @@ typedef struct {
 } macho_segment32_t;
 
 typedef struct {
+    uint32_t cmd;
+    uint32_t cmdsize;
     char segname[16];
     uint64_t vmaddr;
     uint64_t vmsize;
@@ -282,6 +288,7 @@ typedef struct {
     uint8_t n_type;
     uint8_t n_sect;
     int16_t n_desc;
+    uint64_t n_value;
 } macho_nlist64_t;
 
 #pragma pack(pop)
@@ -351,6 +358,7 @@ typedef enum {
 
 // Section information
 typedef struct {
+    char segname[16];
     char name[64];
     uint64_t offset;
     uint64_t vaddr;

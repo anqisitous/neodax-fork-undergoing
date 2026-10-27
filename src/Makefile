@@ -8,11 +8,16 @@ LIBS = -lpthread -lm
 
 # Directories
 SRC_DIR = .
-BUILD_DIR = bin
+BUILD_DIR = ../build_neodax
 
 # Source files
 CORE_SRCS = \
 	core/macho_static.c
+
+# 旧 neodax エンジンのデコーダ (neodax/ に退避)。core と nx_decode が呼ぶ。
+LEGACY_SRCS = \
+	neodax/arm64_decode.c \
+	neodax/x86_decode.c
 
 ANALYSIS_SRCS = \
 	analysis/depflow.c \
@@ -25,25 +30,31 @@ FLOW_SRCS = \
 TRACKING_SRCS = \
 	tracking/state_tracking.c
 
+# Integration: nx autonomous dispatch core + bridge
 INTEGRATION_SRCS = \
+	integration/nx_engine.c \
+	integration/nx_decode.c \
+	integration/nx_provider_macho.c \
+	integration/nx_provider_dax.c \
 	integration/neodax_bridge.c
 
-MAIN_SRCS = \
-	main.c \
-	main_integrated.c
+#MAIN_SRCS = \
+#main.c \
+#main_integrated.c
 
 # All source files
-ALL_SRCS = $(CORE_SRCS) $(ANALYSIS_SRCS) $(FLOW_SRCS) $(TRACKING_SRCS) $(INTEGRATION_SRCS) $(MAIN_SRCS)
+ALL_SRCS = $(CORE_SRCS) $(LEGACY_SRCS) $(ANALYSIS_SRCS) $(FLOW_SRCS) $(TRACKING_SRCS) $(INTEGRATION_SRCS) $(MAIN_SRCS)
 
 # Object files
 CORE_OBJS = $(patsubst %.c,%.o,$(CORE_SRCS))
+LEGACY_OBJS = $(patsubst %.c,%.o,$(LEGACY_SRCS))
 ANALYSIS_OBJS = $(patsubst %.c,%.o,$(ANALYSIS_SRCS))
 FLOW_OBJS = $(patsubst %.c,%.o,$(FLOW_SRCS))
 TRACKING_OBJS = $(patsubst %.c,%.o,$(TRACKING_SRCS))
 INTEGRATION_OBJS = $(patsubst %.c,%.o,$(INTEGRATION_SRCS))
-MAIN_OBJS = $(patsubst %.c,%.o,$(MAIN_SRCS))
+MAIN_OBJS =
 
-ALL_OBJS = $(CORE_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) $(MAIN_OBJS)
+ALL_OBJS = $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) $(MAIN_OBJS)
 
 # Targets
 TARGET = $(BUILD_DIR)/neodax_static
@@ -53,12 +64,12 @@ TARGET_INTEGRATED = $(BUILD_DIR)/neodax_static_integrated
 all: $(TARGET) $(TARGET_INTEGRATED)
 
 # Main static analysis tool
-$(TARGET): $(CORE_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) main.o
+$(TARGET): $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) main.o
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ $(LIBS)
 
 # Integrated version with full pipeline
-$(TARGET_INTEGRATED): $(CORE_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) main_integrated.o
+$(TARGET_INTEGRATED): $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) main_integrated.o
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ $(LIBS)
 
@@ -66,9 +77,10 @@ $(TARGET_INTEGRATED): $(CORE_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS
 %.o: %.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-# Clean
+# Clean — in-tree オブジェクトも消す (以前は BUILD_DIR を見ていて実体を消せていなかった)
 clean:
-	rm -rf $(BUILD_DIR)/*.o $(BUILD_DIR)/neodax_static $(BUILD_DIR)/neodax_static_integrated
+	rm -f $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) main.o main_integrated.o
+	rm -rf $(BUILD_DIR)/neodax_static $(BUILD_DIR)/neodax_static_integrated
 
 # Very clean
 veryclean: clean

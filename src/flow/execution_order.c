@@ -394,6 +394,10 @@ int exec_order_build_graph(macho_binary_t *bin, depflow_graph_t *dep_graph, exec
     // Add edges based on dependency graph
     for (int i = 0; i < dep_graph->edge_count; i++) {
         depflow_edge_t *dep_edge = &dep_graph->edges[i];
+
+        if (!dep_graph->nodes || dep_edge->from == 0 || dep_edge->to == 0 ||
+            dep_edge->from > (uint64_t)dep_graph->node_count ||
+            dep_edge->to   > (uint64_t)dep_graph->node_count) continue;
         
         // Convert dependency graph node IDs to execution graph node IDs
         uint64_t from_node = 0, to_node = 0;
@@ -417,6 +421,10 @@ int exec_order_build_graph(macho_binary_t *bin, depflow_graph_t *dep_graph, exec
     // Add constraints based on dependencies
     for (int i = 0; i < dep_graph->edge_count; i++) {
         depflow_edge_t *dep_edge = &dep_graph->edges[i];
+
+        if (!dep_graph->nodes || dep_edge->from == 0 || dep_edge->to == 0 ||
+            dep_edge->from > (uint64_t)dep_graph->node_count ||
+            dep_edge->to   > (uint64_t)dep_graph->node_count) continue;
         
         if (dep_edge->type == DEPFLOW_EDGE_DEF_USE) {
             // Definition must come before use
@@ -450,6 +458,10 @@ int exec_order_analyze_dependencies(exec_order_graph_t *exec_graph, depflow_grap
         // Find dependencies from dependency graph
         for (int j = 0; j < dep_graph->edge_count; j++) {
             depflow_edge_t *dep_edge = &dep_graph->edges[j];
+
+            if (!dep_graph->nodes || dep_edge->from == 0 || dep_edge->to == 0 ||
+                dep_edge->from > (uint64_t)dep_graph->node_count ||
+                dep_edge->to   > (uint64_t)dep_graph->node_count) continue;
             
             // Check if this dependency affects our node
             if (dep_graph->nodes[dep_edge->to - 1].address == node->address) {
