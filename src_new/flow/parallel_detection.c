@@ -208,7 +208,7 @@ int parallel_identify_group_type(parallel_group_t *group, macho_binary_t *bin,
         group->type = PARALLEL_TYPE_BEAM_SEARCH;
         group->beam_width = 1; // Default, would be determined by analysis
         group->is_dynamic = 1;
-        strncpy(group->dispatch_type, "beam_search_dispatch", sizeof(group->dispatch_type) - 1);
+        group->dispatch_type = PARALLEL_DISPATCH_DIRECT;
     } else if (is_dispatch_function(group->name)) {
         group->type = PARALLEL_TYPE_TASK_PARALLEL;
         group->dispatch_type = PARALLEL_DISPATCH_DIRECT;

@@ -25,12 +25,12 @@ FLOW_SRCS = \
 TRACKING_SRCS = \
 	tracking/state_tracking.c
 
-INTEGRATION_SRCS = \
-	integration/neodax_bridge.c
+#INTEGRATION_SRCS = \
+#integration/neodax_bridge.c
 
-MAIN_SRCS = \
-	main.c \
-	main_integrated.c
+#MAIN_SRCS = \
+#main.c \
+#main_integrated.c
 
 # All source files
 ALL_SRCS = $(CORE_SRCS) $(ANALYSIS_SRCS) $(FLOW_SRCS) $(TRACKING_SRCS) $(INTEGRATION_SRCS) $(MAIN_SRCS)
@@ -40,8 +40,8 @@ CORE_OBJS = $(patsubst %.c,%.o,$(CORE_SRCS))
 ANALYSIS_OBJS = $(patsubst %.c,%.o,$(ANALYSIS_SRCS))
 FLOW_OBJS = $(patsubst %.c,%.o,$(FLOW_SRCS))
 TRACKING_OBJS = $(patsubst %.c,%.o,$(TRACKING_SRCS))
-INTEGRATION_OBJS = $(patsubst %.c,%.o,$(INTEGRATION_SRCS))
-MAIN_OBJS = $(patsubst %.c,%.o,$(MAIN_SRCS))
+INTEGRATION_OBJS =
+MAIN_OBJS =
 
 ALL_OBJS = $(CORE_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) $(MAIN_OBJS)
 

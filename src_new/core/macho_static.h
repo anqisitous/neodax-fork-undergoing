@@ -282,6 +282,7 @@ typedef struct {
     uint8_t n_type;
     uint8_t n_sect;
     int16_t n_desc;
+    uint64_t n_value;
 } macho_nlist64_t;
 
 #pragma pack(pop)
@@ -351,6 +352,7 @@ typedef enum {
 
 // Section information
 typedef struct {
+    char segname[16];
     char name[64];
     uint64_t offset;
     uint64_t vaddr;

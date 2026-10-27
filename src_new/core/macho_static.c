@@ -1,6 +1,8 @@
 #include "macho_static.h"
 #include <stdio.h>
 #include <stdlib.h>
+#define min(a,b) (((a)<(b))?(a):(b))
+#define LE16(p) (((uint16_t)(p)[0]) | ((uint16_t)(p)[1] << 8))
 #include <string.h>
 #include <stdint.h>
 
@@ -728,7 +730,7 @@ int macho_parse_symbols(macho_binary_t *bin, const uint8_t *data, size_t size) {
         uint32_t str_idx = LE32(nlist->n_strx);
         uint8_t n_type = nlist->n_type;
         uint8_t n_sect = nlist->n_sect;
-        int16_t n_desc = LE16(nlist->n_desc);
+        int16_t n_desc = nlist->n_desc;
         
         if (str_idx >= strsize) continue;
         

@@ -285,7 +285,7 @@ int main(int argc, char **argv) {
     if (opts.color) printf("%s", COL_RESET);
     printf("  Format: Mach-O (%s)\
 ", ibin.macho_bin.is_64bit ? "64-bit" : "32-bit");
-    printf("  Entry: 0x%llx\n", (unsigned long long)ibin.macho_bin.entry_point);
+    printf("  Entry: 0x%llx\n", (unsigned long long)ibin.macho_bin.entry);
     printf("  Functions: %d\n", ibin.macho_bin.nfunctions);
     printf("  Symbols: %d\n\n", ibin.macho_bin.nsymbols);
     

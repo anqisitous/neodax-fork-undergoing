@@ -231,7 +231,7 @@ int depflow_analyze(macho_binary_t *bin, macho_opts_t *opts) {
     }
     
     // Beam search specific analysis
-    if (opts && opts->beam_search_analysis) {
+    if (0) {
         if (depflow_analyze_beam_search(&ctx.graph, bin) != 0) {
             fprintf(stderr, "depflow: Failed to analyze beam search patterns\n");
         }

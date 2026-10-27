@@ -39,6 +39,8 @@
 #define PARALLEL_SYNC_SEMAPHORE 3
 #define PARALLEL_SYNC_ATOMIC 4
 #define PARALLEL_SYNC_FUTURE 5
+#define PARALLEL_SYNC_MUTEX 6
+#define PARALLEL_SYNC_MUTEX 6
 
 // Parallel node information
 typedef struct parallel_node_t {

@@ -288,7 +288,7 @@ int dax_parse_macho(dax_binary_t *bin)
             const macho_dysymtab_cmd_t *dy =
                 (const macho_dysymtab_cmd_t *)(data + cmd_off);
             size_t slice_base = (size_t)(data - bin->data);
-            uint32_t ioff = LE32(dy->indirectoff) + (uint32_t)slice_base;
+            uint32_t ioff = LE32(dy->indirectsymoff) + (uint32_t)slice_base;
             uint32_t nind  = LE32(dy->nindirectsyms);
             if (nind > 0 &&
                 (uint64_t)ioff + (uint64_t)nind * 4u <= bin->size) {
