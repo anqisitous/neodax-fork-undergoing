@@ -49,6 +49,7 @@ static nx_binary_t *dax_open(const char *path, const uint8_t *data, size_t size)
     nx_binary_t *b = (nx_binary_t *)calloc(1, sizeof(*b));
     if (!b) { dax_free_binary(&impl->bin); free(impl); return NULL; }
     b->impl = impl;
+    b->ops  = nx_provider_dax();
     return b;
 }
 
@@ -64,6 +65,7 @@ static nx_arch_t dax_arch(nx_binary_t *b) {
         case ARCH_X86_64:  return NX_ARCH_X86_64;
         case ARCH_ARM64:   return NX_ARCH_ARM64;
         case ARCH_RISCV64: return NX_ARCH_RISCV64;
+        case ARCH_X86:     return NX_ARCH_X86_32;
         default:           return NX_ARCH_UNKNOWN;
     }
 }

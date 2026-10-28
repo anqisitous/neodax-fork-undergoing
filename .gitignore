@@ -1,0 +1,17 @@
+# build artifacts
+build_neodax/
+*.o
+*.dSYM/
+neodax
+neodax.exe
+
+# gui runtime state
+gui/.last.json
+gui/.last.tsv
+gui/.last.workflow
+gui/.run.json
+gui/.run.hpp
+gui/.run.tsv
+
+# editor / OS
+.DS_Store

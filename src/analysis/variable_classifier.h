@@ -417,43 +417,43 @@ static const var_classification_rule_t temporary_rules[] = {
 
 // Aspect classification rules
 static const var_classification_rule_t static_aspect_rules[] = {
-    {"const", VAR_ASPECT_STATIC, 10, 5, 32},
-    {"final", VAR_ASPECT_STATIC, 10, 5, 32},
-    {"immutable", VAR_ASPECT_STATIC, 10, 5, 32},
-    {NULL, VAR_ASPECT_UNKNOWN, 0, 0, 0}
+    {"const", (var_category_t)VAR_ASPECT_STATIC, 10, 5, 32},
+    {"final", (var_category_t)VAR_ASPECT_STATIC, 10, 5, 32},
+    {"immutable", (var_category_t)VAR_ASPECT_STATIC, 10, 5, 32},
+    {NULL, (var_category_t)VAR_ASPECT_UNKNOWN, 0, 0, 0}
 };
 
 static const var_classification_rule_t shared_aspect_rules[] = {
-    {"global", VAR_ASPECT_SHARED, 10, 6, 32},
-    {"shared", VAR_ASPECT_SHARED, 10, 6, 32},
-    {"common", VAR_ASPECT_SHARED, 10, 6, 32},
-    {"public", VAR_ASPECT_SHARED, 10, 6, 32},
-    {NULL, VAR_ASPECT_UNKNOWN, 0, 0, 0}
+    {"global", (var_category_t)VAR_ASPECT_SHARED, 10, 6, 32},
+    {"shared", (var_category_t)VAR_ASPECT_SHARED, 10, 6, 32},
+    {"common", (var_category_t)VAR_ASPECT_SHARED, 10, 6, 32},
+    {"public", (var_category_t)VAR_ASPECT_SHARED, 10, 6, 32},
+    {NULL, (var_category_t)VAR_ASPECT_UNKNOWN, 0, 0, 0}
 };
 
 static const var_classification_rule_t private_aspect_rules[] = {
-    {"local", VAR_ASPECT_PRIVATE, 10, 5, 32},
-    {"private", VAR_ASPECT_PRIVATE, 10, 7, 32},
-    {"static", VAR_ASPECT_PRIVATE, 10, 6, 32},
-    {"internal", VAR_ASPECT_PRIVATE, 10, 8, 32},
-    {NULL, VAR_ASPECT_UNKNOWN, 0, 0, 0}
+    {"local", (var_category_t)VAR_ASPECT_PRIVATE, 10, 5, 32},
+    {"private", (var_category_t)VAR_ASPECT_PRIVATE, 10, 7, 32},
+    {"static", (var_category_t)VAR_ASPECT_PRIVATE, 10, 6, 32},
+    {"internal", (var_category_t)VAR_ASPECT_PRIVATE, 10, 8, 32},
+    {NULL, (var_category_t)VAR_ASPECT_UNKNOWN, 0, 0, 0}
 };
 
 static const var_classification_rule_t tree_aspect_rules[] = {
-    {"tree", VAR_ASPECT_TREE, 10, 4, 32},
-    {"node", VAR_ASPECT_TREE, 10, 4, 32},
-    {"branch", VAR_ASPECT_TREE, 10, 6, 32},
-    {"leaf", VAR_ASPECT_TREE, 10, 4, 32},
-    {"root", VAR_ASPECT_TREE, 10, 4, 32},
-    {NULL, VAR_ASPECT_UNKNOWN, 0, 0, 0}
+    {"tree", (var_category_t)VAR_ASPECT_TREE, 10, 4, 32},
+    {"node", (var_category_t)VAR_ASPECT_TREE, 10, 4, 32},
+    {"branch", (var_category_t)VAR_ASPECT_TREE, 10, 6, 32},
+    {"leaf", (var_category_t)VAR_ASPECT_TREE, 10, 4, 32},
+    {"root", (var_category_t)VAR_ASPECT_TREE, 10, 4, 32},
+    {NULL, (var_category_t)VAR_ASPECT_UNKNOWN, 0, 0, 0}
 };
 
 static const var_classification_rule_t graph_aspect_rules[] = {
-    {"graph", VAR_ASPECT_GRAPH, 10, 5, 32},
-    {"network", VAR_ASPECT_GRAPH, 10, 7, 32},
-    {"edge", VAR_ASPECT_GRAPH, 10, 4, 32},
-    {"vertex", VAR_ASPECT_GRAPH, 10, 6, 32},
-    {NULL, VAR_ASPECT_UNKNOWN, 0, 0, 0}
+    {"graph", (var_category_t)VAR_ASPECT_GRAPH, 10, 5, 32},
+    {"network", (var_category_t)VAR_ASPECT_GRAPH, 10, 7, 32},
+    {"edge", (var_category_t)VAR_ASPECT_GRAPH, 10, 4, 32},
+    {"vertex", (var_category_t)VAR_ASPECT_GRAPH, 10, 6, 32},
+    {NULL, (var_category_t)VAR_ASPECT_UNKNOWN, 0, 0, 0}
 };
 
 #endif // VARIABLE_CLASSIFIER_H

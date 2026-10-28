@@ -191,7 +191,21 @@ int neodax_run_static_analysis(integrated_binary_t *ibin,
                 ibin->parallel ? ibin->parallel->beam_search_count : 0);
     safe_printf(output, "  state checkpoints: %d\n",
                 ibin->state ? ibin->state->checkpoint_count : 0);
+
+    if (opts->workflow_output[0]) {
+        if (neodax_emit_workflow(ibin, opts->workflow_output) == 0)
+            safe_printf(output, "  workflow code    : %s\n", opts->workflow_output);
+    }
     safe_printf(output, "=== Static Analysis Complete ===\n");
+    return 0;
+}
+
+/* Recovered workflow -> compilable C++ (function = step, call = transition,
+ * guard = then/now, external/indirect/store/parallel as stubs). */
+int neodax_emit_workflow(integrated_binary_t *ibin, const char *filename) {
+    if (!ibin || !filename || !filename[0]) return -1;
+    if (!ibin->dep_graph) return -1;
+    depflow_export_workflow(&ibin->macho_bin, ibin->dep_graph, filename);
     return 0;
 }
 
@@ -264,7 +278,7 @@ int neodax_classify_variables(integrated_binary_t *ibin,
             safe_printf(output, "\n");
         }
         if (c->is_shogi_specific)
-            safe_printf(output, "    shogi role: %d\n", c->shogi_role);
+            safe_printf(output, "    role: %d\n", c->shogi_role);
     }
 
     safe_printf(output, "  total=%d board=%d move=%d eval=%d search-tree=%d\n",
@@ -380,7 +394,7 @@ int neodax_track_state(integrated_binary_t *ibin,
 int neodax_shogi_analysis(integrated_binary_t *ibin,
                           static_analysis_opts_t *opts, FILE *output) {
     if (!ibin || !opts) return -1;
-    safe_printf(output, "\n=== Shogi AI Specific Analysis ===\n");
+    safe_printf(output, "\n=== Pattern Analysis ===\n");
 
     if (ibin->classifier) {
         var_classifier_t *vc = ibin->classifier;

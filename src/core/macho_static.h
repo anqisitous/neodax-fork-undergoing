@@ -5,9 +5,16 @@
 #include <stddef.h>
 #include <stdio.h>
 
+/*
+ * Mach-O wire format (magic, CPU/file types, load commands, section/symbol
+ * flags, and all on-disk structs) lives in include/macho.h. This header
+ * composes those definitions instead of duplicating them.
+ */
+#include "macho.h"
+
 // ============================================================================
 // Mach-O Static Analysis Framework
-// 
+//
 // 静的解析のためのMach-Oファイル構造体と関数定義
 // 将棋AIなどのバイナリ解析に特化した静的フロー解析を提供
 // ============================================================================
@@ -20,279 +27,6 @@
 #define MAX_CALL_DEPTH 32
 #define MAX_PARALLEL_PATHS 1024
 
-// Mach-O CPU types
-#define MACHO_CPU_ARM64 0x0100000C
-#define MACHO_CPU_X86_64 0x01000007
-
-// Mach-O file types
-#define MACHO_MH_EXECUTE 0x2
-#define MACHO_MH_DYLIB 0x6
-#define MACHO_MH_BUNDLE 0x8
-
-// Mach-O magic numbers
-#define MACHO_MAGIC_32 0xFEEDFACE
-#define MACHO_MAGIC_32_LE 0xCEFAEDFE
-#define MACHO_MAGIC_64 0xFEEDFACF
-#define MACHO_MAGIC_64_LE 0xCFFAEDFE
-#define MACHO_FAT_MAGIC 0xCAFEBABE
-#define MACHO_FAT_MAGIC_LE 0xBEBAFECA
-
-// Section types
-#define MACHO_S_REGULAR 0x0
-#define MACHO_S_ZEROFILL 0x1
-#define MACHO_S_CSTRING_LITERALS 0x2
-#define MACHO_S_4BYTE_LITERALS 0x3
-#define MACHO_S_8BYTE_LITERALS 0x4
-#define MACHO_S_LITERAL_POINTERS 0x5
-#define MACHO_S_NON_LAZY_SYMBOL_POINTERS 0x6
-#define MACHO_S_LAZY_SYMBOL_POINTERS 0x7
-#define MACHO_S_SYMBOL_STUBS 0x8
-#define MACHO_S_MOD_INIT_FUNC_POINTERS 0x9
-#define MACHO_S_MOD_TERM_FUNC_POINTERS 0xA
-#define MACHO_S_COALESCED 0xB
-#define MACHO_S_GB_ZEROFILL 0xC
-#define MACHO_S_INTERPOSING 0xD
-#define MACHO_S_16BYTE_LITERALS 0xE
-#define MACHO_S_DTRACE_DOF 0xF
-#define MACHO_S_LAZY_DYLIB_SYMBOL_POINTERS 0x10
-
-// Section flags
-#define MACHO_S_ATTR_PURE_INSTRUCTIONS 0x80000000
-#define MACHO_S_ATTR_NO_TOC 0x40000000
-#define MACHO_S_ATTR_STRIP_STATIC_SYMS 0x20000000
-#define MACHO_S_ATTR_NO_DEAD_STRIP 0x10000000
-#define MACHO_S_ATTR_LIVE_SUPPORT 0x08000000
-#define MACHO_S_ATTR_SELF_MODIFYING_CODE 0x04000000
-#define MACHO_S_ATTR_DEBUG 0x02000000
-#define MACHO_S_ATTR_SOME_INSTRUCTIONS 0x00000400
-#define MACHO_S_ATTR_EXT_RELOC 0x00000200
-#define MACHO_S_ATTR_LOC_RELOC 0x00000100
-
-// Load command types
-#define MACHO_LC_SEGMENT 0x1
-#define MACHO_LC_SYMTAB 0x2
-#define MACHO_LC_SYMSEG 0x3
-#define MACHO_LC_THREAD 0x4
-#define MACHO_LC_UNIXTHREAD 0x5
-#define MACHO_LC_LOADFVMLIB 0x6
-#define MACHO_LC_IDFVMLIB 0x7
-#define MACHO_LC_IDENT 0x8
-#define MACHO_LC_FIDF 0x9
-#define MACHO_LC_PREPAGE 0xA
-#define MACHO_LC_DYSYMTAB 0xB
-#define MACHO_LC_LOAD_DYLIB 0xC
-#define MACHO_LC_ID_DYLIB 0xD
-#define MACHO_LC_LOAD_DYLINKER 0xE
-#define MACHO_LC_ID_DYLINKER 0xF
-#define MACHO_LC_PREBOUND_DYLIB 0x10
-#define MACHO_LC_ROUTINES 0x11
-#define MACHO_LC_SUB_FRAMEWORK 0x12
-#define MACHO_LC_SUB_UMBRELLA 0x13
-#define MACHO_LC_SUB_CLIENT 0x14
-#define MACHO_LC_SUB_LIBRARY 0x15
-#define MACHO_LC_TWOLEVEL_HINTS 0x16
-#define MACHO_LC_PREBIND_CKSUM 0x17
-#define MACHO_LC_LOAD_WEAK_DYLIB 0x18
-#define MACHO_LC_SEGMENT_64 0x19
-#define MACHO_LC_ROUTINES_64 0x1A
-#define MACHO_LC_UUID 0x1B
-#define MACHO_LC_RPATH 0x1C
-#define MACHO_LC_CODE_SIGNATURE 0x1D
-#define MACHO_LC_SEGMENT_SPLIT_INFO 0x1E
-#define MACHO_LC_REEXPORT_DYLIB 0x1F
-#define MACHO_LC_LAZY_LOAD_DYLIB 0x20
-#define MACHO_LC_ENCRYPTION_INFO 0x21
-#define MACHO_LC_DYLD_INFO 0x22
-#define MACHO_LC_DYLD_INFO_ONLY 0x23
-#define MACHO_LC_LOAD_UPWARD_DYLIB 0x24
-#define MACHO_LC_VERSION_MIN_MACOSX 0x25
-#define MACHO_LC_VERSION_MIN_IPHONEOS 0x26
-#define MACHO_LC_FUNCTION_STARTS 0x26
-#define MACHO_LC_DYLD_ENVIRONMENT 0x27
-#define MACHO_LC_MAIN 0x28
-#define MACHO_LC_DATA_IN_CODE 0x29
-#define MACHO_LC_SOURCE_VERSION 0x2A
-#define MACHO_LC_DYLIB_CODE_SIGN_DRS 0x2B
-#define MACHO_LC_ENCRYPTION_INFO_64 0x2C
-#define MACHO_LC_LINKER_OPTION 0x2D
-#define MACHO_LC_LINKER_OPTIMIZATION_HINT 0x2E
-#define MACHO_LC_VERSION_MIN_TVOS 0x2F
-#define MACHO_LC_VERSION_MIN_WATCHOS 0x30
-#define MACHO_LC_NOTE 0x31
-#define MACHO_LC_BUILD_VERSION 0x32
-
-// Symbol table flags
-#define MACHO_N_STAB 0xE0
-#define MACHO_N_PEXT 0x0010
-#define MACHO_N_TYPE 0x000E
-#define MACHO_N_EXT 0x0001
-
-// Symbol types
-#define MACHO_N_UNDF 0x0
-#define MACHO_N_ABS 0x2
-#define MACHO_N_SECT 0xE
-#define MACHO_N_PBUD 0xC
-#define MACHO_N_INDR 0xA
-
-// ============================================================================
-// Mach-O Header Structures
-// ============================================================================
-
-#pragma pack(push, 1)
-
-typedef struct {
-    uint32_t magic;
-    uint32_t nfat_arch;
-} macho_fat_header_t;
-
-typedef struct {
-    uint32_t cputype;
-    uint32_t cpusubtype;
-    uint32_t offset;
-    uint32_t size;
-    uint32_t align;
-} macho_fat_arch_t;
-
-typedef struct {
-    uint32_t magic;
-    uint32_t cputype;
-    uint32_t cpusubtype;
-    uint32_t filetype;
-    uint32_t ncmds;
-    uint32_t sizeofcmds;
-    uint32_t flags;
-} macho_header32_t;
-
-typedef struct {
-    uint32_t magic;
-    uint32_t cputype;
-    uint32_t cpusubtype;
-    uint32_t filetype;
-    uint32_t ncmds;
-    uint32_t sizeofcmds;
-    uint32_t flags;
-    uint32_t reserved;
-} macho_header64_t;
-
-typedef struct {
-    uint32_t cmd;
-    uint32_t cmdsize;
-} macho_load_cmd_t;
-
-typedef struct {
-    uint32_t cmd;
-    uint32_t cmdsize;
-    char segname[16];
-    uint32_t vmaddr;
-    uint32_t vmsize;
-    uint32_t fileoff;
-    uint32_t filesize;
-    uint32_t maxprot;
-    uint32_t initprot;
-    uint32_t nsects;
-    uint32_t flags;
-} macho_segment32_t;
-
-typedef struct {
-    uint32_t cmd;
-    uint32_t cmdsize;
-    char segname[16];
-    uint64_t vmaddr;
-    uint64_t vmsize;
-    uint64_t fileoff;
-    uint64_t filesize;
-    uint32_t maxprot;
-    uint32_t initprot;
-    uint32_t nsects;
-    uint32_t flags;
-} macho_segment64_t;
-
-typedef struct {
-    char sectname[16];
-    char segname[16];
-    uint32_t addr;
-    uint32_t size;
-    uint32_t offset;
-    uint32_t align;
-    uint32_t reloff;
-    uint32_t nreloc;
-    uint32_t flags;
-    uint32_t reserved1;
-    uint32_t reserved2;
-    uint32_t reserved3;
-} macho_section32_t;
-
-typedef struct {
-    char sectname[16];
-    char segname[16];
-    uint64_t addr;
-    uint64_t size;
-    uint32_t offset;
-    uint32_t align;
-    uint32_t reloff;
-    uint32_t nreloc;
-    uint32_t flags;
-    uint32_t reserved1;
-    uint32_t reserved2;
-    uint32_t reserved3;
-} macho_section64_t;
-
-typedef struct {
-    uint32_t cmd;
-    uint32_t cmdsize;
-    uint32_t symoff;
-    uint32_t nsyms;
-    uint32_t stroff;
-    uint32_t strsize;
-} macho_symtab_cmd_t;
-
-typedef struct {
-    uint32_t cmd;
-    uint32_t cmdsize;
-    uint32_t ilocalsym;
-    uint32_t nlocalsym;
-    uint32_t iextdefsym;
-    uint32_t nextdefsym;
-    uint32_t iundefsym;
-    uint32_t nundefsym;
-    uint32_t tocoff;
-    uint32_t ntoc;
-    uint32_t modtaboff;
-    uint32_t nmodtab;
-    uint32_t extrefsymoff;
-    uint32_t nextrefsyms;
-    uint32_t indirectsymoff;
-    uint32_t nindirectsyms;
-    uint32_t extreloff;
-    uint32_t nextrel;
-    uint32_t locreloff;
-    uint32_t nlocrel;
-} macho_dysymtab_cmd_t;
-
-typedef struct {
-    uint32_t cmd;
-    uint32_t cmdsize;
-    uint64_t dataoff;
-    uint64_t datasize;
-} macho_dyld_info_cmd_t;
-
-typedef struct {
-    int32_t n_strx;
-    uint8_t n_type;
-    uint8_t n_sect;
-    int16_t n_desc;
-} macho_nlist32_t;
-
-typedef struct {
-    int32_t n_strx;
-    uint8_t n_type;
-    uint8_t n_sect;
-    int16_t n_desc;
-    uint64_t n_value;
-} macho_nlist64_t;
-
-#pragma pack(pop)
-
 // ============================================================================
 // Static Analysis Data Structures
 // ============================================================================
@@ -301,7 +35,8 @@ typedef enum {
     MACHO_ARCH_UNKNOWN = 0,
     MACHO_ARCH_X86_64,
     MACHO_ARCH_ARM64,
-    MACHO_ARCH_RISCV64
+    MACHO_ARCH_RISCV64,
+    MACHO_ARCH_X86_32
 } macho_arch_t;
 
 typedef enum {
@@ -449,6 +184,8 @@ typedef struct {
     uint8_t affects_flags;
     uint8_t reads_memory;
     uint8_t writes_memory;
+    uint8_t has_target;
+    uint64_t target;      /* resolved direct branch/call target */
 } macho_insn_t;
 
 // Data dependency information
@@ -532,89 +269,89 @@ typedef struct {
     size_t size;
     char filepath[1024];
     char sha256[65];
-    
+
     // Architecture and format
     macho_arch_t arch;
     uint32_t filetype;
     uint32_t cputype;
     uint32_t cpusubtype;
     uint32_t flags;
-    
+
     // Entry point
     uint64_t entry;
     uint64_t base;
     uint64_t image_size;
-    
+
     // Sections
     macho_section_t sections[MAX_MACHO_SECTIONS];
     int nsections;
-    
+
     // Symbols
     macho_symbol_t *symbols;
     int nsymbols;
     int symbols_allocated;
-    
+
     // Functions
     macho_function_t *functions;
     int nfunctions;
     int functions_allocated;
-    
+
     // Cross-references
     macho_xref_t *xrefs;
     int nxrefs;
     int xrefs_allocated;
-    
+
     // Basic blocks
     macho_block_t *blocks;
     int nblocks;
     int blocks_allocated;
-    
+
     // Instructions
     macho_insn_t *insns;
     int ninsns;
     int insns_allocated;
-    
+
     // Dependencies
     macho_dependency_t *dependencies;
     int ndependencies;
     int dependencies_allocated;
-    
+
     // Call chains
     macho_call_chain_t *call_chains;
     int ncall_chains;
     int call_chains_allocated;
-    
+
     // Execution paths
     macho_execution_path_t *execution_paths;
     int nexecution_paths;
     int execution_paths_allocated;
-    
+
     // Parallel execution info
     macho_parallel_info_t *parallel_info;
     int nparallel_info;
     int parallel_info_allocated;
-    
+
     // Variables
     macho_variable_t *variables;
     int nvariables;
     int variables_allocated;
-    
+
     // State checkpoints
     macho_state_checkpoint_t *state_checkpoints;
     int nstate_checkpoints;
     int state_checkpoints_allocated;
-    
+
     // Analysis flags
     int is_analyzed;
     int is_pie;
     int is_stripped;
     int has_debug;
-    
+
     // Statistics
     uint64_t total_insns;
     uint64_t code_size;
     uint64_t data_size;
-    
+
 } macho_binary_t;
 
 // Analysis options
@@ -643,36 +380,34 @@ typedef struct {
     int entropy;
     int rda;
     int ivf;
-    
+
     // New analysis options for static flow
     int depflow;                    // Data dependency flow analysis
     char depflow_target_func[512]; // Target function for dependency analysis
     char depflow_target_var[256];  // Target variable for tracking
     int depflow_depth;              // Maximum depth for dependency tracking
     char depflow_dot[1024];         // Output file for DOT format
-    
+
     int execution_order;           // Analyze execution order
     int parallel_detection;        // Detect parallel execution patterns
     int state_tracking;            // Track state changes
     int regression_analysis;       // Analyze regression in state
     int beam_search_analysis;      // Special analysis for beam search patterns
-    
+
     char output_dir[1024];         // Output directory for analysis results
     char analysis_report[1024];    // Report file path
-    
+
 } macho_opts_t;
 
 // ============================================================================
 // Function Prototypes
 // ============================================================================
 
-// Mach-O parsing
+// Mach-O parsing (composed from the canonical parser in src/macho.c)
 int macho_parse(macho_binary_t *bin, const uint8_t *data, size_t size);
-int macho_parse_fat(macho_binary_t *bin, const uint8_t *data, size_t size);
-int macho_parse_header(macho_binary_t *bin, const uint8_t *data, size_t size);
-int macho_parse_load_commands(macho_binary_t *bin, const uint8_t *data, size_t size);
-int macho_parse_sections(macho_binary_t *bin, const uint8_t *data, size_t size);
-int macho_parse_symbols(macho_binary_t *bin, const uint8_t *data, size_t size);
+
+// Decode executable sections into bin->insns (idempotent; via nx_decode)
+int macho_fill_insns(macho_binary_t *bin);
 
 // Static analysis
 int macho_analyze(macho_binary_t *bin, macho_opts_t *opts);

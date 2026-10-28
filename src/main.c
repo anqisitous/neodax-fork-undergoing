@@ -131,6 +131,7 @@ static int run_analysis(macho_binary_t *bin, const char *filename) {
     printf("Analyzing: %s\n", filename);
     printf("Architecture: %s\n", 
           bin->arch == MACHO_ARCH_X86_64 ? "x86_64" :
+          bin->arch == MACHO_ARCH_X86_32 ? "i386" :
           bin->arch == MACHO_ARCH_ARM64 ? "ARM64" : "Unknown");
     printf("File Type: 0x%08X\n", bin->filetype);
     printf("Entry Point: 0x%llx\n", (unsigned long long)bin->entry);
@@ -401,24 +402,27 @@ int main(int argc, char *argv[]) {
     // Initialize binary structure
     macho_binary_t bin;
     macho_init(&bin);
-    
+
+    /* macho_binary_t borrows the raw bytes; macho_free() is the single owner.
+       Without this, macho_is_valid() rejects every input and analysis aborts. */
+    bin.data = data;
+    bin.size = size;
+
     // Parse the Mach-O file
     if (macho_parse(&bin, data, size) != 0) {
         fprintf(stderr, "Error: Failed to parse Mach-O file\n");
-        free(data);
+        macho_free(&bin);   /* frees bin.data == data */
         return 1;
     }
     
     // Run analysis
     if (run_analysis(&bin, filename) != 0) {
         fprintf(stderr, "Error: Analysis failed\n");
-        free(data);
         macho_free(&bin);
         return 1;
     }
     
     // Cleanup
-    free(data);
     macho_free(&bin);
     
     return 0;

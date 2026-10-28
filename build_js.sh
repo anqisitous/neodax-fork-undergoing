@@ -99,9 +99,10 @@ log "Compiler: $CC_VER"
 LIB_SRCS="src/loader.c src/disasm.c src/x86_decode.c src/arm64_decode.c \
     src/symbols.c src/demangle.c src/analysis.c src/cfg.c src/daxc.c \
     src/interactive.c src/loops.c src/callgraph.c src/correct.c \
-    src/riscv_decode.c src/unicode.c src/sha256.c src/main.c \
+    src/riscv_decode.c src/unicode.c src/sha256.c src/legacy_main.c \
     src/symexec.c src/decomp.c src/emulate.c src/entropy.c src/dsa.c src/macho.c \
-    src/hardening.c src/config.c src/plugin.c"
+    src/hardening.c src/config.c src/plugin.c \
+    src/report.c src/static_analysis.c"
 
 ASM_SRC=""
 _UNAME_M="$(uname -m 2>/dev/null || echo unknown)"

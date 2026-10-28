@@ -28,6 +28,7 @@ typedef struct {
     
     /* Output options */
     char dot_output[512];
+    char workflow_output[512];
     int show_dep_graph;
     int show_exec_graph;
     int show_state_graph;
@@ -75,7 +76,7 @@ static void print_usage_integrated(void) {
     fprintf(o, "  %s╔════════════════════════════════════════════════════════════════════╗%s\n", B, R);
     fprintf(o, "  %s║%s  ╦  ╔═══════════════════════════════════════════════════════════════════════  %s║%s\n", B, Y, Y, R);
     fprintf(o, "  %s║%s  ║ %sNeoDAX Static Analysis Engine%s  ║  %sv%s%s  %s║%s\n", B, Y, W, R, DG, "1.0.0", R, Y, R);
-    fprintf(o, "  %s║%s  ║ %sStatic Mach-O Binary Analysis with Shogi AI Support%s    %s║%s\n", B, Y, DG, R, Y, R);
+    fprintf(o, "  %s║%s  ║ %sStatic Mach-O Binary Analysis%s                    %s║%s\n", B, Y, DG, R, Y, R);
     fprintf(o, "  %s║%s  ╚═══════════════════════════════════════════════════════════════════════  %s║%s\n", B, Y, Y, R);
     fprintf(o, "  %s╚══════════════════════════════════════════════════════════════════════════════╝%s\n", B, R);
     fprintf(o, "\n");
@@ -92,13 +93,9 @@ static void print_usage_integrated(void) {
     fprintf(o, "  %s  --track-state%s        Track state changes throughout execution\n", G, R);
     fprintf(o, "\n");
 
-    fprintf(o, "  %sSHOGI AI ANALYSIS%s\n", M, R);
-    fprintf(o, "  %s  --shogi%s             Enable Shogi AI specific analysis\n", G, R);
+    fprintf(o, "  %sPATTERN ANALYSIS%s\n", M, R);
     fprintf(o, "  %s  --beam-search%s       Analyze beam search patterns\n", G, R);
-    fprintf(o, "  %s  --shogi-board%s       Track board state changes\n", G, R);
-    fprintf(o, "  %s  --shogi-moves%s       Track move generation and history\n", G, R);
-    fprintf(o, "  %s  --shogi-search%s      Analyze search tree construction\n", G, R);
-    fprintf(o, "  %s  --shogi-eval%s        Track evaluation values\n", G, R);
+    fprintf(o, "  %s  --classify-vars%s      Classify variable roles (board, move, eval, search)\n", G, R);
     fprintf(o, "\n");
 
     fprintf(o, "  %sBEND INSPIRED ANALYSIS%s\n", C, R);
@@ -122,8 +119,8 @@ static void print_usage_integrated(void) {
     fprintf(o, "\n");
 
     fprintf(o, "  %sEXAMPLES%s\n", W, R);
-    fprintf(o, "  %s  neodax_static --static-analysis --classify-vars shogi_engine\n", G, R);
-    fprintf(o, "  %s  neodax_static --shogi --beam-search --parallel-complement shogi_ai\n", G, R);
+    fprintf(o, "  %s  neodax_static --static-analysis --classify-vars engine\n", G, R);
+    fprintf(o, "  %s  neodax_static --beam-search --parallel-complement engine\n", G, R);
     fprintf(o, "  %s  neodax_static --bend --proof-based --detect-parallel binary\n", G, R);
     fprintf(o, "  %s  neodax_static --static-analysis -o analysis.dot binary\n", G, R);
     fprintf(o, "\n");
@@ -131,7 +128,7 @@ static void print_usage_integrated(void) {
 
 static void print_version_integrated(void) {
     printf("NeoDAX Static Analysis Engine v1.0.0\n");
-    printf("Static Mach-O Binary Analysis with Shogi AI Support\n");
+    printf("Static Mach-O Binary Analysis\n");
 }
 
 int main(int argc, char **argv) {
@@ -198,9 +195,12 @@ int main(int argc, char **argv) {
             opts.parallel_complement = 1;
         }
         else if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) {
-            if (i + 1 < argc) {
+            if (i + 1 < argc)
                 strncpy(opts.dot_output, argv[++i], sizeof(opts.dot_output) - 1);
-            }
+        }
+        else if (strcmp(argv[i], "--emit-workflow") == 0) {
+            if (i + 1 < argc)
+                strncpy(opts.workflow_output, argv[++i], sizeof(opts.workflow_output) - 1);
         }
         else if (strcmp(argv[i], "--show-dep-graph") == 0) {
             opts.show_dep_graph = 1;
@@ -314,6 +314,7 @@ int main(int argc, char **argv) {
     static_opts.proof_based_analysis = opts.proof_based;
     
     strncpy(static_opts.dot_output, opts.dot_output, sizeof(static_opts.dot_output) - 1);
+    strncpy(static_opts.workflow_output, opts.workflow_output, sizeof(static_opts.workflow_output) - 1);
     static_opts.show_dependency_graph = opts.show_dep_graph;
     static_opts.show_execution_graph = opts.show_exec_graph;
     static_opts.show_state_graph = opts.show_state_graph;

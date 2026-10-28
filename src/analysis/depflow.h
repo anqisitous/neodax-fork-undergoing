@@ -14,6 +14,19 @@
 #define DEPFLOW_MAX_EDGES 262144
 #define DEPFLOW_MAX_PATHS 1024
 #define DEPFLOW_MAX_DEPTH 32
+#define DEPFLOW_ADDR_BUCKETS 16384
+
+// Origin classification for values / edges (format-neutral, no NR needed)
+typedef enum {
+    DEPFLOW_ORIGIN_UNKNOWN = 0,
+    DEPFLOW_ORIGIN_CONST,
+    DEPFLOW_ORIGIN_PARAM,
+    DEPFLOW_ORIGIN_GLOBAL,
+    DEPFLOW_ORIGIN_EXTCALL,
+    DEPFLOW_ORIGIN_CALLEE_RET,
+    DEPFLOW_ORIGIN_RECURSION,
+    DEPFLOW_ORIGIN_INDIRECT
+} depflow_origin_t;
 
 // Dependency node types
 #define DEPFLOW_NODE_REGISTER 0
@@ -67,7 +80,8 @@ typedef struct depflow_node_t {
     
     // For stack nodes
     int64_t stack_offset;              // Stack offset
-    
+
+    int addr_next;                     // Hash-chain link for address lookup
 } depflow_node_t;
 
 // Dependency graph edge
@@ -79,7 +93,9 @@ typedef struct depflow_edge_t {
     int is_conditional;                // Is this a conditional dependency?
     int is_strong;                     // Is this a strong dependency?
     uint64_t weight;                   // Edge weight for importance
-    
+
+    int origin;                        // depflow_origin_t of the value on this edge
+    int confidence;                    // 0-100
 } depflow_edge_t;
 
 // Dependency path
@@ -124,6 +140,99 @@ typedef struct depflow_func_deps_t {
     
 } depflow_func_deps_t;
 
+#define DEPFLOW_MAX_VARGS  8
+#define DEPFLOW_MAX_VOUTS  8
+#define DEPFLOW_MAX_CONDS  2
+
+// Condition under which passing a value / producing an output actually
+// changes state. This is the "guard" carried on a virtual arg/out so the
+// analysis can say "state changes only if <cond>".
+typedef enum {
+    DEPFLOW_COND_NONE = 0,
+    DEPFLOW_COND_EQ_CONST,     // arg == const
+    DEPFLOW_COND_NE_CONST,     // arg != const
+    DEPFLOW_COND_MSG_TYPE,     // dispatch message tag equals value
+    DEPFLOW_COND_FLAG_BIT,     // bit test (tbz/tbnz)
+    DEPFLOW_COND_BOUNDS,       // range / depth / size bound
+    DEPFLOW_COND_PTR_NULL,     // pointer null / non-null
+    DEPFLOW_COND_LOOP,         // only reached inside a loop
+    DEPFLOW_COND_EXTERNAL      // depends on extcall/global/unknown
+} depflow_cond_kind_t;
+
+typedef struct {
+    depflow_cond_kind_t kind;
+    uint64_t site;             // compare/branch address
+    uint64_t value;            // constant compared, for EQ/NE/FLAG
+    int      target_func;      // MSG_TYPE -> handler func idx, else -1
+    int      confidence;       // 0-100
+    int      state;            // 1 = then (branch taken), 0 = now (fall-through)
+    char     tag[24];          // "msg==SEARCH", "board!=0" ...
+} depflow_condition_t;
+
+typedef enum {
+    DEPFLOW_VARG_UNKNOWN = 0,
+    DEPFLOW_VARG_REG,          // ABI argument register
+    DEPFLOW_VARG_STACK         // stack argument slot
+} depflow_varg_kind_t;
+
+// A virtual argument: where it comes from, how sure we are, and the guard
+// under which handing this value to the function mutates state.
+typedef struct {
+    depflow_varg_kind_t kind;
+    int      reg;              // x0..x7 -> 0..7, -1 if unresolved
+    int      index;            // parameter index
+    uint64_t source;           // call-site address that supplies it
+    int      origin;           // depflow_origin_t
+    int      confidence;       // 0-100
+    int      read_before_write;// 1 => true parameter, not a local
+    int      nconds;
+    depflow_condition_t conds[DEPFLOW_MAX_CONDS];
+} depflow_varg_t;
+
+typedef enum {
+    DEPFLOW_VOUT_RET = 0,      // return value
+    DEPFLOW_VOUT_GLOBAL,       // global/memory write
+    DEPFLOW_VOUT_SIDEEFFECT    // IO / indirect / opaque effect
+} depflow_vout_kind_t;
+
+// A virtual output: what the function produces/changes and under which guard.
+typedef struct {
+    depflow_vout_kind_t kind;
+    uint64_t address;          // global written, or callee addr for RET
+    uint64_t source;           // defining/call-site address
+    int      origin;           // depflow_origin_t
+    int      confidence;       // 0-100
+    int      nconds;
+    depflow_condition_t conds[DEPFLOW_MAX_CONDS];
+    int      changes_state;    // 1 => mutates persistent state
+} depflow_vout_t;
+
+// First call site in a basic block (cached once per graph).
+typedef struct {
+    uint64_t addr;
+    uint64_t target;
+    int      has_target;
+    int      valid;
+} depflow_first_call_t;
+
+// Virtual per-function summary: what a function takes in and gives out,
+// inferred from the call graph + xrefs (no NR / no instruction IR).
+typedef struct depflow_func_summary_t {
+    int      func_idx;
+    uint64_t address;
+    int      nargs;
+    depflow_varg_t args[DEPFLOW_MAX_VARGS];
+    int      nouts;
+    depflow_vout_t outs[DEPFLOW_MAX_VOUTS];
+    int      ncallees;                 // internal calls
+    int      n_extcalls;               // calls to imports/undefined symbols
+    int      nindirect;                // indirect calls (unresolvable)
+    int      is_recursive;
+    int      ring_id;                  // SCC id: functions in the same ring
+    int      dirty;                    // worklist: needs (re)propagation
+    int      confidence;               // 0-100
+} depflow_func_summary_t;
+
 // Dependency graph structure
 typedef struct depflow_graph_t {
     depflow_node_t *nodes;
@@ -134,9 +243,10 @@ typedef struct depflow_graph_t {
     int edge_count;
     int edge_capacity;
     
-    // Index maps for quick lookup
-    uint64_t addr_to_node[DEPFLOW_MAX_NODES];  // Address to node ID mapping
-    int node_count_at_addr;
+    // Address -> node index hash buckets (chained via depflow_node_t.addr_next).
+    // Previously an address-indexed array, which silently dropped every real
+    // Mach-O VA (0x100000000+ > DEPFLOW_MAX_NODES).
+    int addr_bucket[DEPFLOW_ADDR_BUCKETS];
     
     // Function dependencies
     depflow_func_deps_t *func_deps;
@@ -152,6 +262,21 @@ typedef struct depflow_graph_t {
     int path_count;
     int path_capacity;
     
+    // Virtual per-function summaries (args/outputs inferred without NR)
+    depflow_func_summary_t *summaries;
+    int summary_count;
+
+    // Cached first call per basic block (indexed by bin->blocks[] global idx)
+    depflow_first_call_t *first_call;
+    int first_call_count;
+
+    // Call-graph SCCs ("rings"): mutually recursive function sets
+    int ring_count;
+
+    // Edge dedup: identical (from,to,type) share one edge (address sharing)
+    int  edge_ht_cap;
+    int *edge_ht;
+
     // Analysis statistics
     uint64_t total_dependencies;
     uint64_t max_path_length;
@@ -197,6 +322,17 @@ int depflow_graph_add_node(depflow_graph_t *graph, depflow_node_t *node);
 int depflow_graph_add_edge(depflow_graph_t *graph, uint64_t from, uint64_t to, int type);
 int depflow_graph_add_edge_full(depflow_graph_t *graph, uint64_t from, uint64_t to, 
                                   int type, uint64_t site, int is_conditional);
+int depflow_graph_add_edge_origin(depflow_graph_t *graph, uint64_t from, uint64_t to,
+                                  int type, uint64_t site, int is_conditional,
+                                  int origin, int confidence);
+
+// Virtual function summaries (args/outputs) + edge origin annotation
+int depflow_build_summaries(macho_binary_t *bin, depflow_graph_t *graph);
+int depflow_summaries_fixpoint(macho_binary_t *bin, depflow_graph_t *graph);
+int depflow_cache_first_calls(macho_binary_t *bin, depflow_graph_t *graph);
+int depflow_build_rings(macho_binary_t *bin, depflow_graph_t *graph);
+const char *depflow_origin_str(int origin);
+const char *depflow_cond_str(int kind);
 
 // Node management
 uint64_t depflow_node_create(depflow_graph_t *graph, int type, uint64_t address, 
@@ -205,7 +341,8 @@ uint64_t depflow_node_create_variable(depflow_graph_t *graph, uint64_t address,
                                          const char *name, uint64_t size, int category);
 uint64_t depflow_node_create_register(depflow_graph_t *graph, uint64_t address,
                                         int reg_num, int reg_class);
-uint64_t depflow_node_create_function(depflow_graph_t *graph, int func_idx);
+uint64_t depflow_node_create_function(depflow_graph_t *graph, int func_idx,
+                                      uint64_t address, const char *name);
 
 // Dependency analysis
 int depflow_analyze(macho_binary_t *bin, macho_opts_t *opts);
@@ -247,6 +384,15 @@ void depflow_print_parallel_analysis(depflow_graph_t *graph, macho_opts_t *opts,
 
 // DOT export
 void depflow_export_dot(depflow_graph_t *graph, const char *filename);
+
+// Emit the recovered workflow as compilable C++ (functions = steps,
+// calls = transitions, guards = then/now, externals/indirect/parallel stubs).
+void depflow_export_workflow(macho_binary_t *bin, depflow_graph_t *graph,
+                             const char *filename);
+
+// Role classification for a function (behaviour + var-category based).
+int depflow_function_role(macho_binary_t *bin, depflow_graph_t *graph,
+                          int func_idx, char *out, size_t n);
 void depflow_export_subgraph_dot(depflow_graph_t *graph, const char *filename,
                                   uint64_t start_node, int depth);
 

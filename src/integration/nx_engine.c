@@ -38,50 +38,14 @@ static void nx_reg_all_impl(void) {
     /* 旧 neodax は NX_WITH_LEGACY でリンクされたときだけ実体を持つ。
        常に登録するが、未ビルドなら open() が NULL を返す。 */
     nx_register_provider(nx_provider_dax());
-    /* 命令デコーダ (arch ごとの多態) */
-    nx_decode_register_all();
 }
 static void nx_registry_init(void) {
     pthread_once(&g_reg_once, nx_reg_all_impl);
 }
 
 /* ================================================================== */
-/* decoder registry — arch ごとの実装を実行時に選ぶ                    */
+/* decoder registry now lives in nx_decode.c (linked by both binaries)  */
 /* ================================================================== */
-
-#define NX_MAX_DECODERS 8
-
-static const nx_decoder_t *g_decoders[NX_MAX_DECODERS];
-static int                 g_ndecoders = 0;
-
-void nx_register_decoder(const nx_decoder_t *d) {
-    if (!d || !d->decode) return;
-    pthread_mutex_lock(&g_reg_lock);
-    for (int i = 0; i < g_ndecoders; i++) {
-        if (g_decoders[i] == d) { pthread_mutex_unlock(&g_reg_lock); return; }
-    }
-    if (g_ndecoders < NX_MAX_DECODERS) g_decoders[g_ndecoders++] = d;
-    pthread_mutex_unlock(&g_reg_lock);
-}
-
-const nx_decoder_t *nx_select_decoder(nx_arch_t arch) {
-    if (arch == NX_ARCH_UNKNOWN) return NULL;
-    nx_registry_init();
-    const nx_decoder_t *best = NULL;
-    pthread_mutex_lock(&g_reg_lock);
-    for (int i = 0; i < g_ndecoders; i++) {
-        if (g_decoders[i]->arch == arch) { best = g_decoders[i]; break; }
-    }
-    pthread_mutex_unlock(&g_reg_lock);
-    return best;
-}
-
-int nx_decode(nx_arch_t arch, uint64_t addr,
-              const uint8_t *bytes, size_t len, nx_insn_t *out) {
-    const nx_decoder_t *d = nx_select_decoder(arch);
-    if (!d || !d->decode) return NX_ENOTSUP;
-    return d->decode(addr, bytes, len, out);
-}
 
 /* ================================================================== */
 /* detection + capability negotiation (自律ディスパッチ)               */
@@ -156,6 +120,9 @@ nx_binary_t *nx_open(const char *path, uint32_t require) {
 
     nx_binary_t *b = p->open(path, buf, (size_t)sz);
     if (!b) { free(buf); return NULL; }
+
+    /* provider が ops を設定し忘れても呼び出し側で補う。 */
+    if (!b->ops) b->ops = p;
 
     /* 形式判定用のバッファは provider が所有権を取るかコピーする契約。
        ここでは provider が data を保持しない実装でも安全なように

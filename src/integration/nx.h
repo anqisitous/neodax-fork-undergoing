@@ -65,7 +65,8 @@ typedef enum {
     NX_ARCH_UNKNOWN = 0,
     NX_ARCH_X86_64,
     NX_ARCH_ARM64,
-    NX_ARCH_RISCV64
+    NX_ARCH_RISCV64,
+    NX_ARCH_X86_32
 } nx_arch_t;
 
 /* ------------------------------------------------------------------ */

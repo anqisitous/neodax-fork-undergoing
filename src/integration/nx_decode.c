@@ -14,6 +14,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "arm64.h"
 #include "x86.h"
@@ -98,4 +99,46 @@ static const nx_decoder_t g_dec_x86   = { "x86_64", NX_ARCH_X86_64, dec_x86_64 }
 void nx_decode_register_all(void) {
     nx_register_decoder(&g_dec_arm64);
     nx_register_decoder(&g_dec_x86);
+}
+
+/* ------------------------------------------------------------------ */
+/* decoder registry (self-contained; no provider-registry dependency)  */
+/* ------------------------------------------------------------------ */
+
+#define NX_MAX_DECODERS 8
+
+static const nx_decoder_t *g_decoders[NX_MAX_DECODERS];
+static int                 g_ndecoders = 0;
+static pthread_mutex_t     g_dec_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t      g_dec_once = PTHREAD_ONCE_INIT;
+
+static void nx_dec_init_once(void) { nx_decode_register_all(); }
+
+void nx_register_decoder(const nx_decoder_t *d) {
+    if (!d || !d->decode) return;
+    pthread_mutex_lock(&g_dec_lock);
+    for (int i = 0; i < g_ndecoders; i++) {
+        if (g_decoders[i] == d) { pthread_mutex_unlock(&g_dec_lock); return; }
+    }
+    if (g_ndecoders < NX_MAX_DECODERS) g_decoders[g_ndecoders++] = d;
+    pthread_mutex_unlock(&g_dec_lock);
+}
+
+const nx_decoder_t *nx_select_decoder(nx_arch_t arch) {
+    if (arch == NX_ARCH_UNKNOWN) return NULL;
+    pthread_once(&g_dec_once, nx_dec_init_once);
+    const nx_decoder_t *best = NULL;
+    pthread_mutex_lock(&g_dec_lock);
+    for (int i = 0; i < g_ndecoders; i++) {
+        if (g_decoders[i]->arch == arch) { best = g_decoders[i]; break; }
+    }
+    pthread_mutex_unlock(&g_dec_lock);
+    return best;
+}
+
+int nx_decode(nx_arch_t arch, uint64_t addr,
+              const uint8_t *bytes, size_t len, nx_insn_t *out) {
+    const nx_decoder_t *d = nx_select_decoder(arch);
+    if (!d || !d->decode) return NX_ENOTSUP;
+    return d->decode(addr, bytes, len, out);
 }

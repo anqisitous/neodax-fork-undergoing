@@ -1,26 +1,16 @@
 #include "macho_static.h"
-#include "arm64.h"   /* 旧 neodax エンジンの ARM64 デコーダ (src/arm64_decode.c) */
+#include "arm64.h"            /* 旧 neodax エンジンの ARM64 デコーダ (src/arm64_decode.c) */
+#include "integration/nx.h"     /* nx_decode — arch ごとのデコーダを実行時に選ぶ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#define min(a,b) (((a)<(b))?(a):(b))
+#include "dax.h"   /* canonical parser API: dax_parse_macho(), dax_binary_t */
 
 // ============================================================================
-// Mach-O Static Analysis Implementation
-// 
-// 静的解析のためのMach-Oファイルパーサと解析エンジン
+// Mach-O Static Analysis — analysis layer only.
+// Wire parsing is composed from src/macho.c (dax_parse_macho).
 // ============================================================================
-
-// Byte swap utilities
-static uint32_t bswap32(uint32_t v) {
-    return ((v & 0xFF) << 24) | ((v & 0xFF00) << 8) | ((v & 0xFF0000) >> 8) | (v >> 24);
-}
-
-static uint64_t bswap64(uint64_t v) {
-    return ((uint64_t)bswap32((uint32_t)(v & 0xFFFFFFFF)) << 32) |
-           (uint64_t)bswap32((uint32_t)(v >> 32));
-}
 
 // ============================================================================
 // Initialization and Cleanup
@@ -150,664 +140,133 @@ int macho_is_valid(macho_binary_t *bin) {
 }
 
 // ============================================================================
-// Fat Binary Parsing
+// Parsing — composition over the canonical engine parser (src/macho.c)
+//
+// Mach-O wire parsing exists in exactly one place: dax_parse_macho() fills a
+// dax_binary_t. This file projects that result into the analysis view and does
+// not re-implement the format itself.
 // ============================================================================
 
-static int fat_find_slice(const uint8_t *data, size_t sz,
-                         uint32_t want_cpu,
-                         uint32_t *out_off, uint32_t *out_size) {
-    if (sz < sizeof(macho_fat_header_t)) return -1;
-    
-    const macho_fat_header_t *fh = (const macho_fat_header_t *)data;
-    uint32_t narch = bswap32(fh->nfat_arch);
-    
-    if (narch > 64) return -1;
-    
-    size_t base = sizeof(macho_fat_header_t);
-    
-    // First pass: try to find the exact CPU type
-    for (uint32_t i = 0; i < narch; i++) {
-        if (base + sizeof(macho_fat_arch_t) > sz) break;
-        const macho_fat_arch_t *fa = (const macho_fat_arch_t *)(data + base);
-        uint32_t cpu = bswap32(fa->cputype);
-        uint32_t off = bswap32(fa->offset);
-        uint32_t fsz = bswap32(fa->size);
-        
-        if (cpu == want_cpu && off + fsz <= sz) {
-            *out_off = off;
-            *out_size = fsz;
-            return 0;
-        }
-        base += sizeof(macho_fat_arch_t);
+static macho_arch_t project_arch(dax_arch_t a) {
+    switch (a) {
+        case ARCH_ARM64:   return MACHO_ARCH_ARM64;
+        case ARCH_X86_64:  return MACHO_ARCH_X86_64;
+        case ARCH_RISCV64: return MACHO_ARCH_RISCV64;
+        case ARCH_X86:     return MACHO_ARCH_X86_32;
+        default:           return MACHO_ARCH_UNKNOWN;
     }
-    
-    // Second pass: fall back to first valid slice
-    base = sizeof(macho_fat_header_t);
-    for (uint32_t i = 0; i < narch; i++) {
-        if (base + sizeof(macho_fat_arch_t) > sz) break;
-        const macho_fat_arch_t *fa = (const macho_fat_arch_t *)(data + base);
-        uint32_t off = bswap32(fa->offset);
-        uint32_t fsz = bswap32(fa->size);
-        if (off + fsz <= sz) {
-            *out_off = off;
-            *out_size = fsz;
-            return 0;
-        }
-        base += sizeof(macho_fat_arch_t);
-    }
-    
-    return -1;
 }
 
-int macho_parse_fat(macho_binary_t *bin, const uint8_t *data, size_t size) {
-    if (size < sizeof(macho_fat_header_t)) return -1;
-    
-    uint32_t magic = *(const uint32_t *)data;
-    
-    if (magic != MACHO_FAT_MAGIC && magic != MACHO_FAT_MAGIC_LE) {
-        return -1; // Not a fat binary
+static macho_sec_type_t project_sec(dax_sec_type_t t) {
+    switch (t) {
+        case SEC_TYPE_CODE:    return MACHO_SEC_TYPE_CODE;
+        case SEC_TYPE_DATA:    return MACHO_SEC_TYPE_DATA;
+        case SEC_TYPE_RODATA:  return MACHO_SEC_TYPE_RODATA;
+        case SEC_TYPE_BSS:     return MACHO_SEC_TYPE_BSS;
+        case SEC_TYPE_PLT:     return MACHO_SEC_TYPE_PLT;
+        case SEC_TYPE_GOT:     return MACHO_SEC_TYPE_GOT;
+        case SEC_TYPE_DYNAMIC: return MACHO_SEC_TYPE_DYNAMIC;
+        case SEC_TYPE_DEBUG:   return MACHO_SEC_TYPE_DEBUG;
+        case SEC_TYPE_OTHER:   return MACHO_SEC_TYPE_OTHER;
+        default:               return MACHO_SEC_TYPE_UNKNOWN;
     }
-    
-    uint32_t off = 0, slice_sz = 0;
-    
-    // Try ARM64 first, then x86_64
-    if (fat_find_slice(data, size, MACHO_CPU_ARM64, &off, &slice_sz) != 0) {
-        if (fat_find_slice(data, size, MACHO_CPU_X86_64, &off, &slice_sz) != 0) {
-            return -1; // No valid slice found
-        }
-    }
-    
-    if (off == 0 || off + slice_sz > size) {
-        return -1;
-    }
-    
-    // Recursively parse the selected slice
-    return macho_parse_header(bin, data + off, slice_sz);
 }
 
-// ============================================================================
-// Header Parsing
-// ============================================================================
+static macho_symbol_type_t project_sym(dax_sym_type_t t) {
+    switch (t) {
+        case SYM_FUNC:   return MACHO_SYMBOL_TYPE_FUNC;
+        case SYM_OBJECT: return MACHO_SYMBOL_TYPE_OBJECT;
+        case SYM_IMPORT: return MACHO_SYMBOL_TYPE_IMPORT;
+        case SYM_EXPORT: return MACHO_SYMBOL_TYPE_EXPORT;
+        case SYM_WEAK:   return MACHO_SYMBOL_TYPE_WEAK;
+        case SYM_LOCAL:  return MACHO_SYMBOL_TYPE_LOCAL;
+        default:         return MACHO_SYMBOL_TYPE_UNKNOWN;
+    }
+}
 
-int macho_parse_header(macho_binary_t *bin, const uint8_t *data, size_t size) {
-    if (size < sizeof(macho_header64_t)) {
-        fprintf(stderr, "macho: Mach-O too small\n");
-        return -1;
+/* dax_binary_t -> macho_binary_t. data/size stay borrowed by the parser. */
+static int project_binary(const dax_binary_t *src, macho_binary_t *dst) {
+    int i;
+
+    dst->data        = src->data;   /* borrowed; macho_free releases it */
+    dst->size        = src->size;
+    dst->arch        = project_arch(src->arch);
+    dst->filetype    = src->filetype;
+    dst->cputype     = src->cputype;
+    dst->cpusubtype  = src->cpusubtype;
+    dst->flags       = src->flags;
+    dst->entry       = src->entry;
+    dst->base        = src->base;
+    /* dax_binary_t stores image_size as a relative size; the analysis layer
+       (nx_addr_in_image / function bounds) expects the absolute end address. */
+    dst->image_size  = src->image_size ? (src->base + src->image_size) : 0;
+    dst->is_pie      = src->is_pie;
+    dst->is_stripped = src->is_stripped;
+    dst->code_size   = src->code_size;
+    dst->data_size   = src->data_size;
+    strncpy(dst->filepath, src->filepath, sizeof(dst->filepath) - 1);
+
+    dst->nsections = 0;
+    for (i = 0; i < src->nsections && dst->nsections < MAX_MACHO_SECTIONS; i++) {
+        const dax_section_t *s = &src->sections[i];
+        macho_section_t *d = &dst->sections[dst->nsections++];
+        memset(d, 0, sizeof(*d));
+        strncpy(d->segname, s->segname, sizeof(d->segname) - 1);
+        strncpy(d->name, s->name, sizeof(d->name) - 1);
+        d->offset      = s->offset;
+        d->vaddr       = s->vaddr;
+        d->size        = s->size;
+        d->flags       = s->flags;
+        d->type        = project_sec(s->type);
+        d->insn_count  = s->insn_count;
+        d->file_offset = s->file_offset;
+        d->executable  = s->executable;
+        d->writable    = s->writable;
+        d->readable    = s->readable;
     }
-    
-    uint32_t magic = *(const uint32_t *)data;
-    int is64 = 0;
-    int swap = 0;
-    
-    /* magic は LE ホストでの読み値。
-       MH_MAGIC(MACHO_MAGIC_*) = ファイルもホストと同じ LE → swap 不要。
-       MH_CIGAM(MACHO_MAGIC_*_LE) = ファイルは BE → swap 必要。 */
-    if (magic == MACHO_MAGIC_64) {
-        is64 = 1; swap = 0;
-    } else if (magic == MACHO_MAGIC_64_LE) {
-        is64 = 1; swap = 1;
-    } else if (magic == MACHO_MAGIC_32) {
-        is64 = 0; swap = 0;
-    } else if (magic == MACHO_MAGIC_32_LE) {
-        is64 = 0; swap = 1;
-    } else {
-        fprintf(stderr, "macho: unrecognized Mach-O magic 0x%08X\n", magic);
-        return -1;
+
+    dst->nsymbols = 0;
+    if (src->symbols && src->nsymbols > 0) {
+        int n = src->nsymbols < MAX_MACHO_SYMBOLS ? src->nsymbols : MAX_MACHO_SYMBOLS;
+        dst->symbols = (macho_symbol_t *)calloc((size_t)n, sizeof(macho_symbol_t));
+        if (!dst->symbols) return -1;
+        dst->symbols_allocated = n;
+        for (i = 0; i < n; i++) {
+            const dax_symbol_t *s = &src->symbols[i];
+            macho_symbol_t *d = &dst->symbols[dst->nsymbols++];
+            d->address = s->address;
+            strncpy(d->name, s->name, sizeof(d->name) - 1);
+            strncpy(d->demangled, s->name, sizeof(d->demangled) - 1);
+            d->type         = project_sym(s->type);
+            d->is_entry     = s->is_entry;
+            d->is_global    = s->is_global;
+            d->is_weak      = s->is_weak;
+            d->is_undefined = s->is_undefined;
+            d->section_idx  = s->section_idx;
+        }
     }
-    
-    #define LE32(v) (swap ? bswap32(v) : (v))
-    #define LE64(v) (swap ? bswap64(v) : (v))
-    
-    const macho_header64_t *hdr = (const macho_header64_t *)data;
-    uint32_t cputype = LE32(hdr->cputype);
-    uint32_t filetype = LE32(hdr->filetype);
-    uint32_t ncmds = LE32(hdr->ncmds);
-    uint32_t sizeofcmds = LE32(hdr->sizeofcmds);
-    uint32_t flags = LE32(hdr->flags);
-    
-    // Set architecture
-    switch (cputype) {
-        case MACHO_CPU_ARM64:
-            bin->arch = MACHO_ARCH_ARM64;
-            break;
-        case MACHO_CPU_X86_64:
-            bin->arch = MACHO_ARCH_X86_64;
-            break;
-        default:
-            bin->arch = MACHO_ARCH_UNKNOWN;
-            break;
-    }
-    
-    bin->filetype = filetype;
-    bin->cputype = cputype;
-    bin->flags = flags;
-    bin->is_pie = (filetype == MACHO_MH_DYLIB) ? 1 : 0;
-    
-    // Parse load commands
-    if (macho_parse_load_commands(bin, data, size) != 0) {
-        return -1;
-    }
-    
-    // Parse sections
-    if (macho_parse_sections(bin, data, size) != 0) {
-        return -1;
-    }
-    
-    // Parse symbols
-    if (macho_parse_symbols(bin, data, size) != 0) {
-        // Non-fatal: symbols might be stripped
-        bin->is_stripped = 1;
-    }
-    
-    #undef LE32
-    #undef LE64
-    
     return 0;
 }
 
 int macho_parse(macho_binary_t *bin, const uint8_t *data, size_t size) {
     if (!bin || !data || size == 0) return -1;
-    
-    // Check for fat binary
-    uint32_t magic = *(const uint32_t *)data;
-    
-    if (magic == MACHO_FAT_MAGIC || magic == MACHO_FAT_MAGIC_LE) {
-        return macho_parse_fat(bin, data, size);
+
+    dax_binary_t tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.data = (uint8_t *)data;   /* borrowed by the canonical parser */
+    tmp.size = size;
+    strncpy(tmp.filepath, bin->filepath, sizeof(tmp.filepath) - 1);
+
+    if (dax_parse_macho(&tmp) != 0) {
+        free(tmp.symbols);
+        return -1;
     }
-    
-    // Parse as regular Mach-O
-    return macho_parse_header(bin, data, size);
+
+    int rc = project_binary(&tmp, bin);
+    free(tmp.symbols);            /* projection copied what it needs */
+    return rc;
 }
 
-// ============================================================================
-// Load Command Parsing
-// ============================================================================
-
-int macho_parse_load_commands(macho_binary_t *bin, const uint8_t *data, size_t size) {
-    if (size < sizeof(macho_header64_t)) return -1;
-    
-    uint32_t magic = *(const uint32_t *)data;
-    int is64 = (magic == MACHO_MAGIC_64 || magic == MACHO_MAGIC_64_LE) ? 1 : 0;
-    int swap = (magic == MACHO_MAGIC_64_LE || magic == MACHO_MAGIC_32_LE) ? 1 : 0;
-    
-    #define LE32(v) (swap ? bswap32(v) : (v))
-    #define LE64(v) (swap ? bswap64(v) : (v))
-    
-    const macho_header64_t *hdr = (const macho_header64_t *)data;
-    uint32_t ncmds = LE32(hdr->ncmds);
-    uint32_t sizeofcmds = LE32(hdr->sizeofcmds);
-    
-    size_t hdr_size = is64 ? sizeof(macho_header64_t) : sizeof(macho_header32_t);
-    size_t cmd_off = hdr_size;
-    
-    // Symbol table info for indirect symbol resolution
-    uint32_t symoff = 0, nsyms = 0, stroff = 0, strsize = 0;
-    uint32_t indirectoff = 0, nindirect = 0;
-    
-    for (uint32_t ci = 0; ci < ncmds; ci++) {
-        if (cmd_off + sizeof(macho_load_cmd_t) > size) break;
-        
-        const macho_load_cmd_t *lc = (const macho_load_cmd_t *)(data + cmd_off);
-        uint32_t cmd = LE32(lc->cmd);
-        uint32_t cmdsize = LE32(lc->cmdsize);
-        
-        if (cmdsize < 8 || cmd_off + cmdsize > size) break;
-        
-        switch (cmd) {
-            case MACHO_LC_SEGMENT_64: {
-                if (!is64) break;
-                const macho_segment64_t *seg = (const macho_segment64_t *)(data + cmd_off);
-                uint64_t vmaddr = LE64(seg->vmaddr);
-                uint64_t vmsize = LE64(seg->vmsize);
-                uint32_t ns = LE32(seg->nsects);
-                
-                if (strncmp(seg->segname, "__TEXT", 6) == 0) {
-                    bin->base = vmaddr;
-                    bin->image_size = vmaddr + vmsize;
-                }
-                
-                // Entry point detection
-                if (strncmp(seg->segname, "__TEXT", 6) == 0) {
-                    size_t sec_off = cmd_off + sizeof(macho_segment64_t);
-                    for (uint32_t si = 0; si < ns; si++) {
-                        if (sec_off + sizeof(macho_section64_t) > size) break;
-                        const macho_section64_t *sec = (const macho_section64_t *)(data + sec_off);
-                        
-                        if (strncmp(sec->sectname, "__text", 6) == 0 ||
-                            strncmp(sec->sectname, "__TEXT", 6) == 0) {
-                            // Try to find entry point
-                            // For now, use the start of __text section
-                            if (bin->entry == 0) {
-                                bin->entry = LE64(sec->addr);
-                            }
-                        }
-                        sec_off += sizeof(macho_section64_t);
-                    }
-                }
-                break;
-            }
-            
-            case MACHO_LC_SEGMENT: {
-                if (is64) break;
-                const macho_segment32_t *seg = (const macho_segment32_t *)(data + cmd_off);
-                uint32_t vmaddr = LE32(seg->vmaddr);
-                uint32_t vmsize = LE32(seg->vmsize);
-                
-                if (strncmp(seg->segname, "__TEXT", 6) == 0) {
-                    bin->base = vmaddr;
-                    bin->image_size = vmaddr + vmsize;
-                }
-                break;
-            }
-            
-            case MACHO_LC_SYMTAB: {
-                const macho_symtab_cmd_t *symtab = (const macho_symtab_cmd_t *)(data + cmd_off);
-                symoff = LE32(symtab->symoff);
-                nsyms = LE32(symtab->nsyms);
-                stroff = LE32(symtab->stroff);
-                strsize = LE32(symtab->strsize);
-                break;
-            }
-            
-            case MACHO_LC_DYSYMTAB: {
-                const macho_dysymtab_cmd_t *dysymtab = (const macho_dysymtab_cmd_t *)(data + cmd_off);
-                indirectoff = LE32(dysymtab->indirectsymoff);
-                nindirect = LE32(dysymtab->nindirectsyms);
-                break;
-            }
-            
-            case MACHO_LC_MAIN: {
-                // Entry point from LC_MAIN
-                if (is64) {
-                    const uint64_t *entry_offset = (const uint64_t *)(data + cmd_off + 16);
-                    bin->entry = LE64(*entry_offset);
-                } else {
-                    const uint32_t *entry_offset = (const uint32_t *)(data + cmd_off + 8);
-                    bin->entry = LE32(*entry_offset);
-                }
-                break;
-            }
-            
-            case MACHO_LC_UNIXTHREAD: {
-                // Entry point from thread state
-                if (is64) {
-                    // For x86_64: rip is at offset 16 in the thread command
-                    // For ARM64: pc is at offset 32
-                    if (bin->arch == MACHO_ARCH_X86_64 && cmdsize >= 16 + 8) {
-                        const uint64_t *rip = (const uint64_t *)(data + cmd_off + 16);
-                        bin->entry = LE64(*rip);
-                    } else if (bin->arch == MACHO_ARCH_ARM64 && cmdsize >= 32 + 8) {
-                        const uint64_t *pc = (const uint64_t *)(data + cmd_off + 32);
-                        bin->entry = LE64(*pc);
-                    }
-                }
-                break;
-            }
-            
-            default:
-                break;
-        }
-        
-        cmd_off += cmdsize;
-    }
-    
-    #undef LE32
-    #undef LE64
-    
-    return 0;
-}
-
-// ============================================================================
-// Section Parsing
-// ============================================================================
-
-int macho_parse_sections(macho_binary_t *bin, const uint8_t *data, size_t size) {
-    if (size < sizeof(macho_header64_t)) return -1;
-    
-    uint32_t magic = *(const uint32_t *)data;
-    int is64 = (magic == MACHO_MAGIC_64 || magic == MACHO_MAGIC_64_LE) ? 1 : 0;
-    int swap = (magic == MACHO_MAGIC_64_LE || magic == MACHO_MAGIC_32_LE) ? 1 : 0;
-    
-    #define LE32(v) (swap ? bswap32(v) : (v))
-    #define LE64(v) (swap ? bswap64(v) : (v))
-    
-    const macho_header64_t *hdr = (const macho_header64_t *)data;
-    uint32_t ncmds = LE32(hdr->ncmds);
-    
-    size_t hdr_size = is64 ? sizeof(macho_header64_t) : sizeof(macho_header32_t);
-    size_t cmd_off = hdr_size;
-    
-    for (uint32_t ci = 0; ci < ncmds; ci++) {
-        if (cmd_off + sizeof(macho_load_cmd_t) > size) break;
-        
-        const macho_load_cmd_t *lc = (const macho_load_cmd_t *)(data + cmd_off);
-        uint32_t cmd = LE32(lc->cmd);
-        uint32_t cmdsize = LE32(lc->cmdsize);
-        
-        if (cmdsize < 8 || cmd_off + cmdsize > size) break;
-        
-        if (cmd == MACHO_LC_SEGMENT_64 && is64) {
-            const macho_segment64_t *seg = (const macho_segment64_t *)(data + cmd_off);
-            uint32_t ns = LE32(seg->nsects);
-            uint32_t ip = LE32(seg->initprot);
-            
-            size_t sec_off = cmd_off + sizeof(macho_segment64_t);
-            
-            for (uint32_t si = 0; si < ns && bin->nsections < MAX_MACHO_SECTIONS; si++) {
-                if (sec_off + sizeof(macho_section64_t) > size) break;
-                
-                const macho_section64_t *sec = (const macho_section64_t *)(data + sec_off);
-                
-                macho_section_t *s = &bin->sections[bin->nsections++];
-                
-                // Copy section name
-                strncpy(s->segname, seg->segname, 16);
-                s->segname[15] = '\0';
-                strncpy(s->name, sec->sectname, 16);
-                s->name[16] = '\0';
-                
-                // If section name starts with __, remove the prefix
-                if (s->name[0] == '_' && s->name[1] == '_') {
-                    memmove(s->name, s->name + 2, strlen(s->name) - 1);
-                }
-                
-                s->offset = (uint64_t)LE32(sec->offset);
-                s->vaddr = LE64(sec->addr);
-                s->size = LE64(sec->size);
-                s->flags = LE32(sec->flags);
-                s->file_offset = s->offset;
-                s->insn_count = 0;
-                
-                // Determine section type
-                uint32_t stype = s->flags & 0xFF;
-                s->executable = (ip & 4) != 0;
-                s->writable = (ip & 2) != 0;
-                s->readable = (ip & 1) != 0;
-                
-                if (stype == MACHO_S_REGULAR || stype == MACHO_S_ZEROFILL) {
-                    if (s->executable) {
-                        s->type = MACHO_SEC_TYPE_CODE;
-                    } else if (s->writable) {
-                        s->type = MACHO_SEC_TYPE_DATA;
-                    } else {
-                        s->type = MACHO_SEC_TYPE_RODATA;
-                    }
-                } else if (stype == MACHO_S_CSTRING_LITERALS) {
-                    s->type = MACHO_SEC_TYPE_RODATA;
-                } else if (stype == MACHO_S_4BYTE_LITERALS ||
-                           stype == MACHO_S_8BYTE_LITERALS ||
-                           stype == MACHO_S_LITERAL_POINTERS) {
-                    s->type = MACHO_SEC_TYPE_RODATA;
-                } else if (stype == MACHO_S_NON_LAZY_SYMBOL_POINTERS ||
-                           stype == MACHO_S_LAZY_SYMBOL_POINTERS) {
-                    s->type = MACHO_SEC_TYPE_GOT;
-                } else if (stype == MACHO_S_SYMBOL_STUBS) {
-                    s->type = MACHO_SEC_TYPE_PLT;
-                } else {
-                    s->type = MACHO_SEC_TYPE_OTHER;
-                }
-                
-                sec_off += sizeof(macho_section64_t);
-            }
-        } else if (cmd == MACHO_LC_SEGMENT && !is64) {
-            const macho_segment32_t *seg = (const macho_segment32_t *)(data + cmd_off);
-            uint32_t ns = LE32(seg->nsects);
-            uint32_t ip = LE32(seg->initprot);
-            
-            size_t sec_off = cmd_off + sizeof(macho_segment32_t);
-            
-            for (uint32_t si = 0; si < ns && bin->nsections < MAX_MACHO_SECTIONS; si++) {
-                if (sec_off + sizeof(macho_section32_t) > size) break;
-                
-                const macho_section32_t *sec = (const macho_section32_t *)(data + sec_off);
-                
-                macho_section_t *s = &bin->sections[bin->nsections++];
-                
-                strncpy(s->segname, seg->segname, 16);
-                s->segname[15] = '\0';
-                strncpy(s->name, sec->sectname, 16);
-                s->name[16] = '\0';
-                
-                if (s->name[0] == '_' && s->name[1] == '_') {
-                    memmove(s->name, s->name + 2, strlen(s->name) - 1);
-                }
-                
-                s->offset = (uint64_t)LE32(sec->offset);
-                s->vaddr = LE32(sec->addr);
-                s->size = LE32(sec->size);
-                s->flags = LE32(sec->flags);
-                s->file_offset = s->offset;
-                s->insn_count = 0;
-                
-                uint32_t stype = s->flags & 0xFF;
-                s->executable = (ip & 4) != 0;
-                s->writable = (ip & 2) != 0;
-                s->readable = (ip & 1) != 0;
-                
-                if (stype == MACHO_S_REGULAR || stype == MACHO_S_ZEROFILL) {
-                    if (s->executable) {
-                        s->type = MACHO_SEC_TYPE_CODE;
-                    } else if (s->writable) {
-                        s->type = MACHO_SEC_TYPE_DATA;
-                    } else {
-                        s->type = MACHO_SEC_TYPE_RODATA;
-                    }
-                } else {
-                    s->type = MACHO_SEC_TYPE_OTHER;
-                }
-                
-                sec_off += sizeof(macho_section32_t);
-            }
-        }
-        
-        cmd_off += cmdsize;
-    }
-    
-    #undef LE32
-    #undef LE64
-    
-    return 0;
-}
-
-// ============================================================================
-// Symbol Parsing
-// ============================================================================
-
-static int is_mangled(const char *name) {
-    if (!name || name[0] == '\0') return 0;
-    
-    // C++ mangled names typically start with _Z
-    if (name[0] == '_' && (name[1] == 'Z' || name[1] == '_')) {
-        return 1;
-    }
-    
-    return 0;
-}
-
-static void demangle_name(char *demangled, const char *name, size_t demangled_size) {
-    if (!name || !demangled || demangled_size == 0) {
-        if (demangled && demangled_size > 0) demangled[0] = '\0';
-        return;
-    }
-    
-    // Simple demangling for common patterns
-    // For full C++ demangling, we'd need a proper demangler
-    
-    if (strncmp(name, "_Z", 2) == 0) {
-        // Itanium ABI mangled name
-        // _ZN3Foo3BarEv -> Foo::Bar()
-        // _Z7myfuncv -> myfunc()
-        const char *p = name + 2;
-        int len = 0;
-        
-        if (*p == 'N') {
-            // Nested name: _ZN<name>E
-            p++; // skip 'N'
-            while (*p && *p != 'E') {
-                if (len < (int)demangled_size - 1) {
-                    demangled[len++] = *p;
-                }
-                p++;
-            }
-            demangled[len] = '\0';
-        } else if (*p >= '0' && *p <= '9') {
-            // Simple function name with length prefix
-            int num_len = 0;
-            while (*p >= '0' && *p <= '9') {
-                num_len = num_len * 10 + (*p - '0');
-                p++;
-            }
-            if (num_len > 0) {
-                strncpy(demangled, p, min(num_len, (int)demangled_size - 1));
-                demangled[min(num_len, (int)demangled_size - 1)] = '\0';
-            }
-        } else {
-            strncpy(demangled, name, demangled_size - 1);
-            demangled[demangled_size - 1] = '\0';
-        }
-    } else {
-        strncpy(demangled, name, demangled_size - 1);
-        demangled[demangled_size - 1] = '\0';
-    }
-}
-
-int macho_parse_symbols(macho_binary_t *bin, const uint8_t *data, size_t size) {
-    if (size < sizeof(macho_header64_t)) return -1;
-    
-    uint32_t magic = *(const uint32_t *)data;
-    int is64 = (magic == MACHO_MAGIC_64 || magic == MACHO_MAGIC_64_LE) ? 1 : 0;
-    int swap = (magic == MACHO_MAGIC_64_LE || magic == MACHO_MAGIC_32_LE) ? 1 : 0;
-    
-    #define LE32(v) (swap ? bswap32(v) : (v))
-    #define LE64(v) (swap ? bswap64(v) : (v))
-    
-    const macho_header64_t *hdr = (const macho_header64_t *)data;
-    uint32_t ncmds = LE32(hdr->ncmds);
-    
-    size_t hdr_size = is64 ? sizeof(macho_header64_t) : sizeof(macho_header32_t);
-    size_t cmd_off = hdr_size;
-    
-    uint32_t symoff = 0, nsyms = 0, stroff = 0, strsize = 0;
-    
-    // Find symbol table
-    for (uint32_t ci = 0; ci < ncmds; ci++) {
-        if (cmd_off + sizeof(macho_load_cmd_t) > size) break;
-        
-        const macho_load_cmd_t *lc = (const macho_load_cmd_t *)(data + cmd_off);
-        uint32_t cmd = LE32(lc->cmd);
-        uint32_t cmdsize = LE32(lc->cmdsize);
-        
-        if (cmdsize < 8 || cmd_off + cmdsize > size) break;
-        
-        if (cmd == MACHO_LC_SYMTAB) {
-            const macho_symtab_cmd_t *symtab = (const macho_symtab_cmd_t *)(data + cmd_off);
-            symoff = LE32(symtab->symoff);
-            nsyms = LE32(symtab->nsyms);
-            stroff = LE32(symtab->stroff);
-            strsize = LE32(symtab->strsize);
-            break;
-        }
-        
-        cmd_off += cmdsize;
-    }
-    
-    if (symoff == 0 || nsyms == 0 || stroff >= size) {
-        return -1; // No symbol table
-    }
-    
-    // Allocate symbol array
-    if (nsyms > MAX_MACHO_SYMBOLS) {
-        nsyms = MAX_MACHO_SYMBOLS;
-    }
-    
-    bin->symbols = (macho_symbol_t *)calloc(nsyms, sizeof(macho_symbol_t));
-    if (!bin->symbols) return -1;
-    bin->symbols_allocated = nsyms;
-    
-    const uint8_t *nlist_data = data + symoff;
-    const uint8_t *str_data = data + stroff;
-    
-    for (uint32_t i = 0; i < nsyms; i++) {
-        const macho_nlist64_t *nlist = (const macho_nlist64_t *)(nlist_data + i * sizeof(macho_nlist64_t));
-        
-        uint32_t str_idx = LE32(nlist->n_strx);
-        uint8_t n_type = nlist->n_type;
-        uint8_t n_sect = nlist->n_sect;
-        int16_t n_desc = nlist->n_desc;
-        
-        if (str_idx >= strsize) continue;
-        
-        const char *name = (const char *)str_data + str_idx;
-        
-        macho_symbol_t *sym = &bin->symbols[bin->nsymbols++];
-        
-        sym->address = is64 ? LE64(nlist->n_value) : LE32(nlist->n_value);
-        strncpy(sym->name, name, sizeof(sym->name) - 1);
-        sym->name[sizeof(sym->name) - 1] = '\0';
-        
-        // Demangle if needed
-        if (is_mangled(name)) {
-            demangle_name(sym->demangled, name, sizeof(sym->demangled));
-        } else {
-            strncpy(sym->demangled, name, sizeof(sym->demangled) - 1);
-            sym->demangled[sizeof(sym->demangled) - 1] = '\0';
-        }
-        
-        // Determine symbol type
-        if (n_type & MACHO_N_STAB) {
-            // Debug symbol, skip for now
-            bin->nsymbols--;
-            continue;
-        }
-        
-        switch (n_type & MACHO_N_TYPE) {
-            case MACHO_N_UNDF:
-                sym->type = MACHO_SYMBOL_TYPE_UNKNOWN;
-                if ((n_type & MACHO_N_EXT) && (n_desc & 0x10)) {
-                    sym->type = MACHO_SYMBOL_TYPE_WEAK;
-                }
-                sym->is_undefined = 1;
-                break;
-            case MACHO_N_ABS:
-                sym->type = MACHO_SYMBOL_TYPE_OBJECT;
-                break;
-            case MACHO_N_SECT:
-                if (n_sect > 0 && n_sect <= bin->nsections) {
-                    // Check if this is in a code section
-                    macho_section_t *sec = &bin->sections[n_sect - 1];
-                    if (sec->type == MACHO_SEC_TYPE_CODE) {
-                        sym->type = MACHO_SYMBOL_TYPE_FUNC;
-                    } else {
-                        sym->type = MACHO_SYMBOL_TYPE_OBJECT;
-                    }
-                } else {
-                    sym->type = MACHO_SYMBOL_TYPE_OBJECT;
-                }
-                break;
-            case MACHO_N_INDR:
-                sym->type = MACHO_SYMBOL_TYPE_IMPORT;
-                sym->is_undefined = 1;
-                break;
-            default:
-                sym->type = MACHO_SYMBOL_TYPE_UNKNOWN;
-                break;
-        }
-        
-        sym->is_global = (n_type & MACHO_N_EXT) != 0;
-        sym->is_weak = (n_desc & 0x10) != 0;
-        sym->is_entry = 0;
-        
-        // Check if this is the entry point
-        if (sym->address == bin->entry && sym->type == MACHO_SYMBOL_TYPE_FUNC) {
-            sym->is_entry = 1;
-        }
-    }
-    
-    #undef LE32
-    #undef LE64
-    
-    return 0;
-}
 
 // ============================================================================
 // Basic Analysis Functions
@@ -989,8 +448,105 @@ static void nx_compute_function_bounds(macho_binary_t *bin) {
     }
 }
 
+static nx_arch_t macho_to_nx_arch(macho_arch_t a) {
+    switch (a) {
+        case MACHO_ARCH_ARM64:  return NX_ARCH_ARM64;
+        case MACHO_ARCH_X86_64: return NX_ARCH_X86_64;
+        case MACHO_ARCH_X86_32: return NX_ARCH_X86_32;
+        default:                return NX_ARCH_UNKNOWN;
+    }
+}
+
+static int macho_insn_cmp(const void *a, const void *b) {
+    uint64_t x = ((const macho_insn_t *)a)->address;
+    uint64_t y = ((const macho_insn_t *)b)->address;
+    return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
+/* Decode every executable section once into bin->insns. */
+int macho_fill_insns(macho_binary_t *bin) {
+    if (!bin || !bin->data) return -1;
+    if (bin->insns) return 0;   /* idempotent */
+
+    nx_arch_t na = macho_to_nx_arch(bin->arch);
+    if (na == NX_ARCH_UNKNOWN) return 0;   /* no decoder for this arch */
+
+    size_t cap = 0;
+    for (int s = 0; s < bin->nsections; s++) {
+        macho_section_t *sec = &bin->sections[s];
+        if (!(sec->executable || sec->type == MACHO_SEC_TYPE_CODE)) continue;
+        cap += (size_t)(sec->size / 4) + 1;
+    }
+    if (cap == 0) return 0;
+
+    bin->insns = (macho_insn_t *)calloc(cap, sizeof(macho_insn_t));
+    if (!bin->insns) return -1;
+    bin->insns_allocated = (int)cap;
+    bin->ninsns = 0;
+
+    for (int s = 0; s < bin->nsections; s++) {
+        macho_section_t *sec = &bin->sections[s];
+        if (!(sec->executable || sec->type == MACHO_SEC_TYPE_CODE)) continue;
+
+        for (uint64_t off = 0; off < sec->size && bin->ninsns < bin->insns_allocated; ) {
+            size_t fpos = (size_t)sec->file_offset + (size_t)off;
+            if (fpos + 4 > bin->size) break;
+
+            size_t maxlen = (size_t)(sec->size - off);
+            if (maxlen > 15) maxlen = 15;
+            if (fpos + maxlen > bin->size) maxlen = bin->size - fpos;
+
+            nx_insn_t ni;
+            if (nx_decode(na, sec->vaddr + off, bin->data + fpos, maxlen, &ni) != NX_OK
+                || ni.length == 0) {
+                off += 4;
+                continue;
+            }
+
+            macho_insn_t *mi = &bin->insns[bin->ninsns++];
+            memset(mi, 0, sizeof(*mi));
+            mi->address = ni.address;
+            mi->length  = ni.length;
+            strncpy(mi->mnemonic, ni.mnemonic, sizeof(mi->mnemonic) - 1);
+            strncpy(mi->operands, ni.operands, sizeof(mi->operands) - 1);
+            mi->is_call       = ni.is_call;
+            mi->is_branch     = ni.is_branch;
+            mi->is_conditional= ni.is_cond;
+            mi->is_indirect   = ni.is_indirect;
+            mi->is_return     = ni.is_ret;
+            mi->has_target    = ni.has_target;
+            mi->target        = ni.target;
+            off += ni.length;
+        }
+    }
+
+    /* Sort by address so consumers can binary-search a function's range. */
+    if (bin->ninsns > 1)
+        qsort(bin->insns, (size_t)bin->ninsns, sizeof(macho_insn_t), macho_insn_cmp);
+    return 0;
+}
+
 static int nx_build_xrefs_arm64(macho_binary_t *bin) {
     if (!bin->data) return -1;
+
+    /* Prefer the pre-decoded instruction list (single decode, all arches). */
+    if (bin->ninsns > 0) {
+        for (int k = 0; k < bin->ninsns; k++) {
+            macho_insn_t *in = &bin->insns[k];
+            if (!(in->is_call || in->is_branch)) continue;
+            if (in->is_indirect) {
+                nx_add_xref(bin, in->address, 0,
+                            in->is_call ? MACHO_XREF_TYPE_CALL : MACHO_XREF_TYPE_BRANCH,
+                            in->is_call, in->is_conditional, 1);
+            } else if (in->has_target && nx_addr_in_image(bin, in->target)) {
+                nx_add_xref(bin, in->address, in->target,
+                            in->is_call ? MACHO_XREF_TYPE_CALL : MACHO_XREF_TYPE_BRANCH,
+                            in->is_call, in->is_conditional, 0);
+            }
+        }
+        return 0;
+    }
+
     for (int s = 0; s < bin->nsections; s++) {
         macho_section_t *sec = &bin->sections[s];
         if (!(sec->executable || sec->type == MACHO_SEC_TYPE_CODE)) continue;
@@ -1053,6 +609,7 @@ int macho_build_callgraph(macho_binary_t *bin) {
 
 int macho_build_cfg(macho_binary_t *bin) {
     if (!bin || !bin->data) return -1;
+    macho_fill_insns(bin);   /* populate bin->insns before any CFG work */
     if (bin->arch != MACHO_ARCH_ARM64) return 0;
 
     nx_compute_function_bounds(bin);

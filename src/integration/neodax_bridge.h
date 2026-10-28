@@ -55,6 +55,7 @@ typedef struct {
     int num_threads;
 
     char dot_output[512];
+    char workflow_output[512];
     int show_dependency_graph;
     int show_execution_graph;
     int show_state_graph;
@@ -110,6 +111,7 @@ void neodax_bridge_free(integrated_binary_t *ibin);
 
 int  neodax_run_static_analysis(integrated_binary_t *ibin,
                                 static_analysis_opts_t *opts, FILE *output);
+int  neodax_emit_workflow(integrated_binary_t *ibin, const char *filename);
 int  neodax_parallel_complement(integrated_binary_t *ibin,
                                 static_analysis_opts_t *opts, FILE *output);
 int  neodax_shogi_analysis(integrated_binary_t *ibin,

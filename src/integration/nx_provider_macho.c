@@ -71,6 +71,7 @@ static nx_binary_t *macho_open(const char *path, const uint8_t *data, size_t siz
         return NULL;
     }
     b->impl = impl;
+    b->ops  = nx_provider_macho();   /* nx_engine_new()/nx_provider_name() need this */
     return b;
 }
 
@@ -110,6 +111,7 @@ static nx_arch_t macho_arch(nx_binary_t *b) {
         case MACHO_ARCH_X86_64:  return NX_ARCH_X86_64;
         case MACHO_ARCH_ARM64:   return NX_ARCH_ARM64;
         case MACHO_ARCH_RISCV64: return NX_ARCH_RISCV64;
+        case MACHO_ARCH_X86_32:  return NX_ARCH_X86_32;
         default:                 return NX_ARCH_UNKNOWN;
     }
 }

@@ -25,11 +25,11 @@
 #define DAX_MAX_USTRINGS   4096
 
 typedef enum {
-    ARCH_UNKNOWN = 0, ARCH_X86_64, ARCH_ARM64, ARCH_RISCV64
+    ARCH_UNKNOWN = 0, ARCH_X86_64, ARCH_ARM64, ARCH_RISCV64, ARCH_X86
 } dax_arch_t;
 
 typedef enum {
-    FMT_UNKNOWN = 0, FMT_ELF32, FMT_ELF64, FMT_PE32, FMT_PE64, FMT_RAW
+    FMT_UNKNOWN = 0, FMT_ELF32, FMT_ELF64, FMT_PE32, FMT_PE64, FMT_MACHO, FMT_RAW
 } dax_fmt_t;
 
 typedef enum {
@@ -397,6 +397,16 @@ typedef struct {
     int      show_exec_graph;       /* 実行グラフを表示 */
     int      show_state_graph;      /* 状態グラフを表示 */
     int      show_classification;   /* 変数分類を表示 */
+
+    /* ── Advanced static analysis (engine static_analysis.c) ────────
+     * One Regression Ring: laps survey→classify→trace→predict→parallel→
+     * verify; enabled by -w / --advanced-analysis. */
+    int      advanced_analysis;
+    char     ring_svg[512];
+    int      flow_depth;
+    char     flow_var[DAX_SYM_NAME_LEN];
+    char     flow_func[DAX_SYM_NAME_LEN];
+    int      list_sections;
 } dax_opts_t;
 
 #pragma pack(push,1)
@@ -442,12 +452,14 @@ typedef struct {
 int  dax_load_binary(const char *path, dax_binary_t *bin);
 int  dax_parse_elf(dax_binary_t *bin);
 int  dax_parse_pe(dax_binary_t *bin);
+int  dax_parse_macho(dax_binary_t *bin);  /* implemented in macho.c */
 int  dax_disasm_x86_64(dax_binary_t *bin, dax_opts_t *opts, FILE *out);
 int  dax_disasm_arm64(dax_binary_t *bin, dax_opts_t *opts, FILE *out);
 int  dax_disasm_riscv64(dax_binary_t *bin, dax_opts_t *opts, FILE *out);
 void dax_print_banner(dax_binary_t *bin, dax_opts_t *opts);
 void dax_print_sections(dax_binary_t *bin, dax_opts_t *opts);
 void dax_free_binary(dax_binary_t *bin);
+void dax_free_binary_full(dax_binary_t *bin);
 
 int           dax_sym_load(dax_binary_t *bin);
 dax_symbol_t *dax_sym_find(dax_binary_t *bin, uint64_t addr);
@@ -458,6 +470,9 @@ int         dax_xref_find_to(dax_binary_t *bin, uint64_t addr, dax_xref_t *out, 
 
 int         dax_func_detect(dax_binary_t *bin, uint8_t *code, size_t sz,
                              uint64_t base, dax_section_t *sec);
+/* dax_func_finalize — sort functions by address and derive each function's
+ * end from the next function's start so the extents never overlap. */
+void        dax_func_finalize(dax_binary_t *bin);
 dax_func_t *dax_func_find(dax_binary_t *bin, uint64_t addr);
 
 int         dax_demangle(const char *mangled, char *out, size_t outsz);
@@ -499,16 +514,6 @@ void  dax_symexec_prepass(dax_binary_t *bin); /* silent — populates resolved_i
 void  dax_ssa_lift_func(dax_binary_t *bin, int func_idx, dax_opts_t *opts, FILE *out);
 void  dax_ssa_lift_all(dax_binary_t *bin, dax_opts_t *opts, FILE *out);
 void *dax_nr_lift_func_raw(dax_binary_t *bin, int func_idx);
-
-/* depflow.c — 静的な依存グラフ追跡（有限深さの逆向きdef-useトレース）、
- * 並列/順序API(pthread_create, dispatch_async等)の検出、
- * .dot出力。opts->depflow_target_funcとopts->depflow_depthで制御。 */
-int  dax_depflow_build(dax_binary_t *bin, dax_opts_t *opts);
-int  dax_depflow_trace(dax_binary_t *bin, dax_opts_t *opts,
-                        int func_idx, const char *var_base, int version,
-                        int max_depth, FILE *out);
-int  dax_depflow_print_all(dax_binary_t *bin, dax_opts_t *opts, FILE *out);
-int  dax_depflow_write_dot(dax_binary_t *bin, dax_opts_t *opts, const char *path);
 
 void  dax_decompile_func(dax_binary_t *bin, int func_idx, dax_opts_t *opts, FILE *out);
 void  dax_decompile_all(dax_binary_t *bin, dax_opts_t *opts, FILE *out);

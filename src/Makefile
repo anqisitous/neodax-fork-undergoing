@@ -11,13 +11,16 @@ SRC_DIR = .
 BUILD_DIR = ../build_neodax
 
 # Source files
+# Canonical Mach-O parser (dax_parse_macho) — composed by core/macho_static.c
 CORE_SRCS = \
-	core/macho_static.c
+	macho.c \
+	core/macho_static.c \
+	integration/nx_decode.c
 
-# 旧 neodax エンジンのデコーダ (neodax/ に退避)。core と nx_decode が呼ぶ。
+# 旧 neodax エンジンのデコーダ。src/ 直下が正準で、framework もこれを compose する。
 LEGACY_SRCS = \
-	neodax/arm64_decode.c \
-	neodax/x86_decode.c
+	arm64_decode.c \
+	x86_decode.c
 
 ANALYSIS_SRCS = \
 	analysis/depflow.c \
@@ -33,7 +36,6 @@ TRACKING_SRCS = \
 # Integration: nx autonomous dispatch core + bridge
 INTEGRATION_SRCS = \
 	integration/nx_engine.c \
-	integration/nx_decode.c \
 	integration/nx_provider_macho.c \
 	integration/nx_provider_dax.c \
 	integration/neodax_bridge.c
