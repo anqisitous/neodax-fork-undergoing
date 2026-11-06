@@ -38,6 +38,19 @@ INTEGRATION_SRCS = \
 	integration/nx_engine.c \
 	integration/nx_provider_macho.c \
 	integration/nx_provider_dax.c \
+	integration/nx_json.c \
+	integration/nx_leveldb.c \
+	integration/nx_state.c \
+	integration/nx_deepai.c \
+	integration/attach/nx_inspect.c \
+	integration/attach/nx_renderer.c \
+	integration/attach/nx_payload.c \
+	integration/attach/nx_appfix.c \
+	integration/spec/nx_spec.c \
+	integration/spec/nx_specs_builtin.c \
+	integration/spec/nx_recog.c \
+	integration/spec/nx_gen.c \
+	integration/nx_sim.c \
 	integration/neodax_bridge.c
 
 #MAIN_SRCS = \

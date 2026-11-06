@@ -19,6 +19,7 @@
 
 extern "C" {
 #include "integration/neodax_bridge.h"
+#include "integration/nx_deepai.h"
 }
 
 #include <vector>
@@ -409,6 +410,64 @@ static NSString *supportDir() {
     return d;
 }
 
+/* ── 画面再現ビュー (キャプチャ無しで状態から描画) ─────────────── */
+@interface ReplayView : NSView {
+    nx_ui_layout_t _layout;
+}
+- (void)setLayout:(nx_ui_layout_t)l;
+@end
+
+@implementation ReplayView
+- (void)setLayout:(nx_ui_layout_t)l {
+    _layout = l;   /* ポインタごとコピー (所有は呼び出し側が保持) */
+    [self setNeedsDisplay:YES];
+}
+- (BOOL)isFlipped { return NO; }
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty;
+    NSRect b = self.bounds;
+    const nx_ui_layout_t *l = &_layout;
+    if (l->n_nodes == 0 || !l->nodes) return;
+    CGFloat sx = b.size.width / l->width;
+    CGFloat sy = b.size.height / l->height;
+
+    [[NSColor colorWithCalibratedRed:0.10 green:0.11 blue:0.13 alpha:1] setFill];
+    NSRectFill(b);
+
+    for (int i = 0; i < l->n_nodes; i++) {
+        const nx_ui_node_t *n = &l->nodes[i];
+        NSRect r = NSMakeRect(n->x * sx, n->y * sy, n->w * sx, n->h * sy);
+        NSColor *c;
+        switch (n->kind) {
+            case 0: c = [NSColor colorWithCalibratedRed:0.20 green:0.22 blue:0.26 alpha:1]; break;
+            case 1: c = [NSColor colorWithCalibratedRed:0.25 green:0.45 blue:0.80 alpha:1]; break;
+            case 2: c = [NSColor colorWithCalibratedRed:0.30 green:0.65 blue:0.40 alpha:1]; break;
+            case 3: c = [NSColor colorWithCalibratedRed:0.30 green:0.32 blue:0.36 alpha:1]; break;
+            case 4: c = [NSColor colorWithCalibratedRed:0.80 green:0.25 blue:0.25 alpha:1]; break;
+            case 5: c = [NSColor colorWithCalibratedRed:0.17 green:0.18 blue:0.22 alpha:1]; break;
+            default: c = [NSColor colorWithCalibratedRed:0.14 green:0.15 blue:0.18 alpha:1]; break;
+        }
+        [c setFill]; NSRectFill(r);
+        [[NSColor colorWithCalibratedRed:0.45 green:0.50 blue:0.60 alpha:1] setStroke];
+        NSFrameRect(r);
+        NSString *label = [NSString stringWithUTF8String:n->label];
+        NSDictionary *attr = @{
+            NSForegroundColorAttributeName: [NSColor colorWithCalibratedWhite:0.95 alpha:1],
+            NSFontAttributeName: [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightMedium] };
+        NSRect lr = NSMakeRect(r.origin.x + 4, r.origin.y + r.size.height/2 - 7, r.size.width - 8, 16);
+        [label drawInRect:lr withAttributes:attr];
+    }
+    [[NSColor colorWithCalibratedRed:0.60 green:0.60 blue:0.40 alpha:1] setStroke];
+    for (int i = 0; i < l->n_edges; i++) {
+        const nx_ui_edge_t *e = &l->edges[i];
+        NSBezierPath *p = [NSBezierPath bezierPath];
+        [p moveToPoint:NSMakePoint(e->x1 * sx, e->y1 * sy)];
+        [p lineToPoint:NSMakePoint(e->x2 * sx, e->y2 * sy)];
+        [p setLineWidth:1.5]; [p stroke];
+    }
+}
+@end
+
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate>
 @property (strong) NSWindow    *window;
 @property (strong) NSTextField *pathField;
@@ -431,6 +490,10 @@ static NSString *supportDir() {
 @property (strong) NSMutableArray *edges;     // {from, to}
 @property (strong) NSMutableArray *paneRows;  // inspector rows {kind, name, info}
 @property (strong) NSString       *lastPath;
+@property (strong) ReplayView     *replayView;
+@property (strong) NSButton       *replayBtn;
+@property (strong) NSTextField    *replayStateField;
+@property (nonatomic) BOOL         replayVisible;
 @end
 
 @implementation AppDelegate
@@ -465,6 +528,18 @@ static NSString *supportDir() {
 
     self.graph = [[GraphView alloc] initWithFrame:NSMakeRect(12, 268, 780, 440)];
     [cv addSubview:self.graph];
+
+    /* 画面再現パネル (キャプチャ無しで状態から描画)。初期は非表示。 */
+    self.replayStateField = [[NSTextField alloc] initWithFrame:NSMakeRect(180, 738, 372, 30)];
+    self.replayStateField.placeholderString = @"state: /path (leveldb dir / json)";
+    [cv addSubview:self.replayStateField];
+    self.replayBtn = [[NSButton alloc] initWithFrame:NSMakeRect(12, 738, 160, 30)];
+    self.replayBtn.title = @"Replay state…"; self.replayBtn.bezelStyle = NSBezelStyleRounded;
+    self.replayBtn.target = self; self.replayBtn.action = @selector(onReplayToggle:);
+    [cv addSubview:self.replayBtn];
+    self.replayView = [[ReplayView alloc] initWithFrame:NSMakeRect(12, 268, 780, 440)];
+    self.replayView.hidden = YES;
+    [cv addSubview:self.replayView];
 
     self.curBtn = [[NSButton alloc] initWithFrame:NSMakeRect(800, 682, 388, 26)];
     self.curBtn.title = @"現在選択中"; self.curBtn.bezelStyle = NSBezelStyleRounded;
@@ -766,6 +841,48 @@ static NSString *extractFuncCode(NSString *all, NSString *addr) {
     else if (self.viewMode == 1) self.flowView.string = asmS;
     else self.flowView.string = [NSString stringWithFormat:
             @"// ---- recovered code ----\n%@\n\n// ---- assembly ----\n%@", code, asmS];
+}
+
+- (void)onReplayToggle:(id)s {
+    (void)s;
+    if (!self.replayVisible) {
+        NSString *p = self.replayStateField.stringValue;
+        if (p.length == 0) p = [self defaultStatePath];
+        [self loadReplayState:p];
+        self.replayVisible = YES;
+        self.replayView.hidden = NO;
+        [self.replayView setNeedsDisplay:YES];
+        NSArray *names = @[@"surface", @"chat", @"draft"];
+        self.replayBtn.title = [NSString stringWithFormat:@"Hide replay (%@)", names[0]];
+    } else {
+        self.replayVisible = NO;
+        self.replayView.hidden = YES;
+        self.replayBtn.title = @"Replay state…";
+    }
+    [self.window makeFirstResponder:self.replayVisible ? self.replayView : self.graph];
+}
+
+- (NSString *)defaultStatePath {
+    NSArray *cands = @[
+        [[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/deepai-code-v2/Local Storage/leveldb"] copy],
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/deepai-code-v2/Local Storage"]
+    ];
+    for (NSString *c in cands)
+        if ([[NSFileManager defaultManager] fileExistsAtPath:c]) return c;
+    return cands[0];
+}
+
+- (void)loadReplayState:(NSString *)path {
+    char *state = nx_deepai_load_state(path.UTF8String);
+    if (!state) { self.replayStateField.stringValue = [@"(no state) " stringByAppendingString:path]; return; }
+    nx_ui_layout_t L;
+    if (nx_deepai_build_layout(state, &L) == 0) {
+        [self.replayView setLayout:L];
+        self.status.stringValue = [NSString stringWithFormat:
+            @"Replay: %d nodes / %d edges / %d stuck tab(s) — state from %@",
+            L.n_nodes, L.n_edges, L.n_stuck, path];
+    }
+    free(state);
 }
 
 - (void)onViewMode:(id)s {
