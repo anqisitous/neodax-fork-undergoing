@@ -40,6 +40,8 @@
 #include "integration/spec/nx_specs_builtin.h"
 #include "integration/spec/nx_gen.h"
 #include "integration/spec/nx_pe.h"
+#include "integration/spec/nx_pe_disasm.h"
+#include "integration/spec/nx_pipeline.h"
 
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
@@ -416,7 +418,37 @@ static int run_pe(int argc, char **argv) {
     const char *file = flag(argc, argv, "--file");
     if (!file) file = flag(argc, argv, "-f");
     if (!file) { fprintf(stderr, "pe: --file PATH required\n"); return 1; }
+    if (has_flag(argc, argv, "--disasm")) {
+        const char *lim = flag(argc, argv, "--limit");
+        return nx_pe_disasm(file, lim ? atoi(lim) : 0, stdout) == 0 ? 0 : 1;
+    }
     return nx_pe_analyze(file, stdout) == 0 ? 0 : 1;
+}
+
+static int run_pipeline(int argc, char **argv) {
+    const char *file = flag(argc, argv, "--file");
+    if (!file) { fprintf(stderr, "pipeline: --file PATH required\n"); return 1; }
+    const char *s = flag(argc, argv, "--strategy");
+    nx_strategy_t strat = NX_STRAT_AUTO;
+    if (s && strcmp(s, "seq") == 0) strat = NX_STRAT_SEQUENTIAL;
+    else if (s && strcmp(s, "sim") == 0) strat = NX_STRAT_SIMULTANEOUS;
+    const char *lim = flag(argc, argv, "--limit");
+    const char *outp = flag(argc, argv, "-o");
+    FILE *co = NULL;
+    if (outp) { co = fopen(outp, "wb"); if (!co) { fprintf(stderr, "pipeline: cannot write %s\n", outp); return 1; } }
+    nx_pipeline_result_t r;
+    if (nx_pipeline_run(file, strat, lim ? atoi(lim) : 0, co, &r, stdout) != 0) {
+        if (co) fclose(co);
+        return 1;
+    }
+    if (co) fclose(co);
+    printf("\n  [pipeline] instructions: %d\n", r.n_insns);
+    printf("  sequential  : %.3f ms\n", r.seq_ms);
+    printf("  simultaneous: %.3f ms\n", r.sim_ms);
+    printf("  chosen      : %s\n",
+           r.chosen == NX_STRAT_SIMULTANEOUS ? "simultaneous" : "sequential");
+    if (outp) printf("  cpp written : %s\n", outp);
+    return 0;
 }
 
 static int run_gen(int argc, char **argv) {
@@ -637,7 +669,8 @@ static void usage(void) {
         "  attach   [--state PATH] [--app NAME] [--store SUBSTR] [--key HINT]\n"
         "  spec     --hex \"0x81 0x05 ...\" | --file PATH [--ws]   (構造認識)\n"
         "  gen      --spec NAME|all [--class NAME] [-o FILE]        (C++ クラス生成)\n"
-        "  pe       --file FILE.exe                                (Windows PE 解析)\n"
+        "  pe       --file FILE.exe [--disasm] [--limit N]          (Windows PE 解析/逆アセンブル)\n"
+        "  pipeline --file FILE.exe [--strategy auto|seq|sim] [-o out.cpp]  (decode+encode 戦略選択)\n"
         "  serve\n");
 }
 
@@ -695,6 +728,8 @@ int main(int argc, char **argv) {
             return run_gen(argc, argv);
         } else if (strcmp(cmd, "pe") == 0) {
             return run_pe(argc, argv);
+        } else if (strcmp(cmd, "pipeline") == 0) {
+            return run_pipeline(argc, argv);
         } else if (strcmp(cmd, "serve") == 0) {
             cmd_serve();
         } else {

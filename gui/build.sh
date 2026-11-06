@@ -28,8 +28,8 @@ echo "built: build_neodax/neodax-viewer"
 # GUI 版の描画・操作は変更しない。
 # --- attach package (self-contained): inspect + renderer + payload + appfix ---
 ATTACH_OBJS="src/integration/attach/nx_inspect.o src/integration/attach/nx_renderer.o src/integration/attach/nx_payload.o src/integration/attach/nx_appfix.o"
-SPEC_OBJS="src/integration/spec/nx_spec.o src/integration/spec/nx_specs_builtin.o src/integration/spec/nx_recog.o src/integration/spec/nx_gen.o src/integration/spec/nx_pe.o"
-UI_OBJS="src/integration/nx_json.o src/integration/nx_leveldb.o src/integration/nx_state.o src/integration/nx_deepai.o src/integration/nx_sim.o $ATTACH_OBJS $SPEC_OBJS"
+SPEC_OBJS="src/integration/spec/nx_spec.o src/integration/spec/nx_specs_builtin.o src/integration/spec/nx_recog.o src/integration/spec/nx_gen.o src/integration/spec/nx_pe.o src/integration/spec/nx_pe_disasm.o src/integration/spec/nx_pipeline.o"
+UI_OBJS="src/integration/nx_decode.o src/x86_decode.o src/arm64_decode.o src/integration/nx_json.o src/integration/nx_leveldb.o src/integration/nx_state.o src/integration/nx_deepai.o src/integration/nx_sim.o $ATTACH_OBJS $SPEC_OBJS"
 clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 \
     -I src -I include \
     -framework Cocoa -framework CoreGraphics -framework ImageIO -framework CoreFoundation \

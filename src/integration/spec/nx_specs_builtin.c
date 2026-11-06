@@ -96,9 +96,24 @@ static const nx_field_t pe_dos_fields[] = {
     { "e_lfanew", NX_F_ABS, NX_D_U32LE, 0x3c, 4, 0, 0, 1, NULL, 0 },
 };
 static const uint8_t pe_magic_mz[2] = { 'M', 'Z' };
+
+/* 本物の PE かを厳密検証: MZ で、e_lfanew が範囲内で PE\0\0 を指す。 */
+static int pe_dos_check(const uint8_t *d, size_t n) {
+    if (n < 0x40) return 0;
+    if (d[0] != 'M' || d[1] != 'Z') return 0;
+    uint32_t e = (uint32_t)d[0x3c] | ((uint32_t)d[0x3d] << 8) |
+                 ((uint32_t)d[0x3e] << 16) | ((uint32_t)d[0x3f] << 24);
+    if ((size_t)e + 24 > n) return 0;
+    if (memcmp(d + e, "PE\0\0", 4) != 0) return 0;
+    /* OptionalHeader magic の妥当性も確認 (PE32/PE32+) */
+    uint16_t om = (uint16_t)(d[e + 24] | (d[e + 25] << 8));
+    if (om != 0x010B && om != 0x020B) return 0;
+    return 1;
+}
+
 const nx_spec_t nx_spec_pe_dos_header = {
     "pe_dos_header", "pe", "PE DOS header (MZ + e_lfanew)",
-    pe_magic_mz, 2, 0, NULL,
+    pe_magic_mz, 2, 0, pe_dos_check,
     pe_dos_fields, (int)(sizeof(pe_dos_fields) / sizeof(pe_dos_fields[0]))
 };
 

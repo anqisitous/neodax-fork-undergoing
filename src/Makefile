@@ -51,6 +51,8 @@ INTEGRATION_SRCS = \
 	integration/spec/nx_recog.c \
 	integration/spec/nx_gen.c \
 	integration/spec/nx_pe.c \
+	integration/spec/nx_pe_disasm.c \
+	integration/spec/nx_pipeline.c \
 	integration/nx_sim.c \
 	integration/neodax_bridge.c
 
