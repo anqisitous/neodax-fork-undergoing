@@ -39,6 +39,7 @@
 #include "integration/spec/nx_recog.h"
 #include "integration/spec/nx_specs_builtin.h"
 #include "integration/spec/nx_gen.h"
+#include "integration/spec/nx_pe.h"
 
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
@@ -411,6 +412,13 @@ static void cmd_apply(const char *state_path, const char *key_hint, int live) {
 static const char *flag(int argc, char **argv, const char *name);
 static int has_flag(int argc, char **argv, const char *name);
 
+static int run_pe(int argc, char **argv) {
+    const char *file = flag(argc, argv, "--file");
+    if (!file) file = flag(argc, argv, "-f");
+    if (!file) { fprintf(stderr, "pe: --file PATH required\n"); return 1; }
+    return nx_pe_analyze(file, stdout) == 0 ? 0 : 1;
+}
+
 static int run_gen(int argc, char **argv) {
     const char *spec = flag(argc, argv, "--spec");
     const char *cls = flag(argc, argv, "--class");
@@ -629,6 +637,7 @@ static void usage(void) {
         "  attach   [--state PATH] [--app NAME] [--store SUBSTR] [--key HINT]\n"
         "  spec     --hex \"0x81 0x05 ...\" | --file PATH [--ws]   (構造認識)\n"
         "  gen      --spec NAME|all [--class NAME] [-o FILE]        (C++ クラス生成)\n"
+        "  pe       --file FILE.exe                                (Windows PE 解析)\n"
         "  serve\n");
 }
 
@@ -684,6 +693,8 @@ int main(int argc, char **argv) {
             return run_spec(argc, argv);
         } else if (strcmp(cmd, "gen") == 0) {
             return run_gen(argc, argv);
+        } else if (strcmp(cmd, "pe") == 0) {
+            return run_pe(argc, argv);
         } else if (strcmp(cmd, "serve") == 0) {
             cmd_serve();
         } else {

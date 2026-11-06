@@ -90,6 +90,8 @@ int nx_gen_cpp(const nx_spec_t *spec, const char *class_name, int inline_impl, F
         } else if (f->dec == NX_D_BOOL) {
             fprintf(out, "    bool %s = false;   // bit %d of byte %d\n",
                     f->name, f->bit_shift, f->offset);
+        } else if (f->dec == NX_D_ASCII) {
+            fprintf(out, "    std::string %s;\n", f->name);
         } else {
             fprintf(out, "    %s %s = 0;\n", base_type(f), f->name);
         }

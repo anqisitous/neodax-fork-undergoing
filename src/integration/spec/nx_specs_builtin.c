@@ -84,4 +84,49 @@ void nx_specs_builtin_register(void) {
     nx_spec_register(&nx_spec_ws_frame);
     nx_spec_register(&nx_spec_lenprefixed_be);
     nx_spec_register(&nx_spec_http_status);
+    nx_spec_register(&nx_spec_pe_dos_header);
+    nx_spec_register(&nx_spec_pe_nt_signature);
+    nx_spec_register(&nx_spec_pe_file_header);
+    nx_spec_register(&nx_spec_pe_section_header);
 }
+
+/* ---- PE (Windows .exe/.dll) 構造 -------------------------------- */
+static const nx_field_t pe_dos_fields[] = {
+    { "e_magic",  NX_F_ABS, NX_D_U16LE, 0,  2, 0, 0, 1, NULL, 0 },
+    { "e_lfanew", NX_F_ABS, NX_D_U32LE, 0x3c, 4, 0, 0, 1, NULL, 0 },
+};
+static const uint8_t pe_magic_mz[2] = { 'M', 'Z' };
+const nx_spec_t nx_spec_pe_dos_header = {
+    "pe_dos_header", "pe", "PE DOS header (MZ + e_lfanew)",
+    pe_magic_mz, 2, 0, NULL,
+    pe_dos_fields, (int)(sizeof(pe_dos_fields) / sizeof(pe_dos_fields[0]))
+};
+
+static const nx_field_t pe_file_fields[] = {
+    { "machine",          NX_F_ABS, NX_D_U16LE, 0, 2, 0, 0, 1, NULL, 0 },
+    { "number_of_sections", NX_F_ABS, NX_D_U16LE, 2, 2, 0, 0, 1, NULL, 0 },
+    { "time_date_stamp",  NX_F_ABS, NX_D_U32LE, 4, 4, 0, 0, 1, NULL, 0 },
+};
+static const uint8_t pe_magic_nt[4] = { 'P', 'E', 0, 0 };
+const nx_spec_t nx_spec_pe_nt_signature = {
+    "pe_nt_signature", "pe", "PE NT signature (PE\\0\\0)",
+    pe_magic_nt, 4, 0, NULL, NULL, 0
+};
+const nx_spec_t nx_spec_pe_file_header = {
+    "pe_file_header", "pe", "PE COFF file header",
+    NULL, 0, 0, NULL,
+    pe_file_fields, (int)(sizeof(pe_file_fields) / sizeof(pe_file_fields[0]))
+};
+
+static const nx_field_t pe_sec_fields[] = {
+    { "name",            NX_F_ABS, NX_D_ASCII, 0,  8, 0, 0, 1, NULL, 0 },
+    { "virtual_size",    NX_F_ABS, NX_D_U32LE, 8,  4, 0, 0, 1, NULL, 0 },
+    { "virtual_address", NX_F_ABS, NX_D_U32LE, 12, 4, 0, 0, 1, NULL, 0 },
+    { "size_of_raw_data",NX_F_ABS, NX_D_U32LE, 16, 4, 0, 0, 1, NULL, 0 },
+    { "pointer_to_raw",  NX_F_ABS, NX_D_U32LE, 20, 4, 0, 0, 1, NULL, 0 },
+};
+const nx_spec_t nx_spec_pe_section_header = {
+    "pe_section_header", "pe", "PE section table entry (40 bytes)",
+    NULL, 0, 0, NULL,
+    pe_sec_fields, (int)(sizeof(pe_sec_fields) / sizeof(pe_sec_fields[0]))
+};

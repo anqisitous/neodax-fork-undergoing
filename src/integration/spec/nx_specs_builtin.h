@@ -18,6 +18,12 @@ extern const nx_spec_t nx_spec_lenprefixed_be;
 /* HTTP レスポンスヘッダ行の記述例。 */
 extern const nx_spec_t nx_spec_http_status;
 
+/* PE 構造 */
+extern const nx_spec_t nx_spec_pe_dos_header;
+extern const nx_spec_t nx_spec_pe_nt_signature;
+extern const nx_spec_t nx_spec_pe_file_header;
+extern const nx_spec_t nx_spec_pe_section_header;
+
 /* 登録 */
 void nx_specs_builtin_register(void);
 
