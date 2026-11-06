@@ -227,7 +227,7 @@ neodax_static -d --depflow-dot dep_graph.dot binary
 ### ビルド
 
 ```bash
-cd src_new
+cd src
 make
 ```
 

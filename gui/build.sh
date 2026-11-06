@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 
 # analysis objects (framework), excluding the CLI mains
 make -C src all >/dev/null
+mkdir -p bin
 OBJS="src/macho.o src/arm64_decode.o src/x86_decode.o \
       src/core/macho_static.o src/analysis/depflow.o src/analysis/variable_classifier.o \
       src/flow/execution_order.o src/flow/parallel_detection.o \
@@ -20,8 +21,8 @@ clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 \
     -I src -I include \
     -framework Cocoa \
     gui/neodax-viewer.mm $OBJS -lpthread -lm \
-    -o build_neodax/neodax-viewer
-echo "built: build_neodax/neodax-viewer"
+    -o bin/neodax-viewer
+echo "built: bin/neodax-viewer"
 
 # --- minimal CLI (GUI とは独立の別プロセス) ---
 # 画面キャプチャ + タブ状態の可読出力/選択削除/シミュレーション。
@@ -35,5 +36,5 @@ clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 \
     -framework Cocoa -framework CoreGraphics -framework ImageIO -framework CoreFoundation \
     -framework ApplicationServices \
     gui/neodax-ui.mm $UI_OBJS -lpthread -lm \
-    -o build_neodax/neodax-ui
-echo "built: build_neodax/neodax-ui"
+    -o bin/neodax-ui
+echo "built: bin/neodax-ui"

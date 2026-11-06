@@ -1,5 +1,5 @@
 # build artifacts
-build_neodax/
+bin/
 *.o
 *.dSYM/
 neodax

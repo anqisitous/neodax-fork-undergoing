@@ -12,7 +12,7 @@
  *   Q / Shift+Q   next / previous sibling at the current level
  *
  *   Build:  bash gui/build.sh
- *   Run:    ./build_neodax/neodax-viewer
+ *   Run:    ./bin/neodax-viewer
  */
 
 #import <Cocoa/Cocoa.h>

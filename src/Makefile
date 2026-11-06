@@ -8,7 +8,7 @@ LIBS = -lpthread -lm
 
 # Directories
 SRC_DIR = .
-BUILD_DIR = ../build_neodax
+BUILD_DIR = ../bin
 
 # Source files
 # Canonical Mach-O parser (dax_parse_macho) — composed by core/macho_static.c
@@ -79,7 +79,17 @@ TARGET = $(BUILD_DIR)/neodax_static
 TARGET_INTEGRATED = $(BUILD_DIR)/neodax_static_integrated
 
 # Default target
-all: $(TARGET) $(TARGET_INTEGRATED)
+#
+# NOTE: この Makefile は旧来のビルド経路です。CLI 本体 (neodax) は
+#       リポジトリ直下の setup.sh が、GUI は gui/build.sh が担当します。
+#       解析フレームワークを単体ビルドしたい場合のみ `make framework` を使ってください。
+all:
+	@echo "  [i] src/Makefile: 旧ビルド経路のため 'all' では何もビルドしません。"
+	@echo "      CLI  : make        (リポジトリ直下 → setup.sh)"
+	@echo "      GUI  : bash gui/build.sh"
+	@echo "      FW   : make -C src framework"
+
+framework: $(TARGET) $(TARGET_INTEGRATED)
 
 # Main static analysis tool
 $(TARGET): $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) main.o
@@ -109,7 +119,7 @@ dep:
 	$(CC) -MM $(CFLAGS) $(INCLUDES) $(ALL_SRCS)
 
 # Phony targets
-.PHONY: all clean veryclean dep
+.PHONY: all framework clean veryclean dep
 
 # Build individual components
 build_core: $(CORE_OBJS)
@@ -135,7 +145,8 @@ help:
 	@echo "NeoDAX Static Analysis Framework Makefile"
 	@echo ""
 	@echo "Targets:"
-	@echo "  make all              - Build all targets"
+	@echo "  make framework        - Build the static analysis framework (neodax_static, neodax_static_integrated)"
+	@echo "  make all              - (no-op) CLI/GUI are built by setup.sh / gui/build.sh"
 	@echo "  make neodax_static    - Build main static analysis tool"
 	@echo "  make clean            - Clean build artifacts"
 	@echo "  make veryclean        - Clean everything"
