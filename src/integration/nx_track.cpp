@@ -3082,7 +3082,11 @@ static int op_clone_probe(nx_fork_ctx *c) {
     return nx_path_exists(c->src) && !nx_path_exists(c->dst);
 }
 static int op_clone_apply(nx_fork_ctx *c) {
-    if (nx_sh("ditto " + nx_shq(c->src) + " " + nx_shq(c->dst), c->out) != 0) return -1;
+    // APFS の clonefile で複製する。CoW なので一瞬で、追加容量はほぼ 0。
+    // 変えたファイルだけが実体を持つ。clonefile 不可なら ditto に落とす。
+    std::string cmd = "cp -cR " + nx_shq(c->src) + " " + nx_shq(c->dst) +
+                      " 2>/dev/null || ditto " + nx_shq(c->src) + " " + nx_shq(c->dst);
+    if (nx_sh(cmd, c->out) != 0) return -1;
     c->exe = nx_bundle_exe(c->dst);
     return 0;
 }
@@ -3091,10 +3095,19 @@ static int op_guard_probe(nx_fork_ctx *c) { return !c->needles.empty() && !c->ex
 static int op_guard_apply(nx_fork_ctx *c) {
     for (const auto &n : c->needles) {
         std::fprintf(c->out, "  [guard] %s\n", n.c_str());
-        if (nx_guard_run(c->exe.c_str(), n.c_str(), 1, 0, 0, c->out) == 0)
+        if (nx_guard_run(c->exe.c_str(), n.c_str(), 1, 0, 0, c->out) == 0) {
             c->bin_modified = 1;
-        else
+            // 退避はバンドルの外へ出す。中に残すと CodeResources の
+            // 余計な nested code になり、外側の署名検証が壊れる。
+            std::string bak = c->exe + ".nx-backup";
+            if (nx_path_exists(bak)) {
+                std::string out_bak = c->dst + ".nx-backup";
+                std::remove(out_bak.c_str());
+                std::rename(bak.c_str(), out_bak.c_str());
+            }
+        } else {
             std::fprintf(c->out, "  [guard] 適用できませんでした: %s\n", n.c_str());
+        }
     }
     return 0;
 }
@@ -3107,14 +3120,17 @@ static int op_state_apply(nx_fork_ctx *c) {
 
 static int op_resign_probe(nx_fork_ctx *c) { return c->bin_modified && !c->dst.empty(); }
 static int op_resign_apply(nx_fork_ctx *c) {
-    // コピーは自分たちのものなので、ad-hoc で署名し直す (元の署名は壊さない)。
-    if (nx_sh("codesign --force --deep --sign - " + nx_shq(c->dst), c->out) != 0) {
+    // 変えた実行ファイルだけ、そのあと外側バンドルだけを署名する。
+    // --deep は中の全フレームワークを舐めるので署名には使わない。
+    if (!c->exe.empty())
+        nx_sh("codesign --force --sign - " + nx_shq(c->exe), c->out);
+    if (nx_sh("codesign --force --sign - " + nx_shq(c->dst), c->out) != 0) {
         std::fprintf(c->out, "  [resign] codesign に失敗\n");
         return -1;
     }
-    int rc = nx_sh("codesign --verify --deep --strict " + nx_shq(c->dst) + " 2>&1 | tail -3", c->out);
-    std::fprintf(c->out, "  [resign] verify rc=%d\n", rc);
-    return 0;
+    int rc = nx_sh("codesign --verify --deep --strict " + nx_shq(c->dst), c->out);
+    std::fprintf(c->out, "  [resign] verify rc=%d%s\n", rc, rc == 0 ? "" : " (署名が不正)");
+    return rc == 0 ? 0 : -1;
 }
 
 static int op_launch_probe(nx_fork_ctx *c) { return c->launch && !c->dst.empty(); }
