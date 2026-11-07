@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # analysis objects (framework), excluding the CLI mains
-make -C src all >/dev/null
+make -C src framework >/dev/null
 mkdir -p bin
 OBJS="src/macho.o src/arm64_decode.o src/x86_decode.o \
       src/core/macho_static.o src/analysis/depflow.o src/analysis/variable_classifier.o \
@@ -17,12 +17,29 @@ OBJS="src/macho.o src/arm64_decode.o src/x86_decode.o \
       src/integration/nx_state.o src/integration/nx_deepai.o \
       src/integration/neodax_bridge.o"
 
-clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 \
-    -I src -I include \
-    -framework Cocoa \
-    gui/neodax-viewer.mm $OBJS -lpthread -lm \
+clang++ -std=c++17 -O2 \
+    -I src -I include -I gui \
+    gui/viewer_main.cpp gui/model/nx_graph.cpp gui/model/nx_render.cpp \
+    $OBJS -lpthread -lm \
     -o bin/neodax-viewer
 echo "built: bin/neodax-viewer"
+
+# --- 残骸検出 (純 C++ / AppKit 非依存) ---
+# 「消しても復活する」原因になる checkpoint / patch / archive / 手順書 / backup を検出する。
+clang++ -std=c++17 -O2 -Wall \
+    -I gui \
+    gui/artifact_main.cpp gui/model/nx_artifact.cpp \
+    -o bin/neodax-artifact
+ echo "built: bin/neodax-artifact"
+
+# --- 画面プローブ (純 C / Objective-C なし) ---
+# CoreGraphics / ApplicationServices は C API なので .c で書ける。
+for t in detect screen; do
+    cc -std=c11 -O2 -Wall \
+        -framework CoreGraphics -framework CoreFoundation -framework ApplicationServices \
+        gui/neodax-$t.c -o bin/neodax-$t
+    echo "built: bin/neodax-$t"
+done
 
 # --- minimal CLI (GUI とは独立の別プロセス) ---
 # 画面キャプチャ + タブ状態の可読出力/選択削除/シミュレーション。
