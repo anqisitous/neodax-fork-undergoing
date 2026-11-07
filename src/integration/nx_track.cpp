@@ -3113,6 +3113,24 @@ static int op_guard_apply(nx_fork_ctx *c) {
 }
 
 // AE の終了原因 (SSO フラグ SIGNOUT) を、neodax の状態回復関数で良い状態に揃える。
+// AE は外部 Plug-ins / Presets / Scripts を .app の「親ディレクトリ」基準で探す。
+// fork を別の場所に置くとこれらを見失い、MetaPal.plugin (Metadata Browser) などが
+// 読まれない。元の製品フォルダの兄弟を symlink で用意して環境ごと複製する。
+static const char *k_sibling_res[] = { "Plug-ins", "Presets", "Scripts" };
+static int op_resources_probe(nx_fork_ctx *c) {
+    return !c->src.empty() && !c->dst.empty() ? 1 : 0;
+}
+static int op_resources_apply(nx_fork_ctx *c) {
+    std::string sp = nx_dirname(c->src), dp = nx_dirname(c->dst);
+    if (sp == dp) return 0;
+    for (const char *n : k_sibling_res) {
+        std::string s = nx_join_path(sp, n), d = nx_join_path(dp, n);
+        if (!nx_path_exists(s) || nx_path_exists(d)) continue;
+        nx_sh("ln -s " + nx_shq(s) + " " + nx_shq(d), c->out);
+    }
+    return 0;
+}
+
 static int op_state_probe(nx_fork_ctx *c) { (void)c; return 1; }
 static int op_state_apply(nx_fork_ctx *c) {
     return nx_state_heal(NULL, 1, c->out);
@@ -3145,6 +3163,7 @@ static int op_launch_apply(nx_fork_ctx *c) {
 
 static const nx_fork_op k_fork_ops[] = {
     { "clone",  op_clone_probe,  op_clone_apply  },
+    { "res",    op_resources_probe, op_resources_apply },
     { "state",  op_state_probe,  op_state_apply  },
     { "guard",  op_guard_probe,  op_guard_apply  },
     { "resign", op_resign_probe, op_resign_apply },
