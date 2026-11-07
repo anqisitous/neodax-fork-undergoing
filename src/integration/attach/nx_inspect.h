@@ -8,6 +8,8 @@
  * 用途を限定しない。Node/Electron を内蔵する任意のプロセスに対して:
  *   1. プロセス名から PID を解決 (macOS: libproc)
  *   2. SIGUSR1 を送り Node/V8 inspector を起動させる
+ *      (Electron/Node と確認できた場合のみ。macOS では既定動作が終了のため、
+ *       それ以外の相手には絶対に送らない)
  *   3. inspector の HTTP エンドポイントから WebSocket URL を取得
  *   4. WebSocket で接続し Runtime.evaluate で式を評価する
  *
