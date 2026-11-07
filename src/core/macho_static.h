@@ -397,6 +397,19 @@ typedef struct {
     char output_dir[1024];         // Output directory for analysis results
     char analysis_report[1024];    // Report file path
 
+    // 復元コードの静的逆track (neodax_static --track*)
+    int      track_mode;           // 0=無効 1=逆track 2=環 3=断ち切り 4=ファイル 7=文字列参照 8=guard
+    uint64_t track_entry;          // 分析の起点アドレス
+    int      track_symbols_only;   // 定義シンボルの報告のみ
+    char     track_filter[256];    // 探索語 (部分一致) / guard の対象文字列
+    int      track_apply;          // guard: 実バイナリを書き換える (0=ドライラン)
+    int      track_pick;           // guard: 選ぶ候補の番号
+    int      track_taken;          // guard: 分岐を取る側に固定する
+
+    // 起動条件の評価 (neodax --launch-cond)
+    int      launch_cond;          // 0=無効 1=並べて判定 2=1つずつ落とす
+    char     workflow_out[1024];   // C++ クラス設計の出力先
+
 } macho_opts_t;
 
 // ============================================================================

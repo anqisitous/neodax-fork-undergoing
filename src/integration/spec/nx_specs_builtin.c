@@ -80,6 +80,136 @@ const nx_spec_t nx_spec_http_status = {
     http_fields, (int)(sizeof(http_fields) / sizeof(http_fields[0]))
 };
 
+/* ---- Mach-O (.o / 実行ファイル / dylib / fat) -------------------- */
+/* 先頭 4 バイトの magic で 32/64bit・エンディアンが決まる。
+   .o も実行ファイルも同じヘッダなので、filetype だけが違う。 */
+static const char *macho_filetype_names[] = {
+    "?0", "object", "execute", "fvmlib", "core", "preload",
+    "dylib", "dylinker", "bundle", "dylib_stub", "dsym", "kext_bundle"
+};
+
+static const nx_field_t macho_fields[] = {
+    { "magic",     NX_F_ABS, NX_D_U32LE, 0,  4, 0, 0, 1, NULL, 0 },
+    { "cputype",   NX_F_ABS, NX_D_U32LE, 4,  4, 0, 0, 1, NULL, 0 },
+    { "cpusubtype",NX_F_ABS, NX_D_U32LE, 8,  4, 0, 0, 1, NULL, 0 },
+    { "filetype",  NX_F_ABS, NX_D_U32LE, 12, 4, 0, 0, 1, macho_filetype_names, 12 },
+    { "ncmds",     NX_F_ABS, NX_D_U32LE, 16, 4, 0, 0, 1, NULL, 0 },
+    { "sizeofcmds",NX_F_ABS, NX_D_U32LE, 20, 4, 0, 0, 1, NULL, 0 },
+};
+
+static uint32_t macho_le32(const uint8_t *d) {
+    return (uint32_t)d[0] | ((uint32_t)d[1] << 8) |
+           ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
+}
+
+/* ヘッダ自身の整合性 (ncmds*8 が sizeofcmds に収まる) まで確認する。
+   これで「たまたま同じ 4 バイトを持つ」データを弾ける。 */
+static int macho_thin_check(const uint8_t *d, size_t n) {
+    if (n < 28) return 0;
+    uint32_t magic = macho_le32(d);
+    uint32_t hdr = (magic == 0xfeedfacf) ? 32 : 28;   /* 64bit は reserved 付き */
+    if (n < hdr) return 0;
+    uint32_t ncmds = macho_le32(d + 16);
+    uint32_t sz = macho_le32(d + 20);
+    if (ncmds > 65536) return 0;
+    if ((size_t)hdr + sz > n) return 0;
+    if (ncmds && sz < (uint64_t)ncmds * 8) return 0;  /* load command 最小 8byte */
+    return 1;
+}
+
+static int macho64_check(const uint8_t *d, size_t n) {
+    return n >= 4 && macho_le32(d) == 0xfeedfacf && macho_thin_check(d, n);
+}
+static int macho32_check(const uint8_t *d, size_t n) {
+    return n >= 4 && macho_le32(d) == 0xfeedface && macho_thin_check(d, n);
+}
+
+static const uint8_t macho_magic64[4] = { 0xcf, 0xfa, 0xed, 0xfe };
+static const uint8_t macho_magic32[4] = { 0xce, 0xfa, 0xed, 0xfe };
+
+const nx_spec_t nx_spec_macho64 = {
+    "macho64", "macho", "Mach-O 64-bit (magic feedfacf; .o=filetype object)",
+    macho_magic64, 4, 0, macho64_check,
+    macho_fields, (int)(sizeof(macho_fields) / sizeof(macho_fields[0]))
+};
+const nx_spec_t nx_spec_macho32 = {
+    "macho32", "macho", "Mach-O 32-bit (magic feedface)",
+    macho_magic32, 4, 0, macho32_check,
+    macho_fields, (int)(sizeof(macho_fields) / sizeof(macho_fields[0]))
+};
+
+static const nx_field_t macho_fat_fields[] = {
+    { "magic",    NX_F_ABS, NX_D_U32BE, 0, 4, 0, 0, 1, NULL, 0 },
+    { "nfat_arch",NX_F_ABS, NX_D_U32BE, 4, 4, 0, 0, 1, NULL, 0 },
+};
+static const uint8_t macho_magic_fat[4] = { 0xca, 0xfe, 0xba, 0xbe };
+/* fat: 8 + nfat_arch*20 (32bit) が実際のサイズと整合するか */
+static int macho_fat_check(const uint8_t *d, size_t n) {
+    if (n < 8) return 0;
+    uint32_t nf = ((uint32_t)d[4] << 24) | ((uint32_t)d[5] << 16) |
+                  ((uint32_t)d[6] << 8) | (uint32_t)d[7];
+    if (nf == 0 || nf > 64) return 0;
+    return (size_t)8 + (size_t)nf * 20 <= n;
+}
+const nx_spec_t nx_spec_macho_fat = {
+    "macho_fat", "macho", "Mach-O universal binary (cafebabe + nfat_arch)",
+    macho_magic_fat, 4, 0, macho_fat_check,
+    macho_fat_fields, (int)(sizeof(macho_fat_fields) / sizeof(macho_fat_fields[0]))
+};
+
+/* ---- 永続化された状態 (JSON) ------------------------------------ */
+/* Zustand persist などが書く "{\"state\":{...}}"。magic が無いので
+   「キー名の存在」を check にして弱い spec の誤検出を避ける。 */
+static int mem_contains(const uint8_t *d, size_t n, const char *needle) {
+    size_t m = strlen(needle);
+    if (!m || n < m) return 0;
+    for (size_t i = 0; i + m <= n; i++)
+        if (memcmp(d + i, needle, m) == 0) return 1;
+    return 0;
+}
+
+static int json_state_check(const uint8_t *d, size_t n) {
+    size_t i = 0;
+    while (i < n && (d[i] == ' ' || d[i] == '\t' || d[i] == '\r' || d[i] == '\n')) i++;
+    if (i >= n || d[i] != '{') return 0;
+    /* "state" と "tabs" が両方ある = タブ状態の永続 JSON */
+    return mem_contains(d, n, "\"state\"") && mem_contains(d, n, "\"tabs\"");
+}
+
+static const nx_field_t json_state_fields[] = {
+    { "prefix", NX_F_ABS, NX_D_ASCII, 0, 8, 0, 0, 1, NULL, 0 },
+};
+const nx_spec_t nx_spec_json_state = {
+    "json_state", "persisted-state", "persisted workspace state ({\"state\":{\"tabs\":...}})",
+    NULL, 0, 0, json_state_check,
+    json_state_fields, (int)(sizeof(json_state_fields) / sizeof(json_state_fields[0]))
+};
+
+/* ---- Chromium LevelDB の localStorage レコード ------------------- */
+/* キーは [_<origin>\x00\x01<localStorage key>] という共通の封筒に入る。
+   つまり「どのアプリの、どの状態キーか」は封筒の後ろ側だけで決まり、
+   パース手順は全キーで同一。 */
+static int ls_record_check(const uint8_t *d, size_t n) {
+    if (n < 4 || d[0] != '_') return 0;
+    size_t lim = n < 512 ? n : 512;
+    for (size_t i = 1; i + 1 < lim; i++) {
+        if (d[i] == 0x00 && d[i + 1] == 0x01) {
+            /* 封筒の後ろにキー本体がある */
+            return i + 2 < n;
+        }
+    }
+    return 0;
+}
+
+static const nx_field_t ls_record_fields[] = {
+    { "origin", NX_F_ABS, NX_D_ASCII, 1, 24, 0, 0, 1, NULL, 0 },
+};
+const nx_spec_t nx_spec_ls_record = {
+    "leveldb_ls_record", "persisted-state", "Chromium localStorage record (_origin\\0\\1key)",
+    NULL, 0, 0, ls_record_check,
+    ls_record_fields, (int)(sizeof(ls_record_fields) / sizeof(ls_record_fields[0]))
+};
+
 void nx_specs_builtin_register(void) {
     nx_spec_register(&nx_spec_ws_frame);
     nx_spec_register(&nx_spec_lenprefixed_be);
@@ -88,6 +218,11 @@ void nx_specs_builtin_register(void) {
     nx_spec_register(&nx_spec_pe_nt_signature);
     nx_spec_register(&nx_spec_pe_file_header);
     nx_spec_register(&nx_spec_pe_section_header);
+    nx_spec_register(&nx_spec_macho64);
+    nx_spec_register(&nx_spec_macho32);
+    nx_spec_register(&nx_spec_macho_fat);
+    nx_spec_register(&nx_spec_json_state);
+    nx_spec_register(&nx_spec_ls_record);
 }
 
 /* ---- PE (Windows .exe/.dll) 構造 -------------------------------- */

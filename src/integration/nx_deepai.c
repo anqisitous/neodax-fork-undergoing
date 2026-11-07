@@ -331,6 +331,66 @@ int nx_deepai_remove_tab_json(const char *json, size_t len, const char *tab_id,
     return rc;
 }
 
+/* 所有スレッドを失った surface タブ (閉じられないタブ) の id を集める。
+   log が非 NULL なら各件を出力する。戻り値は件数。 */
+static int collect_stuck_surfaces(const nx_json_t *tabs, char ***out_ids, FILE *log) {
+    if (out_ids) *out_ids = NULL;
+    if (!tabs || tabs->type != NX_JSON_ARR) return 0;
+
+    /* 1) 生存スレッド (chat タブ) を収集 */
+    wx_liveset_t lives; memset(&lives, 0, sizeof(lives));
+    for (size_t i = 0; i < tabs->n; i++) {
+        const nx_json_t *tab = nx_json_at(tabs, i);
+        const nx_json_t *target = nx_json_get(tab, "target");
+        const char *kind = nx_json_str(nx_json_get(target, "kind"));
+        if (kind && strcmp(kind, "chat") == 0)
+            wx_live_add(&lives, nx_json_get(target, "threadRef"));
+    }
+
+    /* 2) surface かつ所有スレッドが生存していないものを集める */
+    char **ids = (char **)calloc(tabs->n + 1, sizeof(char *));
+    int n = 0;
+    if (!ids) return 0;
+    for (size_t i = 0; i < tabs->n; i++) {
+        const nx_json_t *tab = nx_json_at(tabs, i);
+        const nx_json_t *target = nx_json_get(tab, "target");
+        const char *kind = nx_json_str(nx_json_get(target, "kind"));
+        if (!kind || strcmp(kind, "surface") != 0) continue;
+        const nx_json_t *tr = nx_json_get(target, "threadRef");
+        const char *env = nx_json_str(nx_json_get(tr, "environmentId"));
+        const char *th  = nx_json_str(nx_json_get(tr, "threadId"));
+        int live = (lives.n > 0) && wx_live_has(&lives, env, th);
+        if (live) continue;
+        const char *id = nx_json_str(nx_json_get(tab, "id"));
+        ids[n++] = x_strdup(id ? id : "");
+        if (log) {
+            const char *sid = nx_json_str(nx_json_get(target, "surfaceId"));
+            fprintf(log, "    - stuck surface tab: %s @ %s/%s\n",
+                    sid ? sid : "?", env ? env : "?", th ? th : "?");
+        }
+    }
+    if (out_ids) *out_ids = ids;
+    else { for (int i = 0; i < n; i++) free(ids[i]); free(ids); }
+    return n;
+}
+
+/* 閉じられない surface タブを検出して出力する (変更はしない)。 */
+int nx_deepai_detect_json(const char *json, size_t len, FILE *out) {
+    if (!out) out = stdout;
+    if (!json) return -1;
+    nx_json_t *root = nx_json_parse(json, len);
+    if (!root) return -1;
+    const nx_json_t *state = wx_state_node(root);
+    const nx_json_t *tabs = state ? nx_json_get(state, "tabs") : NULL;
+    if (!tabs || tabs->type != NX_JSON_ARR) { nx_json_free(root); return -1; }
+    char **ids = NULL;
+    int n = collect_stuck_surfaces(tabs, &ids, out);
+    for (int i = 0; i < n; i++) free(ids[i]);
+    free(ids);
+    nx_json_free(root);
+    return n;
+}
+
 /* 所有スレッドを失った surface タブを除去した JSON を生成。 */
 int nx_deepai_fix_json(const char *json, size_t len,
                        char **out, int *n_removed, FILE *log) {
@@ -346,41 +406,11 @@ int nx_deepai_fix_json(const char *json, size_t len,
     const nx_json_t *tabs = nx_json_get(state, "tabs");
     if (!tabs || tabs->type != NX_JSON_ARR) { nx_json_free(root); return -1; }
 
-    /* 1) 生存スレッド (chat タブ + activeId が chat の場合) を収集 */
-    wx_liveset_t lives; memset(&lives, 0, sizeof(lives));
-    for (size_t i = 0; i < tabs->n; i++) {
-        const nx_json_t *tab = nx_json_at(tabs, i);
-        const nx_json_t *target = nx_json_get(tab, "target");
-        const char *kind = nx_json_str(nx_json_get(target, "kind"));
-        const nx_json_t *tr = nx_json_get(target, "threadRef");
-        if (kind && strcmp(kind, "chat") == 0) wx_live_add(&lives, tr);
-    }
-
-    /* 2) 除去対象 (surface かつ所有スレッドが生存していない) */
-    char **removed = (char **)calloc(tabs->n + 1, sizeof(char *));
-    int nrem = 0;
-    if (!removed) { nx_json_free(root); return -1; }
-    for (size_t i = 0; i < tabs->n; i++) {
-        const nx_json_t *tab = nx_json_at(tabs, i);
-        const nx_json_t *target = nx_json_get(tab, "target");
-        const char *kind = nx_json_str(nx_json_get(target, "kind"));
-        const nx_json_t *tr = nx_json_get(target, "threadRef");
-        if (!kind || strcmp(kind, "surface") != 0) continue;
-        const char *env = nx_json_str(nx_json_get(tr, "environmentId"));
-        const char *th  = nx_json_str(nx_json_get(tr, "threadId"));
-        int live = (lives.n > 0) && wx_live_has(&lives, env, th);
-        if (!live) {
-            const char *id = nx_json_str(nx_json_get(tab, "id"));
-            removed[nrem++] = x_strdup(id ? id : "");
-            if (log)
-                fprintf(log, "    - remove surface tab: %s @ %s/%s\n",
-                        nx_json_str(nx_json_get(target, "surfaceId")) ? nx_json_str(nx_json_get(target, "surfaceId")) : "?",
-                        env ? env : "?", th ? th : "?");
-        }
-    }
+    char **removed = NULL;
+    int nrem = collect_stuck_surfaces(tabs, &removed, log);
     if (n_removed) *n_removed = nrem;
 
-    /* 3) 再構築 (base/component は保持し、tabs 配列のみ編集) */
+    /* 再構築 (base/component は保持し、tabs 配列のみ編集) */
     int rc = rebuild_state(root, state, tabs, removed, nrem, out);
 
     for (int i = 0; i < nrem; i++) free(removed[i]);

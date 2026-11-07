@@ -64,6 +64,10 @@ int nx_deepai_analyze_source(const char *src_path, FILE *out);
 int nx_deepai_fix_json(const char *json, size_t len,
                        char **out, int *n_removed, FILE *log);
 
+/* 閉じられない (所有スレッドが生存していない) surface タブを検出して out に
+   出力する。状態は変更しない。戻り値は検出件数 (エラー時 -1)。 */
+int nx_deepai_detect_json(const char *json, size_t len, FILE *out);
+
 /* ファイル or leveldb ディレクトリから状態を抽出して修復。
    fixed JSON を <path>.fixed.json に書き、ログを out に出す。 */
 int nx_deepai_fix_path(const char *path, FILE *out);

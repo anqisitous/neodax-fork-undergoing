@@ -6,6 +6,10 @@ CFLAGS = -std=c99 -Wall -Wextra -O2 -g
 INCLUDES = -I. -I../include
 LIBS = -lpthread -lm
 
+# C++ の解析器 (逆track / 起動条件)。リンクは C++ ドライバで行う。
+CXX = clang++
+CXXFLAGS = -std=c++17 -O2 -Wall -Wno-deprecated-declarations
+
 # Directories
 SRC_DIR = .
 BUILD_DIR = ../bin
@@ -60,6 +64,13 @@ INTEGRATION_SRCS = \
 #main.c \
 #main_integrated.c
 
+TRACK_CPP_SRCS = \
+	integration/nx_track.cpp \
+	integration/track/cond.cpp \
+	integration/track/learn.cpp \
+	integration/track/widget.cpp
+TRACK_OBJS = $(patsubst %.cpp,%.o,$(TRACK_CPP_SRCS))
+
 # All source files
 ALL_SRCS = $(CORE_SRCS) $(LEGACY_SRCS) $(ANALYSIS_SRCS) $(FLOW_SRCS) $(TRACKING_SRCS) $(INTEGRATION_SRCS) $(MAIN_SRCS)
 
@@ -75,8 +86,8 @@ MAIN_OBJS =
 ALL_OBJS = $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) $(MAIN_OBJS)
 
 # Targets
-TARGET = $(BUILD_DIR)/neodax_static
-TARGET_INTEGRATED = $(BUILD_DIR)/neodax_static_integrated
+TARGET = $(BUILD_DIR)/neodax
+TARGET_INTEGRATED = $(BUILD_DIR)/neodax-integrated
 
 # Default target
 #
@@ -87,14 +98,17 @@ all:
 	@echo "  [i] src/Makefile: 旧ビルド経路のため 'all' では何もビルドしません。"
 	@echo "      CLI  : make        (リポジトリ直下 → setup.sh)"
 	@echo "      GUI  : bash gui/build.sh"
-	@echo "      FW   : make -C src framework"
+	@echo "      FW   : make -C src neodax"
 
 framework: $(TARGET) $(TARGET_INTEGRATED)
 
+# 単体 CLI: make -C src neodax
+neodax: $(TARGET)
+
 # Main static analysis tool
-$(TARGET): $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) main.o
+$(TARGET): $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(TRACK_OBJS) main.o
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ $(LIBS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^ $(LIBS)
 
 # Integrated version with full pipeline
 $(TARGET_INTEGRATED): $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) main_integrated.o
@@ -105,10 +119,13 @@ $(TARGET_INTEGRATED): $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) 
 %.o: %.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
 # Clean — in-tree オブジェクトも消す (以前は BUILD_DIR を見ていて実体を消せていなかった)
 clean:
-	rm -f $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) main.o main_integrated.o
-	rm -rf $(BUILD_DIR)/neodax_static $(BUILD_DIR)/neodax_static_integrated
+	rm -f $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) $(TRACK_OBJS) main.o main_integrated.o
+	rm -rf $(BUILD_DIR)/neodax $(BUILD_DIR)/neodax-integrated
 
 # Very clean
 veryclean: clean
@@ -119,7 +136,7 @@ dep:
 	$(CC) -MM $(CFLAGS) $(INCLUDES) $(ALL_SRCS)
 
 # Phony targets
-.PHONY: all framework clean veryclean dep
+.PHONY: all neodax framework clean veryclean dep
 
 # Build individual components
 build_core: $(CORE_OBJS)

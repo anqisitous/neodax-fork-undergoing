@@ -38,6 +38,28 @@ char *nx_payload_build_remove_key(const char *store_substr, const char *key,
 /* 任意の localStorage キーを読む JS。 */
 char *nx_payload_build_read_key(const char *key);
 
+/* 起動時の「状態復元」を止める JS。
+   - key_prefix に前方一致する localStorage キーをすべて除去する
+   - store_substr が与えられれば、その persist ストアの保存内容も消す
+   次回起動時にアプリは「前回の状態なし」として既定状態で立ち上がる。
+   アプリ固有の名前は呼び出し側 (= profile) が与えるので、この部品自体は汎用。 */
+char *nx_payload_build_stop_restore(const char *store_substr,
+                                    const char *export_names,
+                                    const char *key_prefix);
+
+/* 復元先を「空の妥当な状態」に置き換える JS。
+
+   stop_restore は「復元させない」が、これは「置き換える」：
+     - 現在の状態から配列コレクションを空にした baseline を作る
+     - それを store に適用して永続化する
+     - 元の値は <key>.nx-backup に退避する
+   アプリは復元処理をそのまま正常に走らせ、結果だけが空のセッションになる。
+   エラー経路に入らないので振る舞いが乖離しない。 */
+char *nx_payload_build_baseline_restore(const char *store_substr,
+                                       const char *export_names,
+                                       const char *key);
+
+
 #ifdef __cplusplus
 }
 #endif

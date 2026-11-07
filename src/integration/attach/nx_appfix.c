@@ -58,3 +58,15 @@ int nx_appfix_read(const nx_appfix_profile_t *in, FILE *out) {
     char *js = nx_payload_build_read_key(p.key);
     return run_payload(&p, js, out);
 }
+
+int nx_appfix_stop_restore(const nx_appfix_profile_t *in, FILE *out) {
+    nx_appfix_profile_t p = merged(in);
+    char *js = nx_payload_build_stop_restore(p.store_substr, p.store_exports, p.key);
+    return run_payload(&p, js, out);
+}
+
+int nx_appfix_baseline_restore(const nx_appfix_profile_t *in, FILE *out) {
+    nx_appfix_profile_t p = merged(in);
+    char *js = nx_payload_build_baseline_restore(p.store_substr, p.store_exports, p.key);
+    return run_payload(&p, js, out);
+}

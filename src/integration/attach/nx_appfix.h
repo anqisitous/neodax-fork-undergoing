@@ -43,6 +43,15 @@ int nx_appfix_remove(const nx_appfix_profile_t *profile, FILE *out);
 /* key の現在値を読む (out に出力)。 */
 int nx_appfix_read(const nx_appfix_profile_t *profile, FILE *out);
 
+/* 起動時の状態復元を止める。profile が指すストアと localStorage キーから
+   復元用の永続状態を消す。次回起動は既定状態になる (再起動なしで反映される)。 */
+int nx_appfix_stop_restore(const nx_appfix_profile_t *profile, FILE *out);
+
+/* 復元先を「空の妥当な状態」に置き換える。
+   ブロックではなく置換なので、アプリの復元経路はそのまま正常に走る。
+   元の値は <key>.nx-backup に退避され、後で戻せる。 */
+int nx_appfix_baseline_restore(const nx_appfix_profile_t *profile, FILE *out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -83,15 +83,18 @@ int nx_recog_explain(const uint8_t *data, size_t size, FILE *out) {
     fprintf(out, "\n  === structure recognition (%zu bytes) ===\n", size);
     if (n == 0) { fprintf(out, "    no known structure matched\n"); return 0; }
     for (int i = 0; i < n; i++) {
-        fprintf(out, "    [%2d%%] %-20s family=%-16s %s\n",
+        int weak = hits[i].score < 30;   /* magic も check も無い構造 = 参考扱い */
+        fprintf(out, "    [%2d%%] %-20s family=%-16s %s%s\n",
                 hits[i].score, hits[i].spec->name, hits[i].spec->family,
-                hits[i].spec->summary);
-        if (i == 0) {
+                hits[i].spec->summary, weak ? "  (weak)" : "");
+        if (i == 0 && !weak) {
             const nx_spec_t *s = hits[i].spec;
             for (int k = 0; k < s->n_fields; k++)
                 print_field(data, size, &s->fields[k], out);
         }
     }
+    if (n > 0 && hits[0].score < 30)
+        fprintf(out, "    note: no magic/check matched; field dump suppressed (avoid false positives)\n");
     return n;
 }
 

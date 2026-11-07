@@ -69,6 +69,30 @@ static void print_usage(const char *progname) {
     
     printf("Shogi AI Specific:\n");
     printf("  --shogi               Enable Shogi AI specific analysis\n");
+    printf("  --track               復元コードを静的に逆trackする\n");
+    printf("  --track-rings         環 (call-graph SCC) を解析する\n");
+    printf("  --track-prune         線を 必要/邪魔/どうでもいい に分類する\n");
+    printf("  --track-files         このモジュールが読むファイルを洗い出す\n");
+    printf("  --rings               neodax 本来の環を報告する\n");
+    printf("  --classify            分類器と役割をまとめて出す\n");
+    printf("  --find-string S       文字列を参照する箇所と関数を一覧 (静的のみ)\n");
+    printf("  --guard S             起動を止める検知を静的に無効化 (--apply で実書換)\n");
+    printf("  --find-symbol S      定義シンボルを名前の部分一致で一覧 (静的のみ)\n");
+    printf("  --deps               リンクしているライブラリを一覧 (otool -L 相当)\n");
+    printf("  --deps-tree          依存の連鎖を再帰的に辿る (@rpath 展開込み)\n");
+    printf("  --disasm ADDR [--count N]  指定アドレス周辺を逆アセンブル (静的のみ)\n");
+    printf("  --apply                guard の変更を実バイナリに適用\n");
+    printf("  --pick N               guard で選ぶ候補の番号\n");
+    printf("  --taken                guard で分岐を取る側 (b) に固定\n");
+    printf("  --workflow <file>     C++ クラス設計を書き出す\n");
+    printf("  --track-filter S      逆track の探索語 (部分一致)\n");
+    printf("  --track-entry ADDR    分析の起点アドレス\n");
+    printf("  --launch-cond         起動条件を並べて、起動するかどうかを判定する\n");
+    printf("  --launch-cond-drop    条件を 1 つずつ落として、どこで起動しなくなるかを見る\n");
+    printf("  --launch-fix          壊れた状態を退避から戻して、起動できるようにする\n");
+    printf("  --learn-show          学んだ解析の仕方を表示する\n");
+    printf("  --learn-clear         学んだことを消す\n");
+    printf("  --launch-make         起動可能な状態ファイルを、無ければ作成する\n");
     printf("  --track-board         Track board state changes\n");
     printf("  --track-moves        Track move generation and history\n");
     printf("  --track-search       Track search tree state\n");
@@ -335,6 +359,62 @@ int main(int argc, char *argv[]) {
             g_opts.depflow = 1;
             g_opts.parallel_detection = 1;
             g_opts.state_tracking = 1;
+        } else if (strcmp(argv[optind], "--track") == 0) {
+            g_opts.track_mode = 1;                 // 復元コードの逆track
+        } else if (strcmp(argv[optind], "--track-rings") == 0) {
+            g_opts.track_mode = 2;                 // 環 (SCC) 解析
+        } else if (strcmp(argv[optind], "--track-prune") == 0) {
+            g_opts.track_mode = 3;                 // 線の分類と分析断ち切り
+        } else if (strcmp(argv[optind], "--track-files") == 0) {
+            g_opts.track_mode = 4;                 // このモジュールが読むファイル
+        } else if (strcmp(argv[optind], "--rings") == 0) {
+            g_opts.track_mode = 5;
+        } else if (strcmp(argv[optind], "--classify") == 0) {
+            g_opts.track_mode = 6;
+        } else if (strcmp(argv[optind], "--find-string") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 7;                 // 文字列参照の一覧 (静的のみ)
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--guard") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 8;                 // 起動を止める検知の静的無効化
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--find-symbol") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 9;                 // 定義シンボルの一覧
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--disasm") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 10;                // 指定アドレス周辺の逆アセンブル
+            g_opts.track_entry = strtoull(argv[++optind], NULL, 0);
+        } else if (strcmp(argv[optind], "--deps") == 0) {
+            g_opts.track_mode = 11;                // リンク依存の一覧 (otool -L 相当)
+        } else if (strcmp(argv[optind], "--deps-tree") == 0) {
+            g_opts.track_mode = 12;                // 依存の連鎖を再帰的に辿る
+        } else if (strcmp(argv[optind], "--count") == 0 && optind + 1 < argc) {
+            g_opts.track_pick = atoi(argv[++optind]);
+        } else if (strcmp(argv[optind], "--apply") == 0) {
+            g_opts.track_apply = 1;
+        } else if (strcmp(argv[optind], "--pick") == 0 && optind + 1 < argc) {
+            g_opts.track_pick = atoi(argv[++optind]);
+        } else if (strcmp(argv[optind], "--taken") == 0) {
+            g_opts.track_taken = 1;
+        } else if (strcmp(argv[optind], "--workflow") == 0 && optind + 1 < argc) {
+            snprintf(g_opts.workflow_out, sizeof(g_opts.workflow_out), "%s", argv[++optind]);                 // neodax 本来の環 (depflow_build_rings)
+        } else if (strcmp(argv[optind], "--track-filter") == 0 && optind + 1 < argc) {
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--track-entry") == 0 && optind + 1 < argc) {
+            g_opts.track_entry = strtoull(argv[++optind], NULL, 0);
+        } else if (strcmp(argv[optind], "--track-symbols") == 0) {
+            g_opts.track_symbols_only = 1;
+        } else if (strcmp(argv[optind], "--launch-cond") == 0) {
+            g_opts.launch_cond = 1;
+        } else if (strcmp(argv[optind], "--launch-cond-drop") == 0) {
+            g_opts.launch_cond = 2;
+        } else if (strcmp(argv[optind], "--launch-fix") == 0) {
+            g_opts.launch_cond = 3;                // 壊れた状態を退避から戻す
+        } else if (strcmp(argv[optind], "--learn-show") == 0) {
+            g_opts.launch_cond = 4;                // 学んだ解析の仕方を表示する
+        } else if (strcmp(argv[optind], "--learn-clear") == 0) {
+            g_opts.launch_cond = 5;                // 学んだことを消す
+        } else if (strcmp(argv[optind], "--launch-make") == 0) {
+            g_opts.launch_cond = 6;                // 起動可能な状態ファイルを作成する
         } else if (strcmp(argv[optind], "--track-board") == 0) {
             g_opts.depflow = 1;
             g_opts.state_tracking = 1;
@@ -383,6 +463,25 @@ int main(int argc, char *argv[]) {
         optind++;
     }
     
+    // --launch-cond は入力がファイルではない (.app や修復のみ) ので、
+    // ファイル指定の検査より前に処理する。
+    if (g_opts.launch_cond) {
+        extern int nx_cond_run(const char *app, int drop_each, FILE *out);
+        extern int nx_cond_fix(FILE *out);
+        extern int nx_learn_run(int mode, FILE *out);
+        extern int nx_make_run(const char *app, FILE *out);
+        if (g_opts.launch_cond == 6)
+            return nx_make_run(optind < argc ? argv[optind] : "", stdout);
+        if (g_opts.launch_cond == 3) return nx_cond_fix(stdout);
+        if (g_opts.launch_cond == 4) return nx_learn_run(1, stdout);
+        if (g_opts.launch_cond == 5) return nx_learn_run(2, stdout);
+        if (optind >= argc) {
+            fprintf(stderr, "Error: No application specified\n");
+            return 1;
+        }
+        return nx_cond_run(argv[optind], g_opts.launch_cond == 2, stdout);
+    }
+
     // Check if we have a binary file
     if (optind >= argc) {
         fprintf(stderr, "Error: No binary file specified\n");
@@ -391,12 +490,78 @@ int main(int argc, char *argv[]) {
     }
     
     const char *filename = argv[optind];
-    
+
+    // --find-string / --guard は生のパスを静的に読む (動的解析なし)。
+    if (g_opts.track_mode == 7 || g_opts.track_mode == 8 || g_opts.track_mode == 9 ||
+        g_opts.track_mode == 10 || g_opts.track_mode == 11 || g_opts.track_mode == 12) {
+        extern int nx_find_string(const char *, const char *, FILE *);
+        extern int nx_guard_run(const char *, const char *, int, int, int, FILE *);
+        extern int nx_list_symbols(const char *, const char *, FILE *);
+        extern int nx_disasm(const char *, uint64_t, int, FILE *);
+        extern int nx_list_deps(const char *, int, FILE *);
+        if (g_opts.track_mode == 7)
+            return nx_find_string(filename, g_opts.track_filter, stdout);
+        if (g_opts.track_mode == 9)
+            return nx_list_symbols(filename, g_opts.track_filter, stdout);
+        if (g_opts.track_mode == 10)
+            return nx_disasm(filename, g_opts.track_entry, g_opts.track_pick, stdout);
+        if (g_opts.track_mode == 11)
+            return nx_list_deps(filename, 0, stdout);
+        if (g_opts.track_mode == 12)
+            return nx_list_deps(filename, 1, stdout);
+        return nx_guard_run(filename, g_opts.track_filter,
+                            g_opts.track_apply, g_opts.track_pick,
+                            g_opts.track_taken, stdout);
+    }
+
     // Load the binary file
     uint8_t *data = NULL;
     size_t size = 0;
     if (load_file(filename, &data, &size) != 0) {
         return 1;
+    }
+
+    // --track は独立したモード。生の call 命令は使わない。
+    // 環は neodax 本来の depflow_build_rings の結果をそのまま読む。
+    if (g_opts.track_mode) {
+        macho_binary_t bin;
+        macho_init(&bin);
+        bin.data = data;
+        bin.size = size;
+        if (macho_parse(&bin, data, size) != 0) {
+            fprintf(stderr, "Error: Failed to parse Mach-O file\n");
+            macho_free(&bin);
+            return 1;
+        }
+
+        // 環の報告は depflow の戻り値依存辺から作る (効率的・本来の意味)。
+        if (g_opts.track_mode == 5 || g_opts.track_mode == 6) {
+            extern int nx_rings_report(macho_binary_t *, depflow_graph_t *, FILE *);
+            extern int nx_classify_report(macho_binary_t *, depflow_graph_t *, const char *, FILE *);
+            macho_analyze(&bin, &g_opts);
+            extern int nx_narrow_functions(macho_binary_t *);
+            nx_narrow_functions(&bin);
+
+            depflow_graph_t dg;
+            depflow_graph_init(&dg);
+            depflow_build_dependency_graph(&bin, &dg);
+            if (g_opts.track_mode == 5)
+                nx_rings_report(&bin, &dg, stdout);
+            else
+                nx_classify_report(&bin, &dg, g_opts.workflow_out, stdout);
+            depflow_graph_free(&dg);
+            macho_free(&bin);
+            return 0;
+        }
+
+        // 逆track 系は生のバイトから追う (こちらは命令単位が必要)。
+        extern int nx_track_run(const char *path, int mode, uint64_t entry,
+                                const char *filter, int symbols_only, FILE *out);
+        int cmode = (g_opts.track_mode == 1) ? 0 : (g_opts.track_mode - 1);
+        int rc = nx_track_run(filename, cmode, g_opts.track_entry,
+                              g_opts.track_filter, g_opts.track_symbols_only, stdout);
+        macho_free(&bin);
+        return rc;
     }
     
     // Initialize binary structure

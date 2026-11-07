@@ -507,6 +507,10 @@ int macho_fill_insns(macho_binary_t *bin) {
             memset(mi, 0, sizeof(*mi));
             mi->address = ni.address;
             mi->length  = ni.length;
+            /* 生の命令バイトを実アドレスに対応させて保持する。
+               後段の再デコード (ADRP/ADD/LDR の解析) はここを読むため、
+               bytes を欠かすと命令が 0 個になる。 */
+            memcpy(mi->bytes, bin->data + fpos, ni.length);
             strncpy(mi->mnemonic, ni.mnemonic, sizeof(mi->mnemonic) - 1);
             strncpy(mi->operands, ni.operands, sizeof(mi->operands) - 1);
             mi->is_call       = ni.is_call;

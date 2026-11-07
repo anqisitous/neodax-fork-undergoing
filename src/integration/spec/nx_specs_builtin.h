@@ -24,6 +24,15 @@ extern const nx_spec_t nx_spec_pe_nt_signature;
 extern const nx_spec_t nx_spec_pe_file_header;
 extern const nx_spec_t nx_spec_pe_section_header;
 
+/* Mach-O 構造 (ws_frame と同じ nx_spec_t テーブルに載る) */
+extern const nx_spec_t nx_spec_macho64;
+extern const nx_spec_t nx_spec_macho32;
+extern const nx_spec_t nx_spec_macho_fat;
+
+/* 永続化された状態 (Zustand persist JSON / LevelDB localStorage レコード) */
+extern const nx_spec_t nx_spec_json_state;
+extern const nx_spec_t nx_spec_ls_record;
+
 /* 登録 */
 void nx_specs_builtin_register(void);
 
