@@ -3055,7 +3055,8 @@ struct nx_fork_ctx {
     std::string src, dst, exe;
     std::vector<std::string> needles;
     int launch = 0;
-    int bin_modified = 0;   // バイナリを実際に変えたか (resign の判断に使う)
+    int bin_modified = 0;      // Mach-O を変えたか (実行ファイルを再署名)
+    int bundle_modified = 0;   // Info.plist を変えたか (外側を再署名)
     FILE *out = nullptr;
 };
 
@@ -3131,16 +3132,61 @@ static int op_resources_apply(nx_fork_ctx *c) {
     return 0;
 }
 
+// メニューバー等に出るアプリ名は CFBundleName / CFBundleDisplayName 由来。
+// fork は元と同じ名前になるので、コピー側だけ dst 名に変える。Info.plist は
+// 署名の封印対象なので、変えたら外側を再署名する。
+static std::string nx_plist_get(const std::string &pl, const char *key) {
+    std::string cmd = "/usr/libexec/PlistBuddy -c " +
+                      nx_shq(std::string("Print :") + key) + " " + nx_shq(pl) +
+                      " 2>/dev/null";
+    FILE *p = popen(cmd.c_str(), "r");
+    if (!p) return {};
+    std::string out;
+    char buf[256];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), p)) > 0) out.append(buf, n);
+    pclose(p);
+    return nx_trim(out);
+}
+
+static int op_name_probe(nx_fork_ctx *c) {
+    return !c->dst.empty() && nx_path_exists(c->dst + "/Contents/Info.plist");
+}
+static int op_name_apply(nx_fork_ctx *c) {
+    std::string pl = c->dst + "/Contents/Info.plist";
+    std::string base = c->dst;
+    size_t sl = base.find_last_of('/');
+    if (sl != std::string::npos) base = base.substr(sl + 1);
+    if (base.size() > 4 && base.compare(base.size() - 4, 4, ".app") == 0)
+        base = base.substr(0, base.size() - 4);
+    if (base.empty()) return 0;
+    bool changed = false;
+    for (const char *k : { "CFBundleName", "CFBundleDisplayName" }) {
+        if (nx_plist_get(pl, k) == base) continue;
+        std::string setcmd = "/usr/libexec/PlistBuddy -c " +
+                             nx_shq(std::string("Set :") + k + " " + base) + " " +
+                             nx_shq(pl);
+        if (nx_sh( setcmd, c->out) == 0) changed = true;
+    }
+    if (changed) {
+        c->bundle_modified = 1;
+        std::fprintf(c->out, "  [name] CFBundleName/DisplayName -> \"%s\"\n", base.c_str());
+    }
+    return 0;
+}
+
 static int op_state_probe(nx_fork_ctx *c) { (void)c; return 1; }
 static int op_state_apply(nx_fork_ctx *c) {
     return nx_state_heal(NULL, 1, c->out);
 }
 
-static int op_resign_probe(nx_fork_ctx *c) { return c->bin_modified && !c->dst.empty(); }
+static int op_resign_probe(nx_fork_ctx *c) {
+    return (c->bin_modified || c->bundle_modified) && !c->dst.empty();
+}
 static int op_resign_apply(nx_fork_ctx *c) {
     // 変えた実行ファイルだけ、そのあと外側バンドルだけを署名する。
     // --deep は中の全フレームワークを舐めるので署名には使わない。
-    if (!c->exe.empty())
+    if (c->bin_modified && !c->exe.empty())
         nx_sh("codesign --force --sign - " + nx_shq(c->exe), c->out);
     if (nx_sh("codesign --force --sign - " + nx_shq(c->dst), c->out) != 0) {
         std::fprintf(c->out, "  [resign] codesign に失敗\n");
@@ -3164,6 +3210,7 @@ static int op_launch_apply(nx_fork_ctx *c) {
 static const nx_fork_op k_fork_ops[] = {
     { "clone",  op_clone_probe,  op_clone_apply  },
     { "res",    op_resources_probe, op_resources_apply },
+    { "name",   op_name_probe,   op_name_apply   },
     { "state",  op_state_probe,  op_state_apply  },
     { "guard",  op_guard_probe,  op_guard_apply  },
     { "resign", op_resign_probe, op_resign_apply },
