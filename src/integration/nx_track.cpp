@@ -3045,3 +3045,119 @@ extern "C" int nx_guard_run(const char *path, const char *needle, int apply, int
     brain.save(nx::SkillStore::default_path());
     return 0;
 }
+
+// ---------------------------------------------------------------- fork
+// アプリのコピーを作り、そのコピーだけを解析・改変・再署名する。元アプリには触れない。
+// 自律性: 各 op は probe(適用可否) と apply(実行) を持ち、実行時に適用可否を
+// 判断して順に走らせる。op の並びはデータ (レジストリ) で決まり、コードは分岐しない。
+// 統合: 既存の nx_guard_run / nx_bundle_exe / MachOImage をそのまま呼ぶ。
+struct nx_fork_ctx {
+    std::string src, dst, exe;
+    std::vector<std::string> needles;
+    int launch = 0;
+    int bin_modified = 0;   // バイナリを実際に変えたか (resign の判断に使う)
+    FILE *out = nullptr;
+};
+
+struct nx_fork_op {
+    const char *name;
+    int (*probe)(nx_fork_ctx *);
+    int (*apply)(nx_fork_ctx *);
+};
+
+static std::string nx_shq(const std::string &s) {
+    std::string o = "'";
+    for (char c : s) { if (c == '\'') o += "'\\''"; else o += c; }
+    o += "'";
+    return o;
+}
+
+static int nx_sh(const std::string &cmd, FILE *out) {
+    if (out) std::fprintf(out, "  $ %s\n", cmd.c_str());
+    return std::system(cmd.c_str());
+}
+
+static int op_clone_probe(nx_fork_ctx *c) {
+    if (c->src.empty() || c->dst.empty() || c->src == c->dst) return 0;
+    return nx_path_exists(c->src) && !nx_path_exists(c->dst);
+}
+static int op_clone_apply(nx_fork_ctx *c) {
+    if (nx_sh("ditto " + nx_shq(c->src) + " " + nx_shq(c->dst), c->out) != 0) return -1;
+    c->exe = nx_bundle_exe(c->dst);
+    return 0;
+}
+
+static int op_guard_probe(nx_fork_ctx *c) { return !c->needles.empty() && !c->exe.empty(); }
+static int op_guard_apply(nx_fork_ctx *c) {
+    for (const auto &n : c->needles) {
+        std::fprintf(c->out, "  [guard] %s\n", n.c_str());
+        if (nx_guard_run(c->exe.c_str(), n.c_str(), 1, 0, 0, c->out) == 0)
+            c->bin_modified = 1;
+        else
+            std::fprintf(c->out, "  [guard] 適用できませんでした: %s\n", n.c_str());
+    }
+    return 0;
+}
+
+// AE の終了原因 (SSO フラグ SIGNOUT) を、neodax の状態回復関数で良い状態に揃える。
+static int op_state_probe(nx_fork_ctx *c) { (void)c; return 1; }
+static int op_state_apply(nx_fork_ctx *c) {
+    return nx_state_heal(NULL, 1, c->out);
+}
+
+static int op_resign_probe(nx_fork_ctx *c) { return c->bin_modified && !c->dst.empty(); }
+static int op_resign_apply(nx_fork_ctx *c) {
+    // コピーは自分たちのものなので、ad-hoc で署名し直す (元の署名は壊さない)。
+    if (nx_sh("codesign --force --deep --sign - " + nx_shq(c->dst), c->out) != 0) {
+        std::fprintf(c->out, "  [resign] codesign に失敗\n");
+        return -1;
+    }
+    int rc = nx_sh("codesign --verify --deep --strict " + nx_shq(c->dst) + " 2>&1 | tail -3", c->out);
+    std::fprintf(c->out, "  [resign] verify rc=%d\n", rc);
+    return 0;
+}
+
+static int op_launch_probe(nx_fork_ctx *c) { return c->launch && !c->dst.empty(); }
+static int op_launch_apply(nx_fork_ctx *c) {
+    return nx_sh("open " + nx_shq(c->dst), c->out) == 0 ? 0 : -1;
+}
+
+static const nx_fork_op k_fork_ops[] = {
+    { "clone",  op_clone_probe,  op_clone_apply  },
+    { "state",  op_state_probe,  op_state_apply  },
+    { "guard",  op_guard_probe,  op_guard_apply  },
+    { "resign", op_resign_probe, op_resign_apply },
+    { "launch", op_launch_probe, op_launch_apply },
+};
+
+extern "C" int nx_fork_run(const char *src, const char *dst,
+                           const char *needles_csv, int launch, FILE *out) {
+    if (!out) out = stdout;
+    if (!src || !dst || !*dst) {
+        std::fprintf(out, "使い方: neodax --fork <src.app> --to <dst.app> "
+                          "[--fork-patch S] [--fork-launch]\n");
+        return 2;
+    }
+    nx_fork_ctx c;
+    c.src = src; c.dst = dst; c.launch = launch; c.out = out;
+    if (needles_csv && *needles_csv) {
+        std::string s(needles_csv), cur;
+        for (char ch : s) {
+            if (ch == '\x1f') { if (!cur.empty()) c.needles.push_back(cur); cur.clear(); }
+            else cur.push_back(ch);
+        }
+        if (!cur.empty()) c.needles.push_back(cur);
+    }
+    std::fprintf(out, "=== fork ===\n  src: %s\n  dst: %s\n", src, dst);
+    int ran = 0;
+    for (const auto &op : k_fork_ops) {
+        int applicable = op.probe ? op.probe(&c) : 0;
+        std::fprintf(out, "  [op] %-7s probe=%s\n", op.name, applicable ? "apply" : "skip");
+        if (!applicable) continue;
+        if (op.apply && op.apply(&c) != 0)
+            std::fprintf(out, "  [op] %s failed\n", op.name);
+        ran++;
+    }
+    std::fprintf(out, "実行した op: %d\n", ran);
+    return ran ? 0 : 1;
+}

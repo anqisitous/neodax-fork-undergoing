@@ -82,6 +82,7 @@ static void print_usage(const char *progname) {
     printf("  --deps-tree          依存の連鎖を再帰的に辿る (@rpath 展開込み)\n");
     printf("  --scan-strings S     生の文字列を走査する (strings + grep 相当)\n");
     printf("  --heal-state         SSO フラグを良い状態に揃える (Mach-O は触らない, --apply)\n");
+    printf("  --fork <app>         アプリのコピーを作る (--to <dst> --fork-patch S --fork-launch)\n");
     printf("  --disasm ADDR [--count N]  指定アドレス周辺を逆アセンブル (静的のみ)\n");
     printf("  --apply                guard の変更を実バイナリに適用\n");
     printf("  --pick N               guard で選ぶ候補の番号\n");
@@ -322,6 +323,25 @@ int main(int argc, char *argv[]) {
     g_opts.depflow_target_var[0] = '\0';
     g_opts.depflow_dot[0] = '\0';
     
+    // fork 系は位置引数 (ソース) の後ろに置かれても効くよう、先に全部拾う。
+    // 本体ループは値の読み飛ばしだけを行う。
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--fork") == 0) {
+            g_opts.track_mode = 15;
+        } else if (strcmp(argv[i], "--fork-launch") == 0) {
+            g_opts.fork_launch = 1;
+        } else if (strcmp(argv[i], "--to") == 0 && i + 1 < argc) {
+            snprintf(g_opts.fork_dest, sizeof(g_opts.fork_dest), "%s", argv[i + 1]);
+        } else if (strcmp(argv[i], "--fork-patch") == 0 && i + 1 < argc) {
+            const char *v = argv[i + 1];
+            size_t l = strlen(g_opts.track_filter);
+            if (l && l + 2 < sizeof(g_opts.track_filter))
+                snprintf(g_opts.track_filter + l, sizeof(g_opts.track_filter) - l, "%c%s", 0x1f, v);
+            else
+                snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", v);
+        }
+    }
+
     int optind = 1;
     while (optind < argc) {
         if (strcmp(argv[optind], "-h") == 0 || strcmp(argv[optind], "--help") == 0) {
@@ -394,6 +414,12 @@ int main(int argc, char *argv[]) {
             snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
         } else if (strcmp(argv[optind], "--heal-state") == 0) {
             g_opts.track_mode = 14;                // SSO フラグを良い状態に揃える
+        } else if (strcmp(argv[optind], "--fork") == 0 ||
+                   strcmp(argv[optind], "--fork-launch") == 0) {
+            /* 事前走査で処理済み */
+        } else if ((strcmp(argv[optind], "--to") == 0 ||
+                    strcmp(argv[optind], "--fork-patch") == 0) && optind + 1 < argc) {
+            optind++;   /* 事前走査で処理済み。値を読み飛ばす */
         } else if (strcmp(argv[optind], "--count") == 0 && optind + 1 < argc) {
             g_opts.track_pick = atoi(argv[++optind]);
         } else if (strcmp(argv[optind], "--apply") == 0) {
@@ -507,13 +533,17 @@ int main(int argc, char *argv[]) {
     // --find-string / --guard は生のパスを静的に読む (動的解析なし)。
     if (g_opts.track_mode == 7 || g_opts.track_mode == 8 || g_opts.track_mode == 9 ||
         g_opts.track_mode == 10 || g_opts.track_mode == 11 || g_opts.track_mode == 12 ||
-        g_opts.track_mode == 13) {
+        g_opts.track_mode == 13 || g_opts.track_mode == 15) {
         extern int nx_find_string(const char *, const char *, FILE *);
         extern int nx_guard_run(const char *, const char *, int, int, int, FILE *);
         extern int nx_list_symbols(const char *, const char *, FILE *);
         extern int nx_disasm(const char *, uint64_t, int, FILE *);
         extern int nx_list_deps(const char *, int, FILE *);
         extern int nx_scan_strings(const char *, const char *, FILE *);
+        extern int nx_fork_run(const char *, const char *, const char *, int, FILE *);
+        if (g_opts.track_mode == 15)
+            return nx_fork_run(filename, g_opts.fork_dest, g_opts.track_filter,
+                               g_opts.fork_launch, stdout);
         if (g_opts.track_mode == 7)
             return nx_find_string(filename, g_opts.track_filter, stdout);
         if (g_opts.track_mode == 9)
