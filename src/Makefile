@@ -4,7 +4,7 @@
 CC = gcc
 CFLAGS = -std=c99 -Wall -Wextra -O2 -g
 INCLUDES = -I. -I../include
-LIBS = -lpthread -lm
+LIBS = -lpthread -lm -framework CoreFoundation -framework CFNetwork -framework Carbon
 
 # C++ の解析器 (逆track / 起動条件)。リンクは C++ ドライバで行う。
 CXX = clang++
@@ -24,7 +24,8 @@ CORE_SRCS = \
 # 旧 neodax エンジンのデコーダ。src/ 直下が正準で、framework もこれを compose する。
 LEGACY_SRCS = \
 	arm64_decode.c \
-	x86_decode.c
+	x86_decode.c \
+	demangle.c
 
 ANALYSIS_SRCS = \
 	analysis/depflow.c \

@@ -42,6 +42,19 @@
 
 #include <dirent.h>
 #include <sys/stat.h>
+#include <libproc.h>
+#include <signal.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <CFNetwork/CFNetwork.h>
+#include <cctype>
+#include <ctime>
+#include <Carbon/Carbon.h>
 
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
@@ -3055,6 +3068,7 @@ struct nx_fork_ctx {
     std::string src, dst, exe;
     std::vector<std::string> needles;
     int launch = 0;
+    int move = 0;           // 1=コピーせず移動する (元は解体)
     int bin_modified = 0;      // Mach-O を変えたか (実行ファイルを再署名)
     int bundle_modified = 0;   // Info.plist を変えたか (外側を再署名)
     FILE *out = nullptr;
@@ -3083,11 +3097,21 @@ static int op_clone_probe(nx_fork_ctx *c) {
     return nx_path_exists(c->src) && !nx_path_exists(c->dst);
 }
 static int op_clone_apply(nx_fork_ctx *c) {
-    // APFS の clonefile で複製する。CoW なので一瞬で、追加容量はほぼ 0。
-    // 変えたファイルだけが実体を持つ。clonefile 不可なら ditto に落とす。
-    std::string cmd = "cp -cR " + nx_shq(c->src) + " " + nx_shq(c->dst) +
-                      " 2>/dev/null || ditto " + nx_shq(c->src) + " " + nx_shq(c->dst);
-    if (nx_sh(cmd, c->out) != 0) return -1;
+    nx_sh("mkdir -p " + nx_shq(nx_dirname(c->dst)), c->out);
+    if (c->move) {
+        // 移動: 同一ボリュームなら rename で一瞬。元は残らない (=解体)。
+        if (nx_sh("mv " + nx_shq(c->src) + " " + nx_shq(c->dst), c->out) != 0) return -1;
+        if (nx_path_exists(c->src)) {
+            std::fprintf(c->out, "  [clone] 移動後も元が残っています: %s\n", c->src.c_str());
+            return -1;
+        }
+    } else {
+        // 複製: APFS の clonefile で CoW 複製。一瞬で、追加容量はほぼ 0。
+        // 変えたファイルだけが実体を持つ。clonefile 不可なら ditto に落とす。
+        std::string cmd = "cp -cR " + nx_shq(c->src) + " " + nx_shq(c->dst) +
+                          " 2>/dev/null || ditto " + nx_shq(c->src) + " " + nx_shq(c->dst);
+        if (nx_sh(cmd, c->out) != 0) return -1;
+    }
     c->exe = nx_bundle_exe(c->dst);
     return 0;
 }
@@ -3127,7 +3151,12 @@ static int op_resources_apply(nx_fork_ctx *c) {
     for (const char *n : k_sibling_res) {
         std::string s = nx_join_path(sp, n), d = nx_join_path(dp, n);
         if (!nx_path_exists(s) || nx_path_exists(d)) continue;
-        nx_sh("ln -s " + nx_shq(s) + " " + nx_shq(d), c->out);
+        // move モードでは兄弟も「移動」する。元の製品フォルダは空になり解体される。
+        // copy モードでは元を残すので symlink で参照させる。
+        if (c->move)
+            nx_sh("mv " + nx_shq(s) + " " + nx_shq(d), c->out);
+        else
+            nx_sh("ln -s " + nx_shq(s) + " " + nx_shq(d), c->out);
     }
     return 0;
 }
@@ -3218,7 +3247,7 @@ static const nx_fork_op k_fork_ops[] = {
 };
 
 extern "C" int nx_fork_run(const char *src, const char *dst,
-                           const char *needles_csv, int launch, FILE *out) {
+                           const char *needles_csv, int launch, int move, FILE *out) {
     if (!out) out = stdout;
     if (!src || !dst || !*dst) {
         std::fprintf(out, "使い方: neodax --fork <src.app> --to <dst.app> "
@@ -3226,7 +3255,7 @@ extern "C" int nx_fork_run(const char *src, const char *dst,
         return 2;
     }
     nx_fork_ctx c;
-    c.src = src; c.dst = dst; c.launch = launch; c.out = out;
+    c.src = src; c.dst = dst; c.launch = launch; c.move = move; c.out = out;
     if (needles_csv && *needles_csv) {
         std::string s(needles_csv), cur;
         for (char ch : s) {
@@ -3247,4 +3276,459 @@ extern "C" int nx_fork_run(const char *src, const char *dst,
     }
     std::fprintf(out, "実行した op: %d\n", ran);
     return ran ? 0 : 1;
+}
+
+// ---------------------------------------------------------------- release
+// 止まったプロセスを neodax 自身で解放する。実行ファイルパスの部分一致で対象を選び、
+// --apply のときだけ SIGTERM を送る。外部ツールは使わない (libproc + kill)。
+// サインイン窓や更新ワークフローがアプリの終了を妨げているときのための手続き。
+extern "C" int nx_release_proc(const char *needle, int apply, FILE *out) {
+    if (!out) out = stdout;
+    if (!needle || !*needle) {
+        std::fprintf(out, "使い方: neodax --term <path-substr> [--apply]\n");
+        return 2;
+    }
+    int npid = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+    if (npid <= 0) return -1;
+    std::vector<pid_t> pids((size_t)npid / sizeof(pid_t) + 64);
+    npid = proc_listpids(PROC_ALL_PIDS, 0, pids.data(),
+                         (int)(pids.size() * sizeof(pid_t)));
+    if (npid <= 0) return -1;
+    int count = npid / (int)sizeof(pid_t);
+    pid_t self = getpid();
+    int hits = 0;
+    for (int i = 0; i < count; i++) {
+        pid_t pid = pids[i];
+        if (pid <= 1 || pid == self) continue;
+        char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+        if (proc_pidpath(pid, path, sizeof(path)) <= 0) continue;
+        if (!std::strstr(path, needle)) continue;
+        hits++;
+        std::fprintf(out, "  %-8d %s\n", (int)pid, path);
+        if (apply) {
+            if (kill(pid, SIGTERM) == 0)
+                std::fprintf(out, "           -> SIGTERM 送信\n");
+            else
+                std::fprintf(out, "           -> SIGTERM 失敗\n");
+        }
+    }
+    std::fprintf(out, "%s: %d 件%s\n", needle, hits,
+                 apply ? " (SIGTERM 送信済)" : " (dry-run; --apply で送信)");
+    return hits ? 0 : 1;
+}
+
+// ---------------------------------------------------------------- move
+// 同一ボリュームの rename だけで移動する。コピーなし、Finder なし。
+// /Applications への書込みには macOS の App Management 許可が必要。
+extern "C" int nx_move(const char *src, const char *dst, FILE *out) {
+    if (!out) out = stdout;
+    if (!src || !dst) return 2;
+    if (rename(src, dst) != 0) {
+        int e = errno;
+        std::fprintf(out, "move 失敗: %s (errno=%d %s)", src, e, std::strerror(e));
+        if (e == EPERM || e == EACCES)
+            std::fprintf(out, " — App Management の許可が必要");
+        else if (e == EXDEV)
+            std::fprintf(out, " — 別ボリュームなので rename 不可 (コピーが必要)");
+        std::fprintf(out, "\n");
+        return 1;
+    }
+    std::fprintf(out, "move 完了: %s -> %s\n", src, dst);
+    return 0;
+}
+
+// ---------------------------------------------------------------- finder move
+// Finder は App Management の対象外なので、Finder に move を依頼する。
+// 初回だけ Automation 許可 (Finder を操作) が必要。以後は無言で動く。
+extern "C" int nx_finder_move(const char *src, const char *dst_folder, FILE *out) {
+    if (!out) out = stdout;
+    if (!src || !dst_folder) return 2;
+    struct stat stt;
+    if (stat(dst_folder, &stt) != 0) {
+        std::string p(dst_folder), cur;
+        for (size_t i = 0; i < p.size(); i++) {
+            cur += p[i];
+            if (p[i] == '/' && cur.size() > 1) mkdir(cur.c_str(), 0755);
+        }
+        if (!p.empty()) mkdir(p.c_str(), 0755);
+        std::fprintf(out, "dst を作成: %s\n", dst_folder);
+    }
+    FSRef s, d;
+    if (FSPathMakeRef((const UInt8 *)src, &s, NULL) != noErr) {
+        std::fprintf(out, "src が見つかりません: %s\n", src); return 1;
+    }
+    if (FSPathMakeRef((const UInt8 *)dst_folder, &d, NULL) != noErr) {
+        std::fprintf(out, "dst が見つかりません: %s\n", dst_folder); return 1;
+    }
+    AEDesc sd, dd;
+    AECreateDesc(typeFSRef, &s, sizeof(s), &sd);
+    AECreateDesc(typeFSRef, &d, sizeof(d), &dd);
+    AEAddressDesc addr;
+    OSType finder = 'MACS';
+    AECreateDesc(typeApplSignature, &finder, sizeof(finder), &addr);
+    AppleEvent ev, rep;
+    AECreateAppleEvent(kCoreEventClass, 'move', &addr,
+                       kAutoGenerateReturnID, kAnyTransactionID, &ev);
+    AEPutParamDesc(&ev, keyDirectObject, &sd);
+    AEPutParamDesc(&ev, 'insl', &dd);
+    OSStatus st = AESendMessage(&ev, &rep, kAEWaitReply | kAECanInteract, 300);
+    SInt32 errn = 0;
+    {
+        Size sz = sizeof(errn);
+        AEGetParamPtr(&rep, keyErrorNumber, typeSInt32, NULL, &errn, sizeof(errn), &sz);
+    }
+    std::fprintf(out, "Finder reply: st=%d errn=%d\n", (int)st, (int)errn);
+    AEDisposeDesc(&ev);
+    AEDisposeDesc(&rep);
+    AEDisposeDesc(&sd);
+    AEDisposeDesc(&dd);
+    AEDisposeDesc(&addr);
+    if (st != noErr || errn != 0) {
+        std::fprintf(out, "Finder move 失敗: st=%d errn=%d"
+                          " (-1743 は Automation 未許可)\n", (int)st, (int)errn);
+        return 1;
+    }
+    std::fprintf(out, "Finder が move しました: %s -> %s\n", src, dst_folder);
+
+    // Plug-ins / Presets / Scripts は「共有」のまま、移動先から symlink 参照する。
+    std::string sp(src);
+    size_t sl = sp.find_last_of('/');
+    std::string sparent = (sl == std::string::npos) ? std::string(".") : sp.substr(0, sl);
+    for (const char *n : { "Plug-ins", "Presets", "Scripts" }) {
+        std::string a = sparent + "/" + n, b = std::string(dst_folder) + "/" + n;
+        struct stat t1, t2;
+        if (stat(a.c_str(), &t1) == 0 && stat(b.c_str(), &t2) != 0) {
+            if (symlink(a.c_str(), b.c_str()) == 0)
+                std::fprintf(out, "共有 symlink: %s -> %s\n", b.c_str(), a.c_str());
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- watch
+// 指定の実行パスを含むプロセスが現れたら、猶予後に SIGTERM で終える。
+// 「サインイン窓が出たらアプリを自動で終わらせる」ための手続き。
+// 窓はアプリのプロセス内にあるので、アプリを終える以外に外から消す方法はない。
+extern "C" int nx_watch_proc(const char *needle, int grace_ms, int total_ms, FILE *out) {
+    if (!out) out = stdout;
+    if (!needle || !*needle) {
+        std::fprintf(out, "使い方: neodax --watch <path-substr> [--count grace_ms]\n");
+        return 2;
+    }
+    if (grace_ms <= 0) grace_ms = 3000;
+    if (total_ms <= 0) total_ms = 120000;
+    auto find = [&]() -> pid_t {
+        int np = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+        if (np <= 0) return -1;
+        std::vector<pid_t> pids((size_t)np / sizeof(pid_t) + 64);
+        np = proc_listpids(PROC_ALL_PIDS, 0, pids.data(),
+                           (int)(pids.size() * sizeof(pid_t)));
+        if (np <= 0) return -1;
+        int cnt = np / (int)sizeof(pid_t);
+        for (int i = 0; i < cnt; i++) {
+            pid_t p = pids[i];
+            if (p <= 1) continue;
+            char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+            if (proc_pidpath(p, path, sizeof path) <= 0) continue;
+            if (std::strstr(path, needle)) return p;
+        }
+        return -1;
+    };
+    int waited = 0;
+    pid_t target = -1;
+    while (waited < total_ms) {
+        target = find();
+        if (target > 0) break;
+        usleep(500000);
+        waited += 500;
+    }
+    if (target <= 0) { std::fprintf(out, "見つかりません: %s\n", needle); return 1; }
+    std::fprintf(out, "見つけました: pid=%d。%d ms 後に終了させます。\n",
+                 (int)target, grace_ms);
+    usleep((useconds_t)grace_ms * 1000);
+    if (kill(target, SIGTERM) == 0)
+        std::fprintf(out, "SIGTERM 送信: pid=%d\n", (int)target);
+    else
+        std::fprintf(out, "SIGTERM 失敗: pid=%d\n", (int)target);
+    return 0;
+}
+
+// ---------------------------------------------------------------- C++ classes
+// Itanium C++ ABI の vtable/typeinfo から、クラス・基底・仮想メソッドを復元する。
+// __ZTV<type>=vtable, __ZTI<type>=typeinfo。Obj-C は使わない。
+extern "C" int dax_demangle(const char *mangled, char *out, size_t outsz);
+
+static std::string nx_demangle_sym(const std::string &sym) {
+    const char *m = sym.c_str();
+    if (m[0] == '_') m++;              // Mach-O の余分な '_' を落とす
+    char out[512];
+    out[0] = 0;
+    (void)dax_demangle(m, out, sizeof(out));
+    return out[0] ? std::string(out) : sym;
+}
+
+extern "C" int nx_cpp_classes(const char *path, const char *needle, FILE *out) {
+    if (!out) out = stdout;
+    if (!path) return 2;
+    auto img = nx::MachOImage::open(path);
+    if (!img) { std::fprintf(out, "[skip] not a 64-bit Mach-O: %s\n", path); return 1; }
+    const auto &syms = img->defined_symbols();
+
+    // 関数/データシンボルを demangle し、最後の :: より前を「所有者クラス」とする。
+    // これで非ポリモーフィックなクラス (vtable を持たない) も復元できる。
+    std::map<std::string, std::set<std::string>> groups;
+    for (const auto &kv : syms) {
+        const std::string &sym = kv.first;
+        if (sym.rfind("__Z", 0) != 0) continue;         // Itanium C++ のみ
+        std::string d = nx_demangle_sym(sym);
+        if (d == sym) continue;                           // demangle できず
+        if (d.find("vtable for ") == 0 || d.find("typeinfo for ") == 0 ||
+            d.find("VTT for ") == 0 || d.find("guard variable for ") == 0)
+            continue;
+        size_t p = d.rfind("::");
+        if (p == std::string::npos) continue;
+        std::string owner = d.substr(0, p);
+        std::string member = d.substr(p + 2);
+        if (owner.empty() || member.empty()) continue;
+        groups[owner].insert(member);
+    }
+
+    int n = 0;
+    for (const auto &g : groups) {
+        const std::string &cls = g.first;
+        if (needle && *needle && cls.find(needle) == std::string::npos) continue;
+        std::fprintf(out, "class %s {\n public:\n", cls.c_str());
+        for (const auto &m : g.second)
+            std::fprintf(out, "  %s;\n", m.c_str());
+        std::fprintf(out, "};\n\n");
+        n++;
+    }
+    std::fprintf(out, "%s のクラスは %d 個です。\n", (needle && *needle) ? needle : "(all)", n);
+    return n ? 0 : 1;
+}
+
+// ---------------------------------------------------------------- wire
+// 汎用のバイト列プローブ。ws 専用にしない。
+// connect → 任意のバイト列を送信 → 受信 → hexdump → 種別推定 (HTTP / WebSocket / TLS / raw)。
+// ws も http も「送るバイト列が違うだけ」になる。
+static int nx_hexval(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// ---------------------------------------------------------------- transport
+// plain と TLS の差をここに閉じる。--wire は conn_* だけを使う。
+// TLS は CFNetwork の CFStream に任せる (DNS/TLS/信頼/SNI を自前で書かない)。
+struct nx_conn {
+    int tls = 0;
+    int fd = -1;
+    CFReadStreamRef rs = nullptr;
+    CFWriteStreamRef ws = nullptr;
+};
+
+static bool nx_conn_open(const std::string &host, const std::string &port,
+                         int tls, int timeout_ms, nx_conn &c, FILE *out) {
+    if (tls) {
+        CFStringRef h = CFStringCreateWithCString(NULL, host.c_str(), kCFStringEncodingUTF8);
+        if (!h) return false;
+        CFStreamCreatePairWithSocketToHost(NULL, h, (UInt32)std::atoi(port.c_str()),
+                                           &c.rs, &c.ws);
+        CFRelease(h);
+        if (!c.rs || !c.ws) return false;
+        CFMutableDictionaryRef d = CFDictionaryCreateMutable(
+            NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFStringRef peer = CFStringCreateWithCString(NULL, host.c_str(), kCFStringEncodingUTF8);
+        CFDictionarySetValue(d, kCFStreamSSLPeerName, peer);
+        CFDictionarySetValue(d, kCFStreamSSLLevel, kCFStreamSocketSecurityLevelNegotiatedSSL);
+        CFReadStreamSetProperty(c.rs, kCFStreamPropertySSLSettings, d);
+        CFWriteStreamSetProperty(c.ws, kCFStreamPropertySSLSettings, d);
+        CFRelease(d);
+        CFRelease(peer);
+        if (!CFReadStreamOpen(c.rs) || !CFWriteStreamOpen(c.ws)) return false;
+        CFTimeInterval dl = CFAbsoluteTimeGetCurrent() + timeout_ms / 1000.0;
+        for (;;) {
+            CFStreamStatus st = CFReadStreamGetStatus(c.rs);
+            if (st == kCFStreamStatusOpen) break;
+            if (st == kCFStreamStatusError || st == kCFStreamStatusClosed) return false;
+            if (CFAbsoluteTimeGetCurrent() > dl) return false;
+            usleep(10000);
+        }
+        c.tls = 1;
+        return true;
+    }
+    struct addrinfo hints, *res = nullptr;
+    std::memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0 || !res) {
+        std::fprintf(out, "解決できません: %s:%s\n", host.c_str(), port.c_str());
+        return false;
+    }
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) { freeaddrinfo(res); return false; }
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000; tv.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
+        std::fprintf(out, "接続失敗: %s:%s (%s)\n", host.c_str(), port.c_str(), std::strerror(errno));
+        close(fd); freeaddrinfo(res); return false;
+    }
+    freeaddrinfo(res);
+    c.fd = fd;
+    return true;
+}
+
+static ssize_t nx_conn_write(nx_conn &c, const void *buf, size_t n) {
+    if (c.tls) return (ssize_t)CFWriteStreamWrite(c.ws, (const UInt8 *)buf, (CFIndex)n);
+    return send(c.fd, buf, n, 0);
+}
+
+static ssize_t nx_conn_read(nx_conn &c, void *buf, size_t n, int timeout_ms) {
+    if (!c.tls) return recv(c.fd, buf, n, 0);
+    CFTimeInterval dl = CFAbsoluteTimeGetCurrent() + timeout_ms / 1000.0;
+    for (;;) {
+        if (CFReadStreamHasBytesAvailable(c.rs)) {
+            CFIndex r = CFReadStreamRead(c.rs, (UInt8 *)buf, (CFIndex)n);
+            if (r < 0) return -1;
+            return (ssize_t)r;
+        }
+        CFStreamStatus st = CFReadStreamGetStatus(c.rs);
+        if (st == kCFStreamStatusAtEnd) return 0;
+        if (st == kCFStreamStatusError || st == kCFStreamStatusClosed) return -1;
+        if (CFAbsoluteTimeGetCurrent() > dl) return 0;
+        usleep(5000);
+    }
+}
+
+static void nx_conn_close(nx_conn &c) {
+    if (c.tls) {
+        if (c.rs) { CFReadStreamClose(c.rs); CFRelease(c.rs); c.rs = nullptr; }
+        if (c.ws) { CFWriteStreamClose(c.ws); CFRelease(c.ws); c.ws = nullptr; }
+    } else if (c.fd >= 0) {
+        close(c.fd);
+        c.fd = -1;
+    }
+}
+
+// 保険用の保存先を作る (mkdir -p)。
+static void nx_mkdir_p(const std::string &p) {
+    std::string cur;
+    for (size_t i = 0; i < p.size(); i++) {
+        cur += p[i];
+        if (p[i] == '/' && cur.size() > 1) mkdir(cur.c_str(), 0755);
+    }
+    if (!p.empty()) mkdir(p.c_str(), 0755);
+}
+
+extern "C" int nx_wire(const char *target, const char *send_txt,
+                       const char *send_hex, int read_n, int timeout_ms,
+                       const char *save_path, FILE *out) {
+    if (!out) out = stdout;
+    if (!target || !*target) {
+        std::fprintf(out, "使い方: neodax --wire [https://]host:port[/path] [--send-text S] [--send-hex H] [--count N] [--save F]\n");
+        return 2;
+    }
+    std::string t(target);
+    int tls = 0, httpish = 0;
+    if (t.rfind("https://", 0) == 0) { tls = 1; httpish = 1; t = t.substr(8); }
+    else if (t.rfind("tls://", 0) == 0) { tls = 1; t = t.substr(6); }
+    else if (t.rfind("http://", 0) == 0) { httpish = 1; t = t.substr(7); }
+    std::string path = "/";
+    size_t slash = t.find('/');
+    if (slash != std::string::npos) { path = t.substr(slash); t = t.substr(0, slash); }
+    std::string host, ports;
+    size_t c = t.rfind(':');
+    if (c == std::string::npos) { host = t; ports = tls ? "443" : "80"; }
+    else { host = t.substr(0, c); ports = t.substr(c + 1); }
+    if (host.empty()) host = "127.0.0.1";
+    if (read_n <= 0) read_n = 512;
+    if (timeout_ms <= 0) timeout_ms = 2000;
+
+    nx_conn conn;
+    if (!nx_conn_open(host, ports, tls, timeout_ms, conn, out)) return 1;
+
+    std::vector<unsigned char> sbuf;
+    if (send_hex && *send_hex) {
+        int hi = -1;
+        for (const char *p = send_hex; *p; p++) {
+            int v = nx_hexval(*p);
+            if (v < 0) { hi = -1; continue; }
+            if (hi < 0) hi = v;
+            else { sbuf.push_back((unsigned char)((hi << 4) | v)); hi = -1; }
+        }
+    } else if (send_txt && *send_txt) {
+        sbuf.assign(send_txt, send_txt + std::strlen(send_txt));
+    } else if (httpish) {
+        // 低コードの FETCH: 送信未指定なら最小の GET を組む。
+        std::string req = "GET " + path + " HTTP/1.0\r\nHost: " + host +
+                          "\r\nConnection: close\r\n\r\n";
+        sbuf.assign(req.begin(), req.end());
+    }
+    if (!sbuf.empty()) {
+        ssize_t w = nx_conn_write(conn, sbuf.data(), sbuf.size());
+        std::fprintf(out, "送信 %zd バイト\n", (ssize_t)w);
+    }
+
+    std::vector<unsigned char> rbuf((size_t)read_n);
+    ssize_t total = 0;
+    while (total < read_n) {
+        ssize_t n = nx_conn_read(conn, rbuf.data() + total, (size_t)(read_n - total), timeout_ms);
+        if (n <= 0) break;
+        total += n;
+    }
+    nx_conn_close(conn);
+    if (total <= 0) { std::fprintf(out, "受信 0 バイト\n"); return 1; }
+
+    for (ssize_t i = 0; i < total; i += 16) {
+        std::fprintf(out, "%08zx  ", (size_t)i);
+        for (ssize_t j = 0; j < 16; j++) {
+            if (i + j < total) std::fprintf(out, "%02x ", rbuf[(size_t)(i + j)]);
+            else std::fprintf(out, "   ");
+        }
+        std::fprintf(out, " |");
+        for (ssize_t j = 0; j < 16 && i + j < total; j++) {
+            unsigned char ch = rbuf[(size_t)(i + j)];
+            std::fputc((ch >= 0x20 && ch < 0x7f) ? ch : '.', out);
+        }
+        std::fprintf(out, "|\n");
+    }
+
+    std::string save_local;
+    const char *savep = save_path;
+    if (!save_path || !*save_path) {
+        // 指定がなくても必ず残す (保険)。~/.neodax/wire/<host>-<time>.bin
+        const char *h = std::getenv("HOME");
+        if (h) {
+            std::string dir = std::string(h) + "/.neodax/wire";
+            nx_mkdir_p(dir);
+            std::string safe;
+            for (char ch : host)
+                safe += (std::isalnum((unsigned char)ch) || ch == '.' || ch == '-') ? ch : '_';
+            char nm[96];
+            std::snprintf(nm, sizeof nm, "/%s-%ld.bin", safe.c_str(), (long)std::time(nullptr));
+            save_local = dir + nm;
+            savep = save_local.c_str();
+        }
+    }
+    if (savep && *savep) {
+        std::ofstream sf(savep, std::ios::binary | std::ios::trunc);
+        if (sf) {
+            sf.write((const char *)rbuf.data(), total);
+            std::fprintf(out, "保存: %s (%zd バイト)\n", savep, total);
+        } else {
+            std::fprintf(out, "保存できません: %s\n", savep);
+        }
+    }
+
+    std::string head((const char *)rbuf.data(), (size_t)std::min<ssize_t>(total, 64));
+    const char *kind = "raw";
+    if (head.rfind("HTTP/", 0) == 0)
+        kind = (head.find(" 101 ") != std::string::npos ||
+                head.find("Upgrade: websocket") != std::string::npos) ? "WebSocket" : "HTTP";
+    else if (rbuf[0] == 0x16) kind = "TLS";
+    else if (head.rfind("GET ", 0) == 0 || head.rfind("POST ", 0) == 0) kind = "HTTP request";
+    std::fprintf(out, "受信 %zd バイト / 種別: %s\n", total, kind);
+    return 0;
 }

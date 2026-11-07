@@ -82,7 +82,13 @@ static void print_usage(const char *progname) {
     printf("  --deps-tree          依存の連鎖を再帰的に辿る (@rpath 展開込み)\n");
     printf("  --scan-strings S     生の文字列を走査する (strings + grep 相当)\n");
     printf("  --heal-state         SSO フラグを良い状態に揃える (Mach-O は触らない, --apply)\n");
-    printf("  --fork <app>         アプリのコピーを作る (--to <dst> --fork-patch S --fork-launch)\n");
+    printf("  --term S             実行パスに S を含むプロセスを解放 (--apply で SIGTERM)\n");
+    printf("  --classes [S]        C++ vtable/typeinfo からクラスと仮想メソッドを復元\n");
+    printf("  --wire HOST:PORT     汎用バイト列プローブ (--send-text/--send-hex, --count N, --save F)\n");
+    printf("  --watch S            S を含む実行パスのプロセスが現れたら終了 (--count grace_ms)\n");
+    printf("  --finder-move SRC DST Finder に移動を依頼 (App Management の対象外)\n");
+    printf("  --move SRC DST       rename で移動 (コピーなし; App Management 要)\n");
+    printf("  --fork <app>         アプリのコピーを作る (--to <dst> --fork-move/--fork-patch/--fork-launch)\n");
     printf("  --disasm ADDR [--count N]  指定アドレス周辺を逆アセンブル (静的のみ)\n");
     printf("  --apply                guard の変更を実バイナリに適用\n");
     printf("  --pick N               guard で選ぶ候補の番号\n");
@@ -330,6 +336,8 @@ int main(int argc, char *argv[]) {
             g_opts.track_mode = 15;
         } else if (strcmp(argv[i], "--fork-launch") == 0) {
             g_opts.fork_launch = 1;
+        } else if (strcmp(argv[i], "--fork-move") == 0) {
+            g_opts.fork_move = 1;
         } else if (strcmp(argv[i], "--to") == 0 && i + 1 < argc) {
             snprintf(g_opts.fork_dest, sizeof(g_opts.fork_dest), "%s", argv[i + 1]);
         } else if (strcmp(argv[i], "--fork-patch") == 0 && i + 1 < argc) {
@@ -412,10 +420,42 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[optind], "--scan-strings") == 0 && optind + 1 < argc) {
             g_opts.track_mode = 13;                // 生の文字列走査 (strip されても見える)
             snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--term") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 16;                // 止まったプロセスを解放 (neodax 内部)
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--wire") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 18;                // 汎用バイト列プローブ
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--send-text") == 0 && optind + 1 < argc) {
+            snprintf(g_opts.wire_send, sizeof(g_opts.wire_send), "%s", argv[++optind]);
+            g_opts.wire_hex = 0;
+        } else if (strcmp(argv[optind], "--send-hex") == 0 && optind + 1 < argc) {
+            snprintf(g_opts.wire_send, sizeof(g_opts.wire_send), "%s", argv[++optind]);
+            g_opts.wire_hex = 1;
+        } else if (strcmp(argv[optind], "--save") == 0 && optind + 1 < argc) {
+            snprintf(g_opts.wire_save, sizeof(g_opts.wire_save), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--move") == 0 && optind + 2 < argc) {
+            g_opts.track_mode = 21;                // rename で移動 (コピーなし)
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+            snprintf(g_opts.fork_dest, sizeof(g_opts.fork_dest), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--finder-move") == 0 && optind + 2 < argc) {
+            g_opts.track_mode = 20;                // Finder に move を依頼
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+            snprintf(g_opts.fork_dest, sizeof(g_opts.fork_dest), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--watch") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 19;                // 現れたら猶予後に終了 (サインイン窓対策)
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--classes") == 0) {
+            g_opts.track_mode = 17;                // C++ vtable/typeinfo からクラス復元
+            if (optind + 1 < argc && argv[optind + 1][0] != '-')
+                snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+            else
+                g_opts.track_filter[0] = '\0';
         } else if (strcmp(argv[optind], "--heal-state") == 0) {
             g_opts.track_mode = 14;                // SSO フラグを良い状態に揃える
         } else if (strcmp(argv[optind], "--fork") == 0 ||
-                   strcmp(argv[optind], "--fork-launch") == 0) {
+                   strcmp(argv[optind], "--fork-launch") == 0 ||
+                   strcmp(argv[optind], "--fork-move") == 0) {
             /* 事前走査で処理済み */
         } else if ((strcmp(argv[optind], "--to") == 0 ||
                     strcmp(argv[optind], "--fork-patch") == 0) && optind + 1 < argc) {
@@ -520,6 +560,35 @@ int main(int argc, char *argv[]) {
         extern int nx_state_heal(const char *, int, FILE *);
         return nx_state_heal(NULL, g_opts.track_apply, stdout);
     }
+    // --term はプロセス名で止まった相手を解放する (入力はバイナリではない)。
+    if (g_opts.track_mode == 16) {
+        extern int nx_release_proc(const char *, int, FILE *);
+        return nx_release_proc(g_opts.track_filter, g_opts.track_apply, stdout);
+    }
+    // --move は rename だけで移動する (コピーなし、Finder なし)。
+    if (g_opts.track_mode == 21) {
+        extern int nx_move(const char *, const char *, FILE *);
+        return nx_move(g_opts.track_filter, g_opts.fork_dest, stdout);
+    }
+    // --finder-move は Finder に移動を依頼する (App Management の対象外)。
+    if (g_opts.track_mode == 20) {
+        extern int nx_finder_move(const char *, const char *, FILE *);
+        return nx_finder_move(g_opts.track_filter, g_opts.fork_dest, stdout);
+    }
+    // --watch は対象が現れたら猶予後に終える (窓はプロセス内なので終了で消す)。
+    if (g_opts.track_mode == 19) {
+        extern int nx_watch_proc(const char *, int, int, FILE *);
+        return nx_watch_proc(g_opts.track_filter, g_opts.track_pick, 120000, stdout);
+    }
+    // --wire は汎用のバイト列プローブ (ws/http はこの上でのプリセット)。
+    if (g_opts.track_mode == 18) {
+        extern int nx_wire(const char *, const char *, const char *, int, int, const char *, FILE *);
+        return nx_wire(g_opts.track_filter,
+                       g_opts.wire_hex ? NULL : g_opts.wire_send,
+                       g_opts.wire_hex ? g_opts.wire_send : NULL,
+                       g_opts.track_pick > 0 ? g_opts.track_pick : 512,
+                       2000, g_opts.wire_save, stdout);
+    }
 
     // Check if we have a binary file
     if (optind >= argc) {
@@ -533,17 +602,21 @@ int main(int argc, char *argv[]) {
     // --find-string / --guard は生のパスを静的に読む (動的解析なし)。
     if (g_opts.track_mode == 7 || g_opts.track_mode == 8 || g_opts.track_mode == 9 ||
         g_opts.track_mode == 10 || g_opts.track_mode == 11 || g_opts.track_mode == 12 ||
-        g_opts.track_mode == 13 || g_opts.track_mode == 15) {
+        g_opts.track_mode == 13 || g_opts.track_mode == 15 ||
+        g_opts.track_mode == 17) {
         extern int nx_find_string(const char *, const char *, FILE *);
         extern int nx_guard_run(const char *, const char *, int, int, int, FILE *);
         extern int nx_list_symbols(const char *, const char *, FILE *);
         extern int nx_disasm(const char *, uint64_t, int, FILE *);
         extern int nx_list_deps(const char *, int, FILE *);
         extern int nx_scan_strings(const char *, const char *, FILE *);
-        extern int nx_fork_run(const char *, const char *, const char *, int, FILE *);
+        extern int nx_fork_run(const char *, const char *, const char *, int, int, FILE *);
+        extern int nx_cpp_classes(const char *, const char *, FILE *);
+        if (g_opts.track_mode == 17)
+            return nx_cpp_classes(filename, g_opts.track_filter, stdout);
         if (g_opts.track_mode == 15)
             return nx_fork_run(filename, g_opts.fork_dest, g_opts.track_filter,
-                               g_opts.fork_launch, stdout);
+                               g_opts.fork_launch, g_opts.fork_move, stdout);
         if (g_opts.track_mode == 7)
             return nx_find_string(filename, g_opts.track_filter, stdout);
         if (g_opts.track_mode == 9)

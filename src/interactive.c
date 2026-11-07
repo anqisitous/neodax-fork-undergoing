@@ -435,7 +435,9 @@ int dax_interactive(dax_binary_t *bin, dax_opts_t *opts) {
             break;
         }
         { char *nl = strchr(line, '\n'); if (nl) *nl = '\0'; }
-        { char *p = line; while (*p == ' ' || *p == '\t') p++; if (!*p) continue; }
+        char raw[sizeof(line)];
+        { char *p = line; while (*p == ' ' || *p == '\t') p++; if (!*p) continue;
+          snprintf(raw, sizeof(raw), "%s", p); }
 
         argc = tokenise(line, argv, 32);
         if (argc == 0) continue;
@@ -453,7 +455,7 @@ dispatch:
         }
 
         if (cmd[0] == '!') {
-            const char *shell_cmd = line + 1;
+            const char *shell_cmd = raw + 1;
             while (*shell_cmd == ' ') shell_cmd++;
             if (!shell_cmd[0]) { fprintf(stdout,"  usage: !<command>\n"); continue; }
             {
@@ -485,38 +487,37 @@ dispatch:
                         char buf[4096];
                         size_t total = 0;
                         int done = 0, trunc = 0;
-                        while (!done && !trunc) {
+                        /* 子のログ出力で子を止めない。読み切り (EOF) まで drain を続け、
+                           表示だけ 256KB で打ち切る。パイプを閉じないので子は書き込みで
+                           ブロックせず、自分で quit できる。 */
+                        while (!done) {
                             fd_set rds;
                             struct timeval tv = {5,0};
                             ssize_t nr;
                             ssize_t wi;
                             FD_ZERO(&rds); FD_SET(pip[0],&rds);
-                            if (select(pip[0]+1,&rds,NULL,NULL,&tv)<=0) break;
+                            if (select(pip[0]+1,&rds,NULL,NULL,&tv)<=0) continue;
                             nr = read(pip[0], buf, sizeof(buf));
                             if (nr <= 0) { done = 1; break; }
-                            for (wi=0;wi<nr;wi++) {
-                                unsigned char ch=(unsigned char)buf[wi];
-                                fputc((ch=='\n'||ch=='\r'||ch=='\t'||(ch>=0x20&&ch<0x7f))?(int)ch:'.',stdout);
+                            if (total < 256*1024) {
+                                for (wi=0;wi<nr;wi++) {
+                                    unsigned char ch=(unsigned char)buf[wi];
+                                    fputc((ch=='\n'||ch=='\r'||ch=='\t'||(ch>=0x20&&ch<0x7f))?(int)ch:'.',stdout);
+                                }
+                                fflush(stdout);
                             }
-                            fflush(stdout);
                             total += (size_t)nr;
                             if (total >= 256*1024) trunc=1;
                         }
                         close(pip[0]);
                         {
                             int ws=0;
-                            pid_t rp=waitpid(pid,&ws,WNOHANG);
-                            if (rp==0) {
-                                struct timeval tv2={2,0}; fd_set d; FD_ZERO(&d);
-                                select(0,&d,NULL,NULL,&tv2);
-                                waitpid(pid,&ws,WNOHANG);
-                                if (rp==0) kill(pid,SIGTERM);
-                                waitpid(pid,&ws,0);
-                            }
+                            /* kill しない。子が自分で終わるまで待つ。 */
+                            waitpid(pid,&ws,0);
                             if (total==0&&WEXITSTATUS(ws)!=0)
                                 fprintf(stdout,"  %sexited %d%s\n",c?T_DYEL:"",WEXITSTATUS(ws),R);
                         }
-                        if (trunc) fprintf(stdout,"\n  %s[truncated @ 256KB]%s\n",c?T_GRY:"",R);
+                        if (trunc) fprintf(stdout,"\n  %s[display truncated @ 256KB; drained]%s\n",c?T_GRY:"",R);
                         fflush(stdout);
                     }
                 }

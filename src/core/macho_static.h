@@ -415,6 +415,12 @@ typedef struct {
     // fork: アプリのコピーを作り、そのコピーだけを改変・再署名する
     char     fork_dest[1024];      // コピー先 (.app)
     int      fork_launch;          // 作成後に起動する
+    int      fork_move;            // 1=コピーせず移動する (元は解体)
+
+    // wire: 汎用のバイト列プローブ (ws/http はこの上でのプリセット)
+    char     wire_send[1024];      // 送信する内容 (text または hex)
+    int      wire_hex;             // 1=wire_send は hex 表記
+    char     wire_save[1024];      // 受信バイトの保存先 (保険として残す)
 
 } macho_opts_t;
 
