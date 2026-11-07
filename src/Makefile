@@ -4,7 +4,7 @@
 CC = gcc
 CFLAGS = -std=c99 -Wall -Wextra -O2 -g
 INCLUDES = -I. -I../include
-LIBS = -lpthread -lm -framework CoreFoundation -framework CFNetwork -framework Carbon
+LIBS = -lpthread -lm -framework CoreFoundation -framework CFNetwork -framework Carbon -framework Security
 
 # C++ の解析器 (逆track / 起動条件)。リンクは C++ ドライバで行う。
 CXX = clang++

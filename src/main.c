@@ -88,6 +88,8 @@ static void print_usage(const char *progname) {
     printf("  --watch S            S を含む実行パスのプロセスが現れたら終了 (--count grace_ms)\n");
     printf("  --finder-move SRC DST Finder に移動を依頼 (App Management の対象外)\n");
     printf("  --move SRC DST       rename で移動 (コピーなし; App Management 要)\n");
+    printf("  --move-auth SRC DST  管理者パスワード一回で root 移动 (Finder なし)\n");
+    printf("  --priv-run TOOL ARGS 管理者パスワード一回で TOOL を root 実行\n");
     printf("  --fork <app>         アプリのコピーを作る (--to <dst> --fork-move/--fork-patch/--fork-launch)\n");
     printf("  --disasm ADDR [--count N]  指定アドレス周辺を逆アセンブル (静的のみ)\n");
     printf("  --apply                guard の変更を実バイナリに適用\n");
@@ -329,6 +331,19 @@ int main(int argc, char *argv[]) {
     g_opts.depflow_target_var[0] = '\0';
     g_opts.depflow_dot[0] = '\0';
     
+    // --priv-run は以降の全引数をツールとその引数として扱い、ここで処理する。
+    // (パスワード許可ダイアログの開始手続きを neodax が持つ)
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--priv-run") == 0) {
+            extern int nx_priv_exec(const char *, char *const [], FILE *);
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--priv-run needs a tool\n");
+                return 2;
+            }
+            return nx_priv_exec(argv[i + 1], &argv[i + 2], stdout);
+        }
+    }
+
     // fork 系は位置引数 (ソース) の後ろに置かれても効くよう、先に全部拾う。
     // 本体ループは値の読み飛ばしだけを行う。
     for (int i = 1; i < argc; i++) {
@@ -434,6 +449,10 @@ int main(int argc, char *argv[]) {
             g_opts.wire_hex = 1;
         } else if (strcmp(argv[optind], "--save") == 0 && optind + 1 < argc) {
             snprintf(g_opts.wire_save, sizeof(g_opts.wire_save), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--move-auth") == 0 && optind + 2 < argc) {
+            g_opts.track_mode = 22;                // 管理者パスワード一回 → root で移動
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+            snprintf(g_opts.fork_dest, sizeof(g_opts.fork_dest), "%s", argv[++optind]);
         } else if (strcmp(argv[optind], "--move") == 0 && optind + 2 < argc) {
             g_opts.track_mode = 21;                // rename で移動 (コピーなし)
             snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
@@ -564,6 +583,11 @@ int main(int argc, char *argv[]) {
     if (g_opts.track_mode == 16) {
         extern int nx_release_proc(const char *, int, FILE *);
         return nx_release_proc(g_opts.track_filter, g_opts.track_apply, stdout);
+    }
+    // --move-auth は Authorization Services で root として移動する。
+    if (g_opts.track_mode == 22) {
+        extern int nx_move_auth(const char *, const char *, FILE *);
+        return nx_move_auth(g_opts.track_filter, g_opts.fork_dest, stdout);
     }
     // --move は rename だけで移動する (コピーなし、Finder なし)。
     if (g_opts.track_mode == 21) {
