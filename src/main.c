@@ -81,6 +81,7 @@ static void print_usage(const char *progname) {
     printf("  --deps               リンクしているライブラリを一覧 (otool -L 相当)\n");
     printf("  --deps-tree          依存の連鎖を再帰的に辿る (@rpath 展開込み)\n");
     printf("  --scan-strings S     生の文字列を走査する (strings + grep 相当)\n");
+    printf("  --heal-state         SSO フラグを良い状態に揃える (Mach-O は触らない, --apply)\n");
     printf("  --disasm ADDR [--count N]  指定アドレス周辺を逆アセンブル (静的のみ)\n");
     printf("  --apply                guard の変更を実バイナリに適用\n");
     printf("  --pick N               guard で選ぶ候補の番号\n");
@@ -391,6 +392,8 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[optind], "--scan-strings") == 0 && optind + 1 < argc) {
             g_opts.track_mode = 13;                // 生の文字列走査 (strip されても見える)
             snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--heal-state") == 0) {
+            g_opts.track_mode = 14;                // SSO フラグを良い状態に揃える
         } else if (strcmp(argv[optind], "--count") == 0 && optind + 1 < argc) {
             g_opts.track_pick = atoi(argv[++optind]);
         } else if (strcmp(argv[optind], "--apply") == 0) {
@@ -484,6 +487,12 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         return nx_cond_run(argv[optind], g_opts.launch_cond == 2, stdout);
+    }
+
+    // --heal-state は入力がバイナリではない (状態ディレクトリのみ)。
+    if (g_opts.track_mode == 14) {
+        extern int nx_state_heal(const char *, int, FILE *);
+        return nx_state_heal(NULL, g_opts.track_apply, stdout);
     }
 
     // Check if we have a binary file

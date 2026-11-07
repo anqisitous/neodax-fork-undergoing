@@ -2778,6 +2778,115 @@ extern "C" int nx_list_deps(const char *path, int recursive, FILE *out) {
     return 0;
 }
 
+// ---------------------------------------------------------------- 状態の一貫性回復
+// 一つの永続手続き。「良い状態」をファイルの値で定義し、毎回同じ手順で揃える。
+// NGL の SSOWatcher は .adobelicnotification を読み、SIGNOUT なら
+// ローカルサインアウトしてトークンを消す (→ プロファイル 404 → AE 終了)。
+// Mach-O には触らない。変更前の値は *.nx-backup に退避する。
+struct nx_set_invariant { const char *file; const char *val; };
+struct nx_state_rule {
+    const char *name;
+    const char *rel_dir;
+    nx_set_invariant items[2];
+};
+
+static const nx_state_rule k_state_rules[] = {
+    { "adobe", "Library/Application Support/Adobe",
+      { { ".adobestatusnotification", "IMS_ACTIVE" },
+        { ".adobelicnotification",   "SIGNIN" } } },
+};
+
+static std::string nx_trim(const std::string &s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    size_t b = s.find_last_not_of(" \t\r\n");
+    if (a == std::string::npos) return {};
+    return s.substr(a, b - a + 1);
+}
+
+static bool nx_read_small(const std::string &p, std::string &out) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return false;
+    out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return true;
+}
+
+static bool nx_write_small(const std::string &p, const std::string &v) {
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    f << v;
+    return (bool)f;
+}
+
+extern "C" int nx_state_heal(const char *name, int apply, FILE *out) {
+    if (!out) out = stdout;
+    const char *h = std::getenv("HOME");
+    std::string home = h ? h : "";
+    int handled = 0;
+    for (const auto &r : k_state_rules) {
+        if (name && *name && std::string(name) != r.name) continue;
+        handled++;
+        std::string dir = nx_join_path(home, r.rel_dir);
+        std::fprintf(out, "=== %s ===\n  dir: %s\n", r.name, dir.c_str());
+
+        struct Item { std::string path; const char *want; bool ok; bool exists; };
+        std::vector<Item> items;
+        bool all_ok = true;
+        for (const auto &in : r.items) {
+            if (!in.file) continue;
+            Item it;
+            it.path = nx_join_path(dir, in.file);
+            it.want = in.val;
+            std::string v;
+            it.exists = nx_read_small(it.path, v);
+            it.ok = it.exists && nx_trim(v) == it.want;
+            std::fprintf(out, "  %-28s = \"%s\" (期待 \"%s\")%s\n",
+                         in.file, it.exists ? nx_trim(v).c_str() : "(無し)",
+                         it.want, it.ok ? "" : "  ← 不一致");
+            if (!it.ok) all_ok = false;
+            items.push_back(it);
+        }
+
+        if (all_ok) {
+            std::fprintf(out, "  一貫しています。変更なし。\n\n");
+            continue;
+        }
+        if (!apply) {
+            std::fprintf(out, "  [dry-run] 良い状態に揃える手順:\n");
+            for (const auto &it : items)
+                if (!it.ok)
+                    std::fprintf(out, "    - %s を \"%s\" に\n", it.path.c_str(), it.want);
+            std::fprintf(out, "  --apply で適用します。\n\n");
+            continue;
+        }
+        int changed = 0;
+        for (const auto &it : items) {
+            if (it.ok) continue;
+            if (it.exists) {
+                std::string bak = it.path + ".nx-backup";
+                if (!nx_path_exists(bak)) nx_copy_file(it.path, bak);
+            }
+            if (nx_write_small(it.path, it.want)) {
+                changed++;
+                std::fprintf(out, "  揃えた: %s = \"%s\"\n", it.path.c_str(), it.want);
+            } else {
+                std::fprintf(out, "  書けなかった: %s\n", it.path.c_str());
+            }
+        }
+        bool verify = true;
+        for (const auto &it : items) {
+            std::string v;
+            if (!nx_read_small(it.path, v) || nx_trim(v) != it.want) verify = false;
+        }
+        std::fprintf(out, "  結果: %s (変更 %d)\n\n",
+                     verify ? "良い状態" : "未完了", changed);
+    }
+    if (handled == 0) {
+        std::fprintf(out, "対象がありません: %s\n", name ? name : "");
+        return 1;
+    }
+    return 0;
+}
+
 // 起動を止める検知を静的に消す。apply=0 なら提示のみ (ドライラン)。
 // force_taken=1 は分岐を「取る側」(無条件 b)、0 は「取らない側」(nop) に固定。
 extern "C" int nx_guard_run(const char *path, const char *needle, int apply, int pick,
