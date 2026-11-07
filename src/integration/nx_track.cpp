@@ -2729,6 +2729,10 @@ extern "C" int nx_list_deps(const char *path, int recursive, FILE *out) {
     std::vector<std::pair<int, std::string>> queue;
     queue.push_back({0, root});
     int total = 0, unresolved = 0, files = 0;
+    // dyld は @rpath を「読み込み連鎖全体の rpath」で解決する。
+    // ローダ単体の rpath だけでは足りないので、走査した全イメージの
+    // rpath を集めて使う (ルートを最初に処理するので順序も保たれる)。
+    std::vector<std::string> all_rpaths;
     while (!queue.empty()) {
         int depth = queue.front().first;
         std::string p = queue.front().second;
@@ -2742,15 +2746,18 @@ extern "C" int nx_list_deps(const char *path, int recursive, FILE *out) {
         std::fprintf(out, "%s%s\n", pad.c_str(), p.c_str());
         if (!img->dylib_id().empty())
             std::fprintf(out, "%s  id: %s\n", pad.c_str(), img->dylib_id().c_str());
-        for (const auto &rp : img->rpaths())
+        for (const auto &rp : img->rpaths()) {
             std::fprintf(out, "%s  rpath: %s\n", pad.c_str(), rp.c_str());
+            if (std::find(all_rpaths.begin(), all_rpaths.end(), rp) == all_rpaths.end())
+                all_rpaths.push_back(rp);
+        }
         for (const auto &d : img->dylibs()) {
             total++;
             // 絶対パス (/System, /usr/lib 等) は dyld が解決する。
             // 実体は共有キャッシュ内にあることが多く、ファイルは存在しない。
             // 存在しないことを「未解決」とは呼ばない。
             bool absolute = !d.empty() && d[0] == '/';
-            std::string r = nx_normpath(nx_resolve_dep(p, root, img->rpaths(), d));
+            std::string r = nx_normpath(nx_resolve_dep(p, root, all_rpaths, d));
             if (absolute) {
                 std::fprintf(out, "%s  -> %s\n", pad.c_str(), r.c_str());
                 if (recursive && nx_path_exists(r) && !seen.count(r))

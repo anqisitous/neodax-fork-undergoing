@@ -398,7 +398,9 @@ typedef struct {
     char analysis_report[1024];    // Report file path
 
     // 復元コードの静的逆track (neodax_static --track*)
-    int      track_mode;           // 0=無効 1=逆track 2=環 3=断ち切り 4=ファイル 7=文字列参照 8=guard
+    int      track_mode;           // 0=無効 1=逆track 2=環 3=断ち切り 4=ファイル 5=環報告 6=分類
+                                   // 7=文字列参照 8=guard 9=定義シンボル 10=逆アセンブル
+                                   // 11=依存一覧 12=依存再帰 13=生文字列走査
     uint64_t track_entry;          // 分析の起点アドレス
     int      track_symbols_only;   // 定義シンボルの報告のみ
     char     track_filter[256];    // 探索語 (部分一致) / guard の対象文字列

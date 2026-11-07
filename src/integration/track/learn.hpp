@@ -47,6 +47,25 @@ private:
     std::map<std::string, Skill> skills_;
 };
 
+// 解析の途中経過 (部分結果)。構造の指紋ごとに「済んだ手順」を残し、
+// 次回はそこから続ける。パスや名前は使わない。
+class Progress {
+public:
+    // 構造の数だけから作る指紋。対象を特定できない形にする。
+    static std::string fingerprint(size_t segments, size_t imports,
+                                   size_t defined, size_t sections);
+    static std::string default_dir();       // ~/.neodax/parts
+
+    void mark_done(const std::string &step);
+    bool is_done(const std::string &step) const;
+
+    bool save(const std::string &dir, const std::string &fp) const;
+    bool load(const std::string &dir, const std::string &fp);
+
+private:
+    std::vector<std::string> done_;
+};
+
 } // namespace nx
 
 #endif // NX_LEARN_HPP

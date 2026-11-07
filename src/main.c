@@ -80,6 +80,7 @@ static void print_usage(const char *progname) {
     printf("  --find-symbol S      定義シンボルを名前の部分一致で一覧 (静的のみ)\n");
     printf("  --deps               リンクしているライブラリを一覧 (otool -L 相当)\n");
     printf("  --deps-tree          依存の連鎖を再帰的に辿る (@rpath 展開込み)\n");
+    printf("  --scan-strings S     生の文字列を走査する (strings + grep 相当)\n");
     printf("  --disasm ADDR [--count N]  指定アドレス周辺を逆アセンブル (静的のみ)\n");
     printf("  --apply                guard の変更を実バイナリに適用\n");
     printf("  --pick N               guard で選ぶ候補の番号\n");
@@ -387,6 +388,9 @@ int main(int argc, char *argv[]) {
             g_opts.track_mode = 11;                // リンク依存の一覧 (otool -L 相当)
         } else if (strcmp(argv[optind], "--deps-tree") == 0) {
             g_opts.track_mode = 12;                // 依存の連鎖を再帰的に辿る
+        } else if (strcmp(argv[optind], "--scan-strings") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 13;                // 生の文字列走査 (strip されても見える)
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
         } else if (strcmp(argv[optind], "--count") == 0 && optind + 1 < argc) {
             g_opts.track_pick = atoi(argv[++optind]);
         } else if (strcmp(argv[optind], "--apply") == 0) {
@@ -493,12 +497,14 @@ int main(int argc, char *argv[]) {
 
     // --find-string / --guard は生のパスを静的に読む (動的解析なし)。
     if (g_opts.track_mode == 7 || g_opts.track_mode == 8 || g_opts.track_mode == 9 ||
-        g_opts.track_mode == 10 || g_opts.track_mode == 11 || g_opts.track_mode == 12) {
+        g_opts.track_mode == 10 || g_opts.track_mode == 11 || g_opts.track_mode == 12 ||
+        g_opts.track_mode == 13) {
         extern int nx_find_string(const char *, const char *, FILE *);
         extern int nx_guard_run(const char *, const char *, int, int, int, FILE *);
         extern int nx_list_symbols(const char *, const char *, FILE *);
         extern int nx_disasm(const char *, uint64_t, int, FILE *);
         extern int nx_list_deps(const char *, int, FILE *);
+        extern int nx_scan_strings(const char *, const char *, FILE *);
         if (g_opts.track_mode == 7)
             return nx_find_string(filename, g_opts.track_filter, stdout);
         if (g_opts.track_mode == 9)
@@ -509,6 +515,8 @@ int main(int argc, char *argv[]) {
             return nx_list_deps(filename, 0, stdout);
         if (g_opts.track_mode == 12)
             return nx_list_deps(filename, 1, stdout);
+        if (g_opts.track_mode == 13)
+            return nx_scan_strings(filename, g_opts.track_filter, stdout);
         return nx_guard_run(filename, g_opts.track_filter,
                             g_opts.track_apply, g_opts.track_pick,
                             g_opts.track_taken, stdout);
