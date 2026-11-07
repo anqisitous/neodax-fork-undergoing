@@ -1,0 +1,10 @@
+=== ps ===
+kennichiroshimizu 27250   0.1  3.6 443376496 606896   ??  S     9:42AM   0:12.30 /Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/MacOS/After Effects
+kennichiroshimizu 27265   0.0  0.2 435389792  29920   ??  S     9:42AM   0:00.10 /Library/Application Support/Adobe/Adobe Desktop Common/IPCBox/AdobeIPCBroker.app/Contents/MacOS/AdobeIPCBroker -launchedbyvulcan /Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/MacOS/After Effects
+kennichiroshimizu 27263   0.0  0.2 435420768  33600   ??  S     9:42AM   0:00.46 /Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/MacOS/dynamiclinkmanager
+kennichiroshimizu 27252   0.0  0.0 435307216   5552   ??  S     9:42AM   0:00.01 /Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/MacOS/crashpad_handler --no-rate-limit --database=/Users/kennichiroshimizu/Library/Caches/Adobe/After Effects/26.0/SentryIO-db --metrics-dir=/Users/kennichiroshimizu/Library/Caches/Adobe/After Effects/26.0/SentryIO-db --url=https://o307710.ingest.sentry.io:443/api/5227323/minidump/?sentry_client=sentry.native/0.7.6&sentry_key=b757a395cf2c47dfbaa4bcf6186b45bb --attachment=/Users/kennichiroshimizu/Library/Caches/Adobe/After Effects/26.0/SentryIO-db/885bc542-ca6d-4be4-2c40-24120e690c5d.run/__sentry-event --attachment=/Users/kennichiroshimizu/Library/Caches/Adobe/After Effects/26.0/SentryIO-db/885bc542-ca6d-4be4-2c40-24120e690c5d.run/__sentry-breadcrumb1 --attachment=/Users/kennichiroshimizu/Library/Caches/Adobe/After Effects/26.0/SentryIO-db/885bc542-ca6d-4be4-2c40-24120e690c5d.run/__sentry-breadcrumb2 --handshake-fd=5
+kennichiroshimizu 27266   0.0  0.4 435541120  68528   ??  S     9:42AM   0:00.21 /Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/TeamProjectsLocalHub.app/Contents/MacOS/TeamProjectsLocalHub
+=== version plist ===
+26.3.0
+=== app mtime ===
+Aug 10 02:15:39 2026 /Applications/Adobe After Effects 2026/Adobe After Effects 2026.app

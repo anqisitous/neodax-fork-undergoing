@@ -1,0 +1,30 @@
+=== AE STATE (prefs 経由・間接取得) ===
+AE version: 26.3.0
+running PID: 27265 30435 
+MRU project: /Users/kennichiroshimizu/Documents/After Effects Crash_5.aep
+
+=== 最近の .aep (Documents) ===
+-rw-r--r--  1 kennichiroshimizu  staff   62769 Nov  7 00:56 /Users/kennichiroshimizu/Documents/After Effects Crash_5.aep
+-rw-r--r--  1 kennichiroshimizu  staff    8345 Aug 10 17:51 /Users/kennichiroshimizu/Documents/After Effects Crash_4.aep
+-rw-r--r--  1 kennichiroshimizu  staff    8345 Aug 10 17:01 /Users/kennichiroshimizu/Documents/After Effects Crash_3.aep
+-rw-r--r--  1 kennichiroshimizu  staff    8345 Aug 10 16:59 /Users/kennichiroshimizu/Documents/After Effects Crash_2.aep
+-rw-r--r--  1 kennichiroshimizu  staff    8345 Aug 10 03:23 /Users/kennichiroshimizu/Documents/After Effects Crash_1.aep
+-rw-r--r--  1 kennichiroshimizu  staff    9287 Apr 30  2026 /Users/kennichiroshimizu/Documents/After Effects Crash.aep
+-rw-r--r--  1 kennichiroshimizu  staff  103513 Apr 15  2026 /Users/kennichiroshimizu/Documents/模範 .aep
+-rw-r--r--  1 kennichiroshimizu  staff       0 Dec  8  2025 /Users/kennichiroshimizu/Documents/After Effects Crash.60169.1254251.aep
+-rw-r--r--@ 1 kennichiroshimizu  staff  181969 Dec  6  2025 /Users/kennichiroshimizu/Documents/炎ドラゴン.aep
+-rw-r--r--  1 kennichiroshimizu  staff  118141 Jul 22  2025 /Users/kennichiroshimizu/Documents/2.aep
+-rw-r--r--  1 kennichiroshimizu  staff  104497 Jul 21  2025 /Users/kennichiroshimizu/Documents/1.aep
+
+=== AE prefs の更新時刻 ===
+total 2784
+-rw-r--r--   1 kennichiroshimizu  staff  325853 Nov  7 09:49 Plugin Loading.log
+drwxr-xr-x  25 kennichiroshimizu  staff     800 Nov  7 09:49 .
+-rw-r--r--   1 kennichiroshimizu  staff    1105 Nov  7 09:49 Adobe After Effects 26.3 MC Prefs
+-rw-r-----   1 kennichiroshimizu  staff      57 Nov  7 09:49 SCRPriorState.json
+-rw-r--r--   1 kennichiroshimizu  staff      53 Nov  7 09:49 Adobe After Effects 26.3 Prefs-effects.txt
+
+=== 注記 ===
+DoScriptFile は戻り値0固定 / .writeln・File出力は信頼不可。
+AE 内のライブ状態は AppleScript 経由では取得できなかった。
+プロジェクト内容は Crash_5.aep を開いて確認するのが確実。
