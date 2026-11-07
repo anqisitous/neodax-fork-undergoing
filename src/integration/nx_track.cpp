@@ -3135,7 +3135,12 @@ static int op_resign_apply(nx_fork_ctx *c) {
 
 static int op_launch_probe(nx_fork_ctx *c) { return c->launch && !c->dst.empty(); }
 static int op_launch_apply(nx_fork_ctx *c) {
-    return nx_sh("open " + nx_shq(c->dst), c->out) == 0 ? 0 : -1;
+    // LaunchServices は同じ bundle id を既存側に寄せたり、早々に終了させることが
+    // ある。fork の実体を直接起動する方が確実 (実測で安定)。
+    std::string exe = c->exe.empty() ? nx_bundle_exe(c->dst) : c->exe;
+    if (exe.empty()) return -1;
+    nx_sh("nohup " + nx_shq(exe) + " >/dev/null 2>&1 &", c->out);
+    return 0;
 }
 
 static const nx_fork_op k_fork_ops[] = {
