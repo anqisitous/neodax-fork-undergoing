@@ -84,6 +84,11 @@ static void print_usage(const char *progname) {
     printf("  --heal-state         SSO フラグを良い状態に揃える (Mach-O は触らない, --apply)\n");
     printf("  --term S             実行パスに S を含むプロセスを解放 (--apply で SIGTERM)\n");
     printf("  --classes [S]        C++ vtable/typeinfo からクラスと仮想メソッドを復元\n");
+    printf("  --imports [S]        取り込む外部シンボルと GOT スロットを一覧\n");
+    printf("  --patch-ret ADDR     関数先頭を ret に潰す (実バイナリ書換)\n");
+    printf("  --resign PATH        ad-hoc 再署名 + 検証\n");
+    printf("  --stasis S           対象が停滞かどうかを測る (--count ms)\n");
+    printf("  --probe APP          起動して停滞を測定 (--count ms) を一つで\n");
     printf("  --wire HOST:PORT     汎用バイト列プローブ (--send-text/--send-hex, --count N, --save F)\n");
     printf("  --watch S            S を含む実行パスのプロセスが現れたら終了 (--count grace_ms)\n");
     printf("  --finder-move SRC DST Finder に移動を依頼 (App Management の対象外)\n");
@@ -464,6 +469,24 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[optind], "--watch") == 0 && optind + 1 < argc) {
             g_opts.track_mode = 19;                // 現れたら猶予後に終了 (サインイン窓対策)
             snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--patch-ret") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 24;                // 関数先頭を ret に
+            g_opts.track_entry = strtoull(argv[++optind], NULL, 0);
+        } else if (strcmp(argv[optind], "--resign") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 25;                // ad-hoc 再署名 + 検証
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--probe") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 27;                // 起動 + 停滞測定を一つに
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--stasis") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 26;                // 生きているが進んでいない状態を測る
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--imports") == 0) {
+            g_opts.track_mode = 23;                // import シンボル一覧
+            if (optind + 1 < argc && argv[optind + 1][0] != '-')
+                snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+            else
+                g_opts.track_filter[0] = '\0';
         } else if (strcmp(argv[optind], "--classes") == 0) {
             g_opts.track_mode = 17;                // C++ vtable/typeinfo からクラス復元
             if (optind + 1 < argc && argv[optind + 1][0] != '-')
@@ -584,6 +607,23 @@ int main(int argc, char *argv[]) {
         extern int nx_release_proc(const char *, int, FILE *);
         return nx_release_proc(g_opts.track_filter, g_opts.track_apply, stdout);
     }
+    // --probe は起動して停滞を測るまでを一つで行う。
+    if (g_opts.track_mode == 27) {
+        extern int nx_probe(const char *, int, FILE *);
+        return nx_probe(g_opts.track_filter,
+                        g_opts.track_pick > 0 ? g_opts.track_pick : 8000, stdout);
+    }
+    // --stasis は対象の停滞を測る (入力はバイナリではない)。
+    if (g_opts.track_mode == 26) {
+        extern int nx_stasis_watch(const char *, int, FILE *);
+        return nx_stasis_watch(g_opts.track_filter,
+                               g_opts.track_pick > 0 ? g_opts.track_pick : 15000, stdout);
+    }
+    // --resign は ad-hoc 再署名 (入力はバイナリではない)。
+    if (g_opts.track_mode == 25) {
+        extern int nx_resign(const char *, FILE *);
+        return nx_resign(g_opts.track_filter, stdout);
+    }
     // --move-auth は Authorization Services で root として移動する。
     if (g_opts.track_mode == 22) {
         extern int nx_move_auth(const char *, const char *, FILE *);
@@ -627,7 +667,8 @@ int main(int argc, char *argv[]) {
     if (g_opts.track_mode == 7 || g_opts.track_mode == 8 || g_opts.track_mode == 9 ||
         g_opts.track_mode == 10 || g_opts.track_mode == 11 || g_opts.track_mode == 12 ||
         g_opts.track_mode == 13 || g_opts.track_mode == 15 ||
-        g_opts.track_mode == 17) {
+        g_opts.track_mode == 17 || g_opts.track_mode == 23 ||
+        g_opts.track_mode == 24) {
         extern int nx_find_string(const char *, const char *, FILE *);
         extern int nx_guard_run(const char *, const char *, int, int, int, FILE *);
         extern int nx_list_symbols(const char *, const char *, FILE *);
@@ -636,6 +677,12 @@ int main(int argc, char *argv[]) {
         extern int nx_scan_strings(const char *, const char *, FILE *);
         extern int nx_fork_run(const char *, const char *, const char *, int, int, FILE *);
         extern int nx_cpp_classes(const char *, const char *, FILE *);
+        extern int nx_list_imports(const char *, const char *, FILE *);
+        extern int nx_patch_ret(const char *, uint64_t, FILE *);
+        if (g_opts.track_mode == 24)
+            return nx_patch_ret(filename, g_opts.track_entry, stdout);
+        if (g_opts.track_mode == 23)
+            return nx_list_imports(filename, g_opts.track_filter, stdout);
         if (g_opts.track_mode == 17)
             return nx_cpp_classes(filename, g_opts.track_filter, stdout);
         if (g_opts.track_mode == 15)

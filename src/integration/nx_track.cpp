@@ -50,6 +50,7 @@
 #include <sys/time.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <CFNetwork/CFNetwork.h>
 #include <cctype>
@@ -3319,6 +3320,50 @@ extern "C" int nx_release_proc(const char *needle, int apply, FILE *out) {
     return hits ? 0 : 1;
 }
 
+// ---------------------------------------------------------------- patch / resign
+// 関数先頭を ret に潰す。vaddr は Mach-O の仮想アドレス。
+extern "C" int nx_patch_ret(const char *path, uint64_t vaddr, FILE *out) {
+    if (!out) out = stdout;
+    if (!path) return 2;
+    auto img = nx::MachOImage::open(path);
+    if (!img) { std::fprintf(out, "[skip] not a 64-bit Mach-O: %s\n", path); return 1; }
+    uint64_t off = 0;
+    if (!img->vm_to_off(vaddr, &off)) {
+        std::fprintf(out, "vaddr をファイル位置にできません: 0x%llx\n",
+                     (unsigned long long)vaddr);
+        return 1;
+    }
+    FILE *f = std::fopen(path, "r+b");
+    if (!f) { std::fprintf(out, "開けません: %s\n", path); return 1; }
+    std::fseek(f, (long)off, SEEK_SET);
+    unsigned char ret[4] = { 0xD6, 0x5F, 0x03, 0xC0 };
+    if (std::fwrite(ret, 1, 4, f) != 4) {
+        std::fclose(f);
+        std::fprintf(out, "書き込み失敗\n");
+        return 1;
+    }
+    std::fclose(f);
+    std::fprintf(out, "ret を書き込み: vaddr 0x%llx (file 0x%llx)\n",
+                 (unsigned long long)vaddr, (unsigned long long)off);
+    return 0;
+}
+
+// ad-hoc 再署名 (codesign --force --sign -) + 検証。
+extern "C" int nx_resign(const char *path, FILE *out) {
+    if (!out) out = stdout;
+    if (!path || !*path) return 2;
+    std::string q = "'";
+    for (const char *p = path; *p; p++) { if (*p == '\'') q += "'\\''"; else q += *p; }
+    q += "'";
+    std::string sign = "codesign --force --sign - " + q;
+    int rc = std::system(sign.c_str());
+    std::fprintf(out, "codesign rc=%d\n", rc);
+    std::string verify = "codesign --verify --strict " + q + " 2>&1";
+    int vr = std::system(verify.c_str());
+    std::fprintf(out, "verify rc=%d\n", vr);
+    return (rc == 0 && vr == 0) ? 0 : 1;
+}
+
 // ---------------------------------------------------------------- move (auth)
 // Authorization Services で root として mv する。Finder も AppleScript も使わない。
 // 初回のみ管理者パスワードのダイアログが出る。
@@ -3483,6 +3528,66 @@ extern "C" int nx_finder_move(const char *src, const char *dst_folder, FILE *out
     return 0;
 }
 
+// ---------------------------------------------------------------- probe
+// 一つのコマンドで「起動 → しばらく見る → 終了/停滞/稼働を報告」する。
+extern "C" int nx_stasis_watch(const char *, int, FILE *);
+// --probe は起動しない。既に動いている対象を測るだけ。実 AE を開かない。
+extern "C" int nx_probe(const char *app, int total_ms, FILE *out) {
+    return nx_stasis_watch(app, total_ms, out);
+}
+
+// ---------------------------------------------------------------- stasis
+// プロセスが「生きているが進んでいない」状態 (stasis) を測る。
+// CPU 時間の増分で判定する。終了したか、動いているか、止まっているか。
+extern "C" int nx_stasis_watch(const char *needle, int total_ms, FILE *out) {
+    if (!out) out = stdout;
+    if (!needle || !*needle) {
+        std::fprintf(out, "使い方: neodax --stasis <path-substr> [--count ms]\n");
+        return 2;
+    }
+    if (total_ms <= 0) total_ms = 15000;
+    auto find = [&]() -> pid_t {
+        int np = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+        if (np <= 0) return -1;
+        std::vector<pid_t> pids((size_t)np / sizeof(pid_t) + 64);
+        np = proc_listpids(PROC_ALL_PIDS, 0, pids.data(),
+                           (int)(pids.size() * sizeof(pid_t)));
+        if (np <= 0) return -1;
+        int cnt = np / (int)sizeof(pid_t);
+        for (int i = 0; i < cnt; i++) {
+            pid_t p = pids[i];
+            if (p <= 1) continue;
+            char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+            if (proc_pidpath(p, path, sizeof path) <= 0) continue;
+            if (std::strstr(path, needle)) return p;
+        }
+        return -1;
+    };
+    auto cpu = [](pid_t p) -> uint64_t {
+        struct proc_taskinfo ti;
+        if (proc_pidinfo(p, PROC_PIDTASKINFO, 0, &ti, sizeof ti) == sizeof ti)
+            return ti.pti_total_user + ti.pti_total_system;
+        return 0;
+    };
+    pid_t pid = find();
+    if (pid <= 0) { std::fprintf(out, "見つかりません: %s\n", needle); return 1; }
+    uint64_t c0 = cpu(pid);
+    int waited = 0, gone = 0;
+    while (waited < total_ms) {
+        usleep(1000000);
+        waited += 1000;
+        if (kill(pid, 0) != 0) { gone = 1; break; }
+    }
+    if (gone) { std::fprintf(out, "exited (pid=%d)\n", (int)pid); return 0; }
+    uint64_t d_ms = (cpu(pid) - c0) / 1000000ULL;
+    uint64_t thr = (uint64_t)total_ms / 50;   /* 2% */
+    std::fprintf(out, "pid=%d  cpu=%llu ms (window %d ms)\n",
+                 (int)pid, (unsigned long long)d_ms, total_ms);
+    if (d_ms < thr) std::fprintf(out, "stasis: 生きているが進んでいない\n");
+    else std::fprintf(out, "busy: 動いている\n");
+    return 0;
+}
+
 // ---------------------------------------------------------------- watch
 // 指定の実行パスを含むプロセスが現れたら、猶予後に SIGTERM で終える。
 // 「サインイン窓が出たらアプリを自動で終わらせる」ための手続き。
@@ -3529,6 +3634,39 @@ extern "C" int nx_watch_proc(const char *needle, int grace_ms, int total_ms, FIL
     else
         std::fprintf(out, "SIGTERM 失敗: pid=%d\n", (int)target);
     return 0;
+}
+
+// ---------------------------------------------------------------- imports
+// 取り込んでいる外部シンボルと GOT スロットを一覧する。
+// 「どのライセンスAPI / exit を呼んでいるか」を静的に見るための入口。
+extern "C" int nx_list_imports(const char *path, const char *needle, FILE *out) {
+    if (!out) out = stdout;
+    if (!path) return 2;
+    auto img = nx::MachOImage::open(path);
+    if (!img) { std::fprintf(out, "[skip] not a 64-bit Mach-O: %s\n", path); return 1; }
+    nx::ImportResolver imports;
+    imports.parse(*img);
+    nx::XRefIndex xr;
+    xr.build(*img, imports);
+    nx::BackTracker bt(*img, xr);
+    int n = 0;
+    for (const auto &b : imports.bindings()) {
+        if (needle && *needle && b.symbol.find(needle) == std::string::npos) continue;
+        std::fprintf(out, "  0x%llx  %s\n", (unsigned long long)b.slot, b.symbol.c_str());
+        for (const auto &s : xr.sites()) {
+            bool hit = (s.target_vm == b.slot) ||
+                       (!s.target_symbol.empty() && s.target_symbol == b.symbol);
+            if (!hit) continue;
+            uint64_t f = bt.function_containing(s.addr);
+            const std::string *fn = img->name_at(f);
+            std::fprintf(out, "      site 0x%llx%s in 0x%llx %s\n",
+                         (unsigned long long)s.addr, s.is_call ? " (call)" : "",
+                         (unsigned long long)f, fn ? fn->c_str() : "(無名)");
+        }
+        n++;
+    }
+    std::fprintf(out, "%s の import は %d 個です。\n", (needle && *needle) ? needle : "(all)", n);
+    return n ? 0 : 1;
 }
 
 // ---------------------------------------------------------------- C++ classes
