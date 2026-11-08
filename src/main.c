@@ -96,6 +96,7 @@ static void print_usage(const char *progname) {
     printf("  --seek-limit N       一致行の上限 (0=無制限) / --seek-time MS 走査時間の上限\n");
     printf("  --seek-files         一致したファイル名のみ / --seek-binary バイナリも走査\n");
     printf("  --lc                 Mach-O load commands を全部出す\n");
+    printf("  --callers ADDR       指定アドレスを呼ぶ箇所 (BL) を列挙\n");
     printf("  --motion ADDR        指定関数から仮想運動 (--count steps)\n");
     printf("  --class-graph [S]    関数グラフからクラスグラフを導出 (--save で SVG)\n");
     printf("  --display-graph S    実画面/保存モデルのノード木を cpp/svg に多態出力 (--save F)\n");
@@ -570,6 +571,9 @@ int main(int argc, char *argv[]) {
             g_opts.seek_time_ms = atoi(argv[++optind]);
         } else if (strcmp(argv[optind], "--lc") == 0) {
             g_opts.track_mode = 33;                // Mach-O load commands
+        } else if (strcmp(argv[optind], "--callers") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 38;                // 呼び出し元を列挙
+            g_opts.track_entry = strtoull(argv[++optind], NULL, 0);
         } else if (strcmp(argv[optind], "--imports") == 0) {
             g_opts.track_mode = 23;                // import シンボル一覧
             if (optind + 1 < argc && argv[optind + 1][0] != '-')
@@ -826,7 +830,7 @@ int main(int argc, char *argv[]) {
         g_opts.track_mode == 13 || g_opts.track_mode == 15 ||
         g_opts.track_mode == 17 || g_opts.track_mode == 23 ||
         g_opts.track_mode == 24 || g_opts.track_mode == 32 ||
-        g_opts.track_mode == 33 || g_opts.track_mode == 34 ||
+        g_opts.track_mode == 33 || g_opts.track_mode == 34 || g_opts.track_mode == 38 ||
         g_opts.track_mode == 35 || g_opts.track_mode == 36 ||
         g_opts.track_mode == 37 || g_opts.track_mode == 38) {
         extern int nx_find_string(const char *, const char *, FILE *);
@@ -840,6 +844,9 @@ int main(int argc, char *argv[]) {
         extern int nx_list_imports(const char *, const char *, FILE *);
         extern int nx_patch_ret(const char *, uint64_t, FILE *);
         extern int nx_patch_bytes(const char *, uint64_t, const char *, FILE *);
+        extern int nx_callers(const char *, uint64_t, FILE *);
+        if (g_opts.track_mode == 38)
+            return nx_callers(filename, g_opts.track_entry, stdout);
         extern int nx_load_commands(const char *, FILE *);
         extern int nx_motion(const char *, uint64_t, int, FILE *);
         extern int nx_class_graph(const char *, const char *, const char *, FILE *);

@@ -4880,6 +4880,31 @@ extern "C" int nx_display_graph(const char *target, const char *save, FILE *out)
     return dv_write_model(roots, save, out);
 }
 
+// ---------------------------------------------------------------- callers
+// 指定アドレスを呼び出す箇所 (BL) を列挙する。
+extern "C" int nx_callers(const char *path, uint64_t addr, FILE *out) {
+    if (!out) out = stdout;
+    if (!path) return 2;
+    auto img = nx::MachOImage::open(path);
+    if (!img) { std::fprintf(out, "[skip] not a 64-bit Mach-O: %s\n", path); return 1; }
+    nx::ImportResolver imports; imports.parse(*img);
+    nx::XRefIndex xr; xr.build(*img, imports);
+    nx::BackTracker bt(*img, xr);
+    int n = 0;
+    for (const auto &s : xr.sites()) {
+        if (!s.is_call) continue;
+        if (s.target_vm != addr) continue;
+        uint64_t f = bt.function_containing(s.addr);
+        const std::string *fn = img->name_at(f);
+        std::fprintf(out, "  call 0x%llx in 0x%llx %s\n",
+                     (unsigned long long)s.addr, (unsigned long long)f,
+                     fn ? fn->c_str() : "(local)");
+        n++;
+    }
+    std::fprintf(out, "callers of 0x%llx = %d\n", (unsigned long long)addr, n);
+    return n ? 0 : 1;
+}
+
 // ---------------------------------------------------------------- imports
 // 取り込んでいる外部シンボルと GOT スロットを一覧する。
 // 「どのライセンスAPI / exit を呼んでいるか」を静的に見るための入口。
