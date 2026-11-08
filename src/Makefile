@@ -3,7 +3,7 @@
 
 CC = gcc
 CFLAGS = -std=c99 -Wall -Wextra -O2 -g
-INCLUDES = -I. -I../include
+INCLUDES = -I. -I../include -I../gui
 LIBS = -lpthread -lm -framework CoreFoundation -framework CFNetwork -framework Carbon -framework Security -framework CoreGraphics -framework ApplicationServices
 
 # C++ の解析器 (逆track / 起動条件)。リンクは C++ ドライバで行う。
@@ -69,11 +69,13 @@ INTEGRATION_SRCS = \
 
 TRACK_CPP_SRCS = \
 	integration/nx_track.cpp \
+	integration/nx_appfix_flow.cpp \
 	integration/track/search.cpp \
 	integration/track/advise.cpp \
 	integration/track/cond.cpp \
 	integration/track/learn.cpp \
-	integration/track/widget.cpp
+	integration/track/widget.cpp \
+	../gui/model/nx_boxlayout.cpp
 TRACK_OBJS = $(patsubst %.cpp,%.o,$(TRACK_CPP_SRCS))
 
 # All source files

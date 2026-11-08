@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <limits.h>
 #include "dax.h"   /* canonical parser API: dax_parse_macho(), dax_binary_t */
 
 // ============================================================================
@@ -611,6 +612,61 @@ int macho_build_callgraph(macho_binary_t *bin) {
 // CFG Building
 // ============================================================================
 
+static int nx_u64_cmp(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
+static int nx_xref_cmp(const void *a, const void *b) {
+    const macho_xref_t *x = (const macho_xref_t *)a;
+    const macho_xref_t *y = (const macho_xref_t *)b;
+    return (x->from > y->from) - (x->from < y->from);
+}
+
+
+/* xref を from 昇順に保つ。CFG 構築が単一パスで済む前提になる。 */
+static void nx_sort_xrefs(macho_binary_t *bin) {
+    if (bin->nxrefs > 1)
+        qsort(bin->xrefs, (size_t)bin->nxrefs, sizeof(macho_xref_t), nx_xref_cmp);
+}
+
+/* from 昇順の配列から addr 以上の最初の添字。 */
+static int nx_first_xref_at_or_after(const macho_binary_t *bin, uint64_t addr) {
+    int lo = 0, hi = bin->nxrefs;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (bin->xrefs[mid].from < addr) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* to 昇順の配列から addr 以上の最初の添字。 */
+// 命令列から addr 以上の最初の添字を返す (命令は昇順)。
+static int nx_insn_at_or_after(const macho_binary_t *bin, uint64_t addr) {
+    int lo = 0, hi = bin->ninsns;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (bin->insns[mid].address < addr) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+
+/* [first, nblocks) の中で addr を含むブロックの添字。無ければ -1。 */
+static int nx_block_at(const macho_binary_t *bin, int first, uint64_t addr) {
+    int lo = first, hi = bin->nblocks - 1, best = -1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (bin->blocks[mid].start <= addr) { best = mid; lo = mid + 1; }
+        else hi = mid - 1;
+    }
+    if (best < 0) return -1;
+    if (addr < bin->blocks[best].end) return best;
+    return -1;
+}
+
 int macho_build_cfg(macho_binary_t *bin) {
     if (!bin || !bin->data) return -1;
     macho_fill_insns(bin);   /* populate bin->insns before any CFG work */
@@ -618,14 +674,23 @@ int macho_build_cfg(macho_binary_t *bin) {
 
     nx_compute_function_bounds(bin);
     if (bin->nxrefs == 0) nx_build_xrefs_arm64(bin);
+    nx_sort_xrefs(bin);
 
     /* 関数ごとに基本ブロックを構築する。
        境界 = 関数先頭 ∪ 関数内の分岐先 ∪ 条件分岐直後のフォールスルー。 */
-    int cap = 4096;
+    // ブロック上限は「データから導ける上界」で決める。
+    // ブロック境界になり得るのは
+    //   ・関数の先頭        (高々 nfunctions)
+    //   ・分岐先 / フォールスルー (高々 nxrefs)
+    // だけなので、両者の和が上界になる。関数数に係数を掛けるような
+    // 対象依存の当て推量はしない。
+    size_t cap = (size_t)bin->nfunctions + (size_t)bin->nxrefs;
+    if (cap < 4096) cap = 4096;
+    if (cap > (size_t)INT_MAX) cap = (size_t)INT_MAX;
     if (!bin->blocks) {
         bin->blocks = (macho_block_t *)calloc((size_t)cap, sizeof(macho_block_t));
         if (!bin->blocks) return -1;
-        bin->blocks_allocated = cap;
+        bin->blocks_allocated = (int)cap;
     }
 
     for (int i = 0; i < bin->nfunctions; i++) {
@@ -636,29 +701,40 @@ int macho_build_cfg(macho_binary_t *bin) {
         int nb = 0;
         bounds[nb++] = f->start;
 
-        for (int x = 0; x < bin->nxrefs; x++) {
-            macho_xref_t *xr = &bin->xrefs[x];
-            /* 分岐先 */
-            if (!xr->is_indirect && xr->to != 0 &&
-                xr->to >= f->start && xr->to < f->end) {
-                int dup = 0;
-                for (int b = 0; b < nb; b++) if (bounds[b] == xr->to) { dup = 1; break; }
-                if (!dup && nb < 512) bounds[nb++] = xr->to;
+        /* 索引を使わない。関数の命令列を自分の範囲だけ走査する。
+           xref は命令から作られているので、範囲内の命令を見れば
+           「その関数が持ちうる境界」がすべて分かる。
+           他の関数を参照しないので、判定はその関数だけで閉じる。 */
+        int a0 = nx_insn_at_or_after(bin, f->start);
+        for (int k = a0; k < bin->ninsns; k++) {
+            const macho_insn_t *in = &bin->insns[k];
+            if (in->address >= f->end) break;        /* 命令は昇順 */
+            if (in->address < f->start) continue;
+
+            /* 分岐先 (直接分岐のみ) */
+            if (in->has_target && !in->is_indirect &&
+                in->target >= f->start && in->target < f->end) {
+                if (nb < 512) bounds[nb++] = in->target;
+                else { bin->cfg_truncated = 1; break; }
             }
-            /* 条件分岐直後のフォールスルー */
-            if (xr->is_conditional) {
-                uint64_t nxt = xr->from + 4;
+            /* 条件分岐のフォールスルー */
+            if (in->is_conditional) {
+                uint64_t nxt = in->address + in->length;
                 if (nxt >= f->start && nxt < f->end) {
-                    int dup = 0;
-                    for (int b = 0; b < nb; b++) if (bounds[b] == nxt) { dup = 1; break; }
-                    if (!dup && nb < 512) bounds[nb++] = nxt;
+                    if (nb < 512) bounds[nb++] = nxt;
+                    else { bin->cfg_truncated = 1; break; }
                 }
             }
         }
 
-        for (int a = 0; a < nb; a++)
-            for (int b = a + 1; b < nb; b++)
-                if (bounds[b] < bounds[a]) { uint64_t t = bounds[a]; bounds[a] = bounds[b]; bounds[b] = t; }
+        /* 重複除去 + 昇順化は qsort 1 回で済ませる (挿入ソートは O(n^2))。 */
+        if (nb > 1) {
+            qsort(bounds, (size_t)nb, sizeof(uint64_t), nx_u64_cmp);
+            int w = 1;
+            for (int a = 1; a < nb; a++)
+                if (bounds[a] != bounds[w - 1]) bounds[w++] = bounds[a];
+            nb = w;
+        }
 
         int first_idx = bin->nblocks;
         for (int b = 0; b < nb && bin->nblocks < bin->blocks_allocated; b++) {
@@ -675,37 +751,39 @@ int macho_build_cfg(macho_binary_t *bin) {
             blk->is_entry = (b == 0);
             bin->nblocks++;
         }
+        if (nb > 0 && bin->nblocks >= bin->blocks_allocated) {
+            bin->cfg_truncated = 1;   // ブロック枠の枯渇
+        }
 
-        /* ブロック間 succ を xref から張る */
+        /* ブロック間 succ を張る。
+           ブロックは関数内でアドレス昇順に作られるので block.start は単調。
+           よって
+             - blk->end-4 の xref は二分探索で 1 点に絞れ、
+             - 飛び先のブロックも二分探索で求まる。
+           以前はブロックごとに全 xref を走査し、飛び先ごとに全ブロックを
+           線形探索していた (二重の総当たり)。 */
         for (int b = first_idx; b < bin->nblocks; b++) {
             macho_block_t *blk = &bin->blocks[b];
             uint64_t last = blk->end - 4;   /* ARM64 は固定長 */
-            for (int x = 0; x < bin->nxrefs; x++) {
-                macho_xref_t *xr = &bin->xrefs[x];
-                if (xr->from != last) continue;
+
+            int x0 = nx_first_xref_at_or_after(bin, last);
+            for (int x = x0; x < bin->nxrefs && bin->xrefs[x].from == last; x++) {
+                const macho_xref_t *xr = &bin->xrefs[x];
                 if (!xr->is_indirect && xr->to != 0) {
-                    for (int t = first_idx; t < bin->nblocks; t++) {
-                        if (bin->blocks[t].start <= xr->to && xr->to < bin->blocks[t].end) {
-                            if (blk->nsucc < 16) {
-                                blk->succ[blk->nsucc] = t;
-                                blk->edge_type[blk->nsucc] = xr->is_conditional
-                                    ? MACHO_EDGE_TYPE_COND_TRUE : MACHO_EDGE_TYPE_JUMP;
-                                blk->nsucc++;
-                            }
-                            break;
-                        }
+                    int t = nx_block_at(bin, first_idx, xr->to);
+                    if (t >= 0 && blk->nsucc < 16) {
+                        blk->succ[blk->nsucc] = t;
+                        blk->edge_type[blk->nsucc] = xr->is_conditional
+                            ? MACHO_EDGE_TYPE_COND_TRUE : MACHO_EDGE_TYPE_JUMP;
+                        blk->nsucc++;
                     }
                 }
                 if (xr->is_conditional && last + 4 < blk->end) {
-                    for (int t = first_idx; t < bin->nblocks; t++) {
-                        if (bin->blocks[t].start == last + 4) {
-                            if (blk->nsucc < 16) {
-                                blk->succ[blk->nsucc] = t;
-                                blk->edge_type[blk->nsucc] = MACHO_EDGE_TYPE_COND_FALSE;
-                                blk->nsucc++;
-                            }
-                            break;
-                        }
+                    int t = nx_block_at(bin, first_idx, last + 4);
+                    if (t >= 0 && blk->nsucc < 16) {
+                        blk->succ[blk->nsucc] = t;
+                        blk->edge_type[blk->nsucc] = MACHO_EDGE_TYPE_COND_FALSE;
+                        blk->nsucc++;
                     }
                 }
             }
@@ -805,4 +883,116 @@ int macho_analyze_regression(macho_binary_t *bin) {
 int macho_build_state_checkpoints(macho_binary_t *bin) {
     // Placeholder
     return 0;
+}
+
+// ============================================================================
+// CFG 自己検証
+//
+// 高速経路 (二分探索 + to 昇順索引) は、xref の並びに関する前提に依存する。
+// 前提が崩れると黙って境界やエッジを取りこぼす。そこで
+//   - 実際に使った高速経路の結果
+//   - 総当たりで数え直した参照実装の結果
+// を同じバイナリで比べる。一致すれば前提が成り立っていたと言える。
+// 「速いから正しい」ではなく「両者が一致したから正しい」とする。
+// ============================================================================
+
+// 参照実装: 関数ごとに全 xref を走査して境界を集める (O(nfunc * nxref))。
+static int cfg_reference_bounds(const macho_binary_t *bin, int func_idx,
+                                uint64_t *bounds, int cap) {
+    const macho_function_t *f = &bin->functions[func_idx];
+    if (f->end <= f->start) return 0;
+    int nb = 0;
+    bounds[nb++] = f->start;
+    for (int x = 0; x < bin->nxrefs; x++) {
+        const macho_xref_t *xr = &bin->xrefs[x];
+        if (!xr->is_indirect && xr->to != 0 &&
+            xr->to >= f->start && xr->to < f->end) {
+            int dup = 0;
+            for (int b = 0; b < nb; b++) if (bounds[b] == xr->to) { dup = 1; break; }
+            if (!dup && nb < cap) bounds[nb++] = xr->to;
+        }
+        if (xr->is_conditional) {
+            uint64_t nxt = xr->from + 4;
+            if (nxt >= f->start && nxt < f->end) {
+                int dup = 0;
+                for (int b = 0; b < nb; b++) if (bounds[b] == nxt) { dup = 1; break; }
+                if (!dup && nb < cap) bounds[nb++] = nxt;
+            }
+        }
+    }
+    // 昇順化
+    for (int a = 0; a < nb; a++)
+        for (int b = a + 1; b < nb; b++)
+            if (bounds[b] < bounds[a]) { uint64_t t = bounds[a]; bounds[a] = bounds[b]; bounds[b] = t; }
+    return nb;
+}
+
+// 高速経路の境界を関数ごとに取り出す。
+uint64_t nx_cfg_digest(const macho_binary_t *bin) {
+    // ブロック数と (start,end) のハッシュ。順序も含める。
+    uint64_t h = 1469598103934665603ULL;
+    for (int i = 0; i < bin->nblocks; i++) {
+        h ^= bin->blocks[i].start;      h *= 1099511628211ULL;
+        h ^= bin->blocks[i].end;        h *= 1099511628211ULL;
+        h ^= (uint64_t)bin->blocks[i].func_idx; h *= 1099511628211ULL;
+        h ^= (uint64_t)bin->blocks[i].nsucc;    h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+// 参照実装のダイジェスト。
+// 高速経路と同じ項目 (start, end, func_idx, nsucc) を、
+// 総当たりで求め直してハッシュする。succ も参照側で数え直すので、
+// エッジの取りこぼしも検出できる。
+uint64_t nx_cfg_digest_reference(const macho_binary_t *bin) {
+    uint64_t h = 1469598103934665603ULL;
+    for (int i = 0; i < bin->nfunctions; i++) {
+        uint64_t b[512];
+        int nb = cfg_reference_bounds(bin, i, b, 512);
+        for (int k = 0; k < nb; k++) {
+            uint64_t bstart = b[k];
+            uint64_t bend = (k + 1 < nb) ? b[k + 1] : bin->functions[i].end;
+            if (bend <= bstart) continue;
+            // このブロックの succ を総当たりで数える
+            uint64_t last = bend - 4;
+            int ns = 0;
+            for (int x = 0; x < bin->nxrefs; x++) {
+                const macho_xref_t *xr = &bin->xrefs[x];
+                if (xr->from != last) continue;
+                if (!xr->is_indirect && xr->to != 0) {
+                    // to がいずれかのブロックに入るか
+                    for (int t = 0; t < nb; t++) {
+                        uint64_t ts = b[t];
+                        uint64_t te = (t + 1 < nb) ? b[t + 1] : bin->functions[i].end;
+                        if (ts <= xr->to && xr->to < te) { ns++; break; }
+                    }
+                }
+                if (xr->is_conditional && last + 4 < bend) ns++;
+            }
+            if (ns > 16) ns = 16;
+            h ^= bstart;              h *= 1099511628211ULL;
+            h ^= bend;                h *= 1099511628211ULL;
+            h ^= (uint64_t)i;         h *= 1099511628211ULL;
+            h ^= (uint64_t)ns;        h *= 1099511628211ULL;
+        }
+    }
+    return h;
+}
+
+int nx_cfg_ref_block_count(const macho_binary_t *bin) {
+    int total = 0;
+    for (int i = 0; i < bin->nfunctions; i++) {
+        uint64_t b[512];
+        int nb = cfg_reference_bounds(bin, i, b, 512);
+        for (int k = 0; k < nb; k++) {
+            uint64_t s = b[k];
+            uint64_t e = (k + 1 < nb) ? b[k + 1] : bin->functions[i].end;
+            if (e > s) total++;
+        }
+    }
+    return total;
+}
+
+int nx_cfg_ref_bounds(const macho_binary_t *bin, int idx, uint64_t *b, int cap) {
+    return cfg_reference_bounds(bin, idx, b, cap);
 }

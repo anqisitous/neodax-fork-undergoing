@@ -474,6 +474,8 @@ extern "C" int nx_advise_tab_can_delete(const char *state_json, const char *id,
    特定のタブ名に依存しない。CLI はこの 1 関数だけを呼ぶ。 */
 extern "C" int nx_plan_analyze_store(const char *state_path, FILE *out);
 extern "C" int nx_plan_repair(const char *state_path, FILE *out);
+extern "C" int nx_plan_analyze_case(const char *kind, const char *path,
+                                    const char *case_name, FILE *out);
 static void cmd_delete(const char *state_path, const char *tab_id,
                        const char *app, const char *store, const char *key,
                        int live, int no_store_sync, int force) {
@@ -918,6 +920,8 @@ static void usage(void) {
         "  display [--app NAME] [-o FILE] [--state PATH]\n"
         "  tabs     --state PATH\n"
         "  close    --state PATH --id ID\n"
+        "  case     --path PATH [--kind app|state|dir] [--case NAME]\n"
+        "           案件ごとの自発解析。対象に合う案件を逐次に試し、問題と計画を出す\n"
         "  repair   --state PATH\n"
         "           1 つの永続手続き: 観測→計画→段順に実行→再観測 を健全になるまで繰り返す\n"
         "  plan     --state PATH\n"
@@ -930,7 +934,7 @@ static void usage(void) {
         "           先に advise と同じ判定を行い、壊れている (owner 不在) ときだけ削除する。\n"
         "           live surface / chat は拒否する。--force でその限りでなく実行。\n"
         "           永続層へ書き込み、同時に稼働中ストアも同じ値にする (reload なし)\n"
-        "  fix      --state PATH\n"
+        "  fix      --state PATH                      タブ状態を修復\n"
         "  check    --state PATH                    閉じられない surface タブを検出 (変更なし)\n"
         "  heal     --state PATH [--app NAME] [--store SUBSTR] [--key HINT] [--dry-run]\n"
         "           検出→永続層へ書き戻し→稼働中ストア再水和を自動実行\n"
@@ -989,6 +993,12 @@ int main(int argc, char **argv) {
             const char *st = flag(argc, argv, "--state");
             if (!st) { fprintf(stderr, "plan: --state required\n"); return 1; }
             return nx_plan_analyze_store(st, stdout) == 0 ? 0 : 1;
+        } else if (strcmp(cmd, "case") == 0) {
+            const char *path = flag(argc, argv, "--path");
+            const char *kind = flag(argc, argv, "--kind");
+            const char *nm = flag(argc, argv, "--case");
+            if (!path) { fprintf(stderr, "case: --path required\n"); return 1; }
+            return nx_plan_analyze_case(kind ? kind : "app", path, nm, stdout) == 0 ? 0 : 1;
         } else if (strcmp(cmd, "repair") == 0) {
             const char *st = flag(argc, argv, "--state");
             if (!st) { fprintf(stderr, "repair: --state required\n"); return 1; }
@@ -1003,7 +1013,7 @@ int main(int argc, char **argv) {
             return rc == 2 ? 1 : 0;
         } else if (strcmp(cmd, "fix") == 0) {
             const char *st = flag(argc, argv, "--state");
-            if (!st) { fprintf(stderr, "fix: --state required\n"); return 1; }
+            if (!st) { fprintf(stderr, "fix: --state or --app required\n"); return 1; }
             return nx_deepai_fix_path(st, stdout);
         } else if (strcmp(cmd, "check") == 0) {
             const char *st = flag(argc, argv, "--state");

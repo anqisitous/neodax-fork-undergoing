@@ -23,7 +23,47 @@ static uint64_t bswap64(uint64_t v){
             (uint64_t)bswap32((uint32_t)(v>>32));
 }
 
-/* Packed/un-aligned-safe scalar reads. */
+// バイト順は「ファイルの属性」であって「フィールドごとの判断」ではない。
+//
+// 方針: 魔法数の表を信じるのではなく、**構造が自分自身と矛盾しない読み方**を
+// 選ぶ。ヘッダは「魔法数・サイズ・個数」を持ち、その値は読み方によって
+// 変わる。両方の読み方でヘッダを解釈し、大きさや個数が実際のファイルと
+// 矛盾しない側を採用すれば、値の知識を必要としない。
+//
+// 具体的な矛盾検査:
+//   - ncmds > 0 かつ ncmds*sizeof(cmdsize) がファイルに収まる
+//   - sizeofcmds がファイルに収まる
+//   - 全ロードコマンドの cmdsize が 4 の倍数で、合計が sizeofcmds に一致
+// 片方だけが通れば、それが正しい読み方。両方通るのは破損か空に近い場合。
+static uint32_t rd32(const uint8_t *p, int swap);
+
+static int hdr_reads_sane(const uint8_t *h, size_t sz, int swap, int is64){
+    uint32_t ncmds    = rd32(h + 16, swap);
+    uint32_t sizeofcmds = rd32(h + 20, swap);
+    if (ncmds == 0 || ncmds > 4096) return 0;
+    size_t hdr_sz = is64 ? 32 : 28;
+    if (hdr_sz + (size_t)sizeofcmds > sz) return 0;
+    size_t off = hdr_sz, seen = 0;
+    for (uint32_t i = 0; i < ncmds; i++) {
+        if (off + 8 > hdr_sz + sizeofcmds) return 0;
+        uint32_t cs = rd32(h + off + 4, swap);
+        if (cs < 8 || (cs & 3)) return 0;
+        if (off + cs > hdr_sz + sizeofcmds) return 0;
+        off += cs;
+        seen++;
+    }
+    return seen == ncmds ? 1 : 0;
+}
+
+// 魔法数は「ホストと同じ順で読んだ値」と「逆順で読んだ値」のどちらが
+// 構造として通るかで決める。want は既知の魔法 (ヒントとしてのみ使う)。
+static int swap_for_magic(uint32_t native, uint32_t other, uint32_t want){
+    if (native == want) return 0;
+    if (other  == want) return 1;
+    return -1;
+}
+
+/* Packed/un-aligned-safe scalar reads. swap はファイル単位で固定。 */
 static uint32_t rd32(const uint8_t *p, int swap){
     uint32_t v; memcpy(&v, p, 4); return swap ? bswap32(v) : v;
 }
@@ -34,22 +74,45 @@ static uint64_t rd_word(const uint8_t *p, int swap, int is64){
     return is64 ? rd64(p, swap) : (uint64_t)rd32(p, swap);
 }
 
-static int fat_find_slice(const uint8_t *data, size_t sz,
+// fat ヘッダは規格上 BE。swap=0 なら BE のまま、swap=1 なら入れ替える。
+// 呼び出し側が魔法数から 1 回だけ決めた swap を渡す。
+// fat ヘッダとして整合する読み方を返す (0=そのまま, 1=逆順, -1=fat でない)。
+// 「アーキ数が妥当」「各 slice がファイル内に収まる」だけで判定する。
+static int fat_looks_sane(const uint8_t *data, size_t sz) {
+    if (sz < 8) return -1;
+    for (int swap = 0; swap <= 1; swap++) {
+        uint32_t narch = rd32(data + 4, swap);
+        if (narch == 0 || narch > 64) continue;
+        size_t need = 8 + (size_t)narch * 20;
+        if (need > sz) continue;
+        int ok = 1;
+        for (uint32_t i = 0; i < narch; i++) {
+            const uint8_t *e = data + 8 + (size_t)i * 20;
+            uint32_t off = rd32(e + 8, swap);
+            uint32_t len = rd32(e + 12, swap);
+            if (off == 0 || len == 0 || off > sz || len > sz - off) { ok = 0; break; }
+        }
+        if (ok) return swap;
+    }
+    return -1;
+}
+
+static int fat_find_slice(const uint8_t *data, size_t sz, int swap,
                            uint32_t want_cpu,
                            uint32_t *out_off, uint32_t *out_size)
 {
     if (sz < sizeof(macho_fat_header_t)) return -1;
     const macho_fat_header_t *fh = (const macho_fat_header_t *)data;
-    uint32_t narch = bswap32(fh->nfat_arch);
+    uint32_t narch = rd32((const uint8_t *)&fh->nfat_arch, swap);
     if (narch > 64) return -1;
 
     size_t base = sizeof(macho_fat_header_t);
     for (uint32_t i = 0; i < narch; i++) {
         if (base + sizeof(macho_fat_arch_t) > sz) break;
         const macho_fat_arch_t *fa = (const macho_fat_arch_t *)(data + base);
-        uint32_t cpu  = bswap32(fa->cputype);
-        uint32_t off  = bswap32(fa->offset);
-        uint32_t fsz  = bswap32(fa->size);
+        uint32_t cpu  = rd32((const uint8_t *)&fa->cputype, swap);
+        uint32_t off  = rd32((const uint8_t *)&fa->offset, swap);
+        uint32_t fsz  = rd32((const uint8_t *)&fa->size, swap);
         if (cpu == want_cpu && off + fsz <= sz) {
             *out_off  = off;
             *out_size = fsz;
@@ -62,8 +125,8 @@ static int fat_find_slice(const uint8_t *data, size_t sz,
     for (uint32_t i = 0; i < narch; i++) {
         if (base + sizeof(macho_fat_arch_t) > sz) break;
         const macho_fat_arch_t *fa = (const macho_fat_arch_t *)(data + base);
-        uint32_t off = bswap32(fa->offset);
-        uint32_t fsz = bswap32(fa->size);
+        uint32_t off = rd32((const uint8_t *)&fa->offset, swap);
+        uint32_t fsz = rd32((const uint8_t *)&fa->size, swap);
         if (off + fsz <= sz) { *out_off = off; *out_size = fsz; return 0; }
         base += sizeof(macho_fat_arch_t);
     }
@@ -78,12 +141,14 @@ int dax_parse_macho(dax_binary_t *bin)
 
     if (!data || sz < 4) return -1;
 
-    uint32_t fat_magic = *(const uint32_t *)data;
-    if (fat_magic == MACHO_FAT_MAGIC || fat_magic == MACHO_FAT_MAGIC_LE) {
+    // fat かどうかも構造で決める。fat なら先頭から「アーキ数 + 各 slice の
+    // (cpu, offset, size)」が整合する。魔法数の表に頼らない。
+    int fat_swap = fat_looks_sane(data, sz);
+    if (fat_swap >= 0) {
         uint32_t off = 0, slice_sz = 0;
-        if (fat_find_slice(data, sz, MACHO_CPU_ARM64,  &off, &slice_sz) != 0 &&
-            fat_find_slice(data, sz, MACHO_CPU_X86_64, &off, &slice_sz) != 0 &&
-            fat_find_slice(data, sz, MACHO_CPU_X86,    &off, &slice_sz) != 0)
+        if (fat_find_slice(data, sz, fat_swap, MACHO_CPU_ARM64,  &off, &slice_sz) != 0 &&
+            fat_find_slice(data, sz, fat_swap, MACHO_CPU_X86_64, &off, &slice_sz) != 0 &&
+            fat_find_slice(data, sz, fat_swap, MACHO_CPU_X86,    &off, &slice_sz) != 0)
             return -1;
         if (off == 0 || off + slice_sz > sz) return -1;
         data = bin->data + off;
@@ -95,15 +160,38 @@ int dax_parse_macho(dax_binary_t *bin)
         return -1;
     }
 
-    uint32_t magic = *(const uint32_t *)data;
-    int is64 = 0;
+    // slice ヘッダも同じ規則。魔法数は「ホスト標準の読み方」と
+    // 「逆順の読み方」の両方で試し、どちらが既知の値になるかで決める。
+    // 3 つの状態を区別する:
+    //   swap=0 … そのまま読める (ホストと同順)
+    //   swap=1 … 逆順に読むと既知の値になる
+    //   未知名 … どちらでもない
+    // 2 通りの読み方でヘッダを解釈し、構造として矛盾しない側を採る。
+    // 魔法数の表に頼らないので、未知の亜種でも「読めるか」で決まる。
+    uint32_t m_native, m_other;
+    memcpy(&m_native, data, 4);          // ホストと同じ順
+    m_other = bswap32(m_native);         // 逆順
 
-    if      (magic == MACHO_MAGIC_64_LE) { is64 = 1; swap = 0; }
-    else if (magic == MACHO_MAGIC_64)    { is64 = 1; swap = 1; }
-    else if (magic == MACHO_MAGIC_32_LE) { is64 = 0; swap = 0; }
-    else if (magic == MACHO_MAGIC_32)    { is64 = 0; swap = 1; }
+    int is64 = 0;
+    int want64 = swap_for_magic(m_native, m_other, MACHO_MAGIC_64_LE) == 0 ||
+                 swap_for_magic(m_native, m_other, MACHO_MAGIC_64)    == 0;
+    int want32 = swap_for_magic(m_native, m_other, MACHO_MAGIC_32_LE) == 0 ||
+                 swap_for_magic(m_native, m_other, MACHO_MAGIC_32)    == 0;
+
+    // 構造検査で決める (これが本命)。魔法数はどちらの幅かを絞るヒントに留める。
+    int sane0_64 = hdr_reads_sane(data, sz, 0, 1);
+    int sane1_64 = hdr_reads_sane(data, sz, 1, 1);
+    int sane0_32 = hdr_reads_sane(data, sz, 0, 0);
+    int sane1_32 = hdr_reads_sane(data, sz, 1, 0);
+
+    if (sane0_64 && !sane1_64)      { is64 = 1; swap = 0; }
+    else if (sane1_64 && !sane0_64) { is64 = 1; swap = 1; }
+    else if (sane0_32 && !sane1_32) { is64 = 0; swap = 0; }
+    else if (sane1_32 && !sane0_32) { is64 = 0; swap = 1; }
+    else if (want64)                 { is64 = 1; swap = (m_native == MACHO_MAGIC_64_LE) ? 0 : 1; }
+    else if (want32)                 { is64 = 0; swap = (m_native == MACHO_MAGIC_32_LE) ? 0 : 1; }
     else {
-        fprintf(stderr, "neodax: unrecognised Mach-O magic 0x%08X\n", magic);
+        fprintf(stderr, "neodax: unrecognised Mach-O magic 0x%08X\n", m_native);
         return -1;
     }
 
@@ -317,14 +405,17 @@ int dax_parse_macho(dax_binary_t *bin)
     /* ── Symbol table ──────────────────────────────────────────────────
      * Parsed after the load-command loop so the section table is complete:
      * Mach-O's n_sect is a 1-based index into the flat section list. */
-    if (g_have_symtab && g_nsyms > 0 && g_nsyms < DAX_MAX_SYMBOLS &&
+    // g_nsyms が上限を超えても「表ごと捨てる」のではなく、
+    // 上限まで読んで打ち切る。捨てると関数検出が 0 になり、
+    // 依存解析が丸ごと成立しなくなる (大きな framework で発生)。
+    if (g_have_symtab && g_nsyms > 0 &&
         g_symoff <= bin->size &&
         (uint64_t)g_nsyms * nlist_sz <= (uint64_t)bin->size - g_symoff &&
         g_stroff <= bin->size && g_strsz <= bin->size - g_stroff) {
 
         bin->is_stripped = 0;
         uint32_t count = 0;
-        bin->symbols = (dax_symbol_t *)calloc(g_nsyms + 1, sizeof(dax_symbol_t));
+        bin->symbols = (dax_symbol_t *)calloc(DAX_MAX_SYMBOLS, sizeof(dax_symbol_t));
         if (bin->symbols) {
             for (uint32_t si = 0; si < g_nsyms && count < DAX_MAX_SYMBOLS; si++) {
                 const uint8_t *rec = bin->data + g_symoff + (size_t)si * nlist_sz;

@@ -15,6 +15,7 @@
 
 #include "model/nx_graph.hpp"
 #include "model/nx_render.hpp"
+#include "model/nx_uilayout.hpp"
 
 extern "C" {
 #include "integration/neodax_bridge.h"
@@ -57,11 +58,43 @@ int main(int argc, char **argv) {
     const char *path = nullptr;
     const char *out_path = nullptr;
     bool ascii = false;
+    bool ui_mode = false;
 
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "-o") && i + 1 < argc) out_path = argv[++i];
         else if (!std::strcmp(argv[i], "--ascii")) ascii = true;
+        else if (!std::strcmp(argv[i], "--ui")) ui_mode = true;
         else if (argv[i][0] != '-') path = argv[i];
+    }
+
+    // --ui: 状態 JSON から画面レイアウトを再構築して SVG にする。
+    // 実キャプチャや起動ができない場面でも、状態だけで確認できる。
+    if (ui_mode) {
+        if (!path) { std::fprintf(stderr, "usage: %s --ui <state.json> [-o out.svg]\n", argv[0]); return 2; }
+        bool ok = false;
+        std::vector<uint8_t> data = read_file(path, &ok);
+        if (!ok) { std::fprintf(stderr, "cannot read: %s\n", path); return 1; }
+        nx_ui_layout_t L;
+        std::memset(&L, 0, sizeof L);
+        if (nx_deepai_build_layout((const char *)data.data(), &L) != 0) {
+            std::fprintf(stderr, "no layout in %s\n", path);
+            return 1;
+        }
+        std::string caption = std::string("reconstructed UI: ") + path;
+        std::string svg = nxui::to_svg(L, caption);
+        if (out_path) {
+            std::string err;
+            if (!nxui::write_svg(L, caption, out_path, err)) {
+                std::fprintf(stderr, "%s\n", err.c_str());
+                nx_deepai_free_layout(&L);
+                return 1;
+            }
+            std::fprintf(stderr, "wrote %s\n", out_path);
+        } else {
+            std::fwrite(svg.data(), 1, svg.size(), stdout);
+        }
+        nx_deepai_free_layout(&L);
+        return 0;
     }
     if (!path) {
         std::fprintf(stderr,

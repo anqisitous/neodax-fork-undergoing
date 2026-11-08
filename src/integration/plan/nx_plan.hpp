@@ -98,9 +98,16 @@ struct Advice {
     std::vector<std::string> steps;
 };
 
+class Case;
+struct CaseTarget;
+
 class Model {
 public:
     explicit Model(std::string subject);
+
+    // 案件を差し込む。collect/analyze/plan がこの案件に委譲される。
+    void use_case(std::shared_ptr<Case> c, std::shared_ptr<CaseTarget> t);
+
     void collect();
 
     // 信号を外から足す (CLI が store / バイナリから集めて渡す)。
@@ -126,6 +133,8 @@ private:
     Confidence conf_;
     Advice advice_;
 
+    std::shared_ptr<Case> case_;
+    std::shared_ptr<CaseTarget> case_target_;
     void build_advice();
     void topo_sort();
     int simulate(const std::vector<std::string> &order, bool parallel_ok) const;

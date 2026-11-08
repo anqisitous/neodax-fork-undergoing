@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <cstdint>
 #include <chrono>
 #include <string>
@@ -57,6 +58,8 @@
 #include <ApplicationServices/ApplicationServices.h>
 #include <cctype>
 #include <cstdlib>
+#include "tracking/nx_pile.hpp"
+#include "../gui/model/nx_boxlayout.hpp"
 #include <cstring>
 #include <ctime>
 #include <Carbon/Carbon.h>
@@ -4490,6 +4493,11 @@ struct DVNode {
     std::string role, sub, title, desc;
     double x = 0, y = 0, w = 0, h = 0;
     std::vector<DVNode> kids;
+
+    // このノードの状態推移 (derive の履歴)。子ノードとして積む。
+    // 画面の 1 枚絵 (kids) とは別に、「このノードがどう変わったか」を持つ。
+    // 空の理由を追うには、静的な kids だけでは足りないため。
+    std::shared_ptr<nx::Pile> states;
 };
 
 static void nx_ax_frame(AXUIElementRef el, double *x, double *y, double *w, double *h) {
@@ -4511,6 +4519,17 @@ static void nx_ax_frame(AXUIElementRef el, double *x, double *y, double *w, doub
     }
 }
 
+// 子要素を集める属性。AXChildren だけでは Web 面の中身が取れない。
+// 実際に子を持つ属性は実行時にしか分からないので、候補を順に試し、
+// 最初に子が返ったものを使う (重複は同一要素かどうかで除く)。
+static const CFStringRef kChildAttrs[] = {
+    CFSTR("AXChildren"),
+    CFSTR("AXChildrenInNavigationOrder"),
+    CFSTR("AXContents"),
+    CFSTR("AXSelectedChildren"),
+    CFSTR("AXVisibleChildren"),
+};
+
 static void dv_from_ax(AXUIElementRef el, DVNode &n, int depth, int &budget) {
     if (budget <= 0) return;
     budget--;
@@ -4519,15 +4538,24 @@ static void dv_from_ax(AXUIElementRef el, DVNode &n, int depth, int &budget) {
     n.title = nx_ax_str(el, kAXTitleAttribute);
     n.desc = nx_ax_str(el, kAXDescriptionAttribute);
     nx_ax_frame(el, &n.x, &n.y, &n.w, &n.h);
-    if (depth >= 6) return;
-    CFTypeRef kids = NULL;
-    if (AXUIElementCopyAttributeValue(el, kAXChildrenAttribute, &kids) == kAXErrorSuccess && kids) {
-        CFArrayRef a = (CFArrayRef)kids;
-        CFIndex kc = CFArrayGetCount(a);
-        for (CFIndex i = 0; i < kc && budget > 0; i++) {
-            DVNode c;
-            dv_from_ax((AXUIElementRef)CFArrayGetValueAtIndex(a, i), c, depth + 1, budget);
-            n.kids.push_back(c);
+    if (depth >= 12) return;   // Web 面は深いので上限を上げる
+
+    std::set<AXUIElementRef> seen;
+    for (CFStringRef attr : kChildAttrs) {
+        CFTypeRef kids = NULL;
+        if (AXUIElementCopyAttributeValue(el, attr, &kids) != kAXErrorSuccess || !kids)
+            continue;
+        if (CFGetTypeID(kids) == CFArrayGetTypeID()) {
+            CFArrayRef a = (CFArrayRef)kids;
+            CFIndex kc = CFArrayGetCount(a);
+            for (CFIndex i = 0; i < kc && budget > 0; i++) {
+                AXUIElementRef ch = (AXUIElementRef)CFArrayGetValueAtIndex(a, i);
+                if (!ch || seen.count(ch)) continue;
+                seen.insert(ch);
+                DVNode c;
+                dv_from_ax(ch, c, depth + 1, budget);
+                n.kids.push_back(c);
+            }
         }
         CFRelease(kids);
     }
@@ -5486,5 +5514,290 @@ extern "C" int nx_wire(const char *target, const char *send_txt,
     else if (rbuf[0] == 0x16) kind = "TLS";
     else if (head.rfind("GET ", 0) == 0 || head.rfind("POST ", 0) == 0) kind = "HTTP request";
     std::fprintf(out, "受信 %zd バイト / 種別: %s\n", total, kind);
+    return 0;
+}
+
+// ---------------------------------------------------------------- chain
+// 指定シンボルから「呼び出し元」を上へ辿り、依存の鎖を出す。
+//
+// なぜ専用か:
+//   全体解析 (-m / -d) は大きな framework で数十秒〜停止する。
+//   鎖を知りたいだけなら、シンボル表 + BL 参照だけで足りる。
+//   ここは MachOImage / XRefIndex の軽い経路だけを使う。
+//
+// 出力は上から下へ「入口 → 対象」の順。各段に
+//   - 関数アドレスと名前
+//   - その関数を呼ぶサイト (BL) のアドレス
+//   - 深さ
+// を出す。枝分かれする場合は全枝を出す (浅い順)。
+extern "C" int nx_call_chain(const char *path, const char *symbol, int max_depth,
+                             FILE *out) {
+    if (!out) out = stdout;
+    if (!path || !symbol || !*symbol) return 2;
+    auto img = nx::MachOImage::open(path);
+    if (!img) { std::fprintf(out, "[skip] not a 64-bit Mach-O: %s\n", path); return 1; }
+    nx::ImportResolver imports; imports.parse(*img);
+    nx::XRefIndex xr; xr.build(*img, imports);
+    nx::BackTracker bt(*img, xr);
+
+    // 起点: シンボル名の部分一致で、最も小さいアドレスの定義を採る。
+    uint64_t start = 0;
+    std::string start_name;
+    for (const auto &kv : img->defined_symbols()) {
+        if (kv.first.find(symbol) == std::string::npos) continue;
+        if (!start || kv.second < start) { start = kv.second; start_name = kv.first; }
+    }
+    if (!start) { std::fprintf(out, "  symbol not found: %s\n", symbol); return 1; }
+
+    std::fprintf(out, "chain from %s (0x%llx)\n",
+                 start_name.c_str(), (unsigned long long)start);
+
+    // 呼び出し元索引: target -> {site, caller_fn}
+    struct Edge { uint64_t site, caller; };
+    std::map<uint64_t, std::vector<Edge>> up;
+    for (const auto &s : xr.sites()) {
+        if (!s.is_call) continue;
+        up[s.target_vm].push_back({s.addr, bt.function_containing(s.addr)});
+    }
+
+    // BFS で上へ。深さ上限つき。
+    std::vector<std::pair<uint64_t, int>> q{{start, 0}};
+    std::set<uint64_t> seen{start};
+    int level = 0;
+    while (!q.empty() && level < max_depth) {
+        std::vector<std::pair<uint64_t, int>> next;
+        for (const auto &cur : q) {
+            auto it = up.find(cur.first);
+            if (it == up.end()) continue;
+            for (const auto &e : it->second) {
+                if (!seen.insert(e.caller).second) continue;
+                const std::string *nm = img->name_at(e.caller);
+                std::fprintf(out, "  %*s<- 0x%llx %s   (bl 0x%llx)\n",
+                             (cur.second + 1) * 2, "",
+                             (unsigned long long)e.caller,
+                             nm ? nm->c_str() : "(local)",
+                             (unsigned long long)e.site);
+                next.push_back({e.caller, cur.second + 1});
+            }
+        }
+        q.swap(next);
+        level++;
+    }
+    if (q.empty()) std::fprintf(out, "  (root reached: no further callers)\n");
+    else std::fprintf(out, "  (stopped at depth %d)\n", max_depth);
+
+    // ---- 下流: 対象が呼ぶ関数 (BL の行き先) ----
+    struct Down { uint64_t site, target; };
+    std::map<uint64_t, std::vector<Down>> down;
+    for (const auto &s : xr.sites()) {
+        if (!s.is_call || !s.target_vm) continue;
+        uint64_t f = bt.function_containing(s.addr);
+        down[f].push_back({s.addr, s.target_vm});
+    }
+    std::fprintf(out, "callees (downstream):\n");
+    {
+        std::vector<std::pair<uint64_t, int>> dq{{start, 0}};
+        std::set<uint64_t> dseen{start};
+        int d = 0;
+        while (!dq.empty() && d < max_depth) {
+            std::vector<std::pair<uint64_t, int>> dn;
+            for (const auto &cur : dq) {
+                auto it = down.find(cur.first);
+                if (it == down.end()) continue;
+                for (const auto &e : it->second) {
+                    if (!dseen.insert(e.target).second) continue;
+                    const std::string *nm = img->name_at(e.target);
+                    std::fprintf(out, "  %*s-> 0x%llx %s   (bl 0x%llx)\n",
+                                 (cur.second + 1) * 2, "",
+                                 (unsigned long long)e.target,
+                                 nm ? nm->c_str() : "(local)",
+                                 (unsigned long long)e.site);
+                    dn.push_back({e.target, cur.second + 1});
+                }
+            }
+            dq.swap(dn);
+            d++;
+        }
+        if (dq.empty()) std::fprintf(out, "  (leaf reached)\n");
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- uifill
+// display モデル (DVNode 木) を「隙間を埋める再配置」で描く。
+// 元の座標のままだと空の領域が空白として残り、どこが空か分からない。
+// 詰め直すことで、空の容器が赤い四角として出る。
+
+// ---------------------------------------------------------------- uifill
+// display モデル (DVNode 木) を「隙間を埋める再配置」で描く。
+// 元の座標のままだと空の領域が空白として残り、どこが空か分からない。
+// property ごとに寸法を決めて詰め直すことで、空が色として出る。
+extern "C" int nx_ui_fill(const char *model_path, const char *save,
+                          int width, int props_only, FILE *out) {
+    if (!out) out = stdout;
+    if (!model_path || !*model_path) return 2;
+    std::vector<DVNode> roots;
+    if (!dv_load_model(model_path, roots)) {
+        std::fprintf(out, "DVNode モデルを読めません: %s\n", model_path);
+        return 1;
+    }
+
+    // DVNode 木を BoxItem 列に平坦化する (深さ優先・親→子の順)。
+    std::vector<nx::BoxItem> items;
+    std::vector<std::vector<int>> stack_kids;
+    {
+        std::function<int(const DVNode &, int)> add =
+            [&](const DVNode &n, int parent) -> int {
+            nx::BoxItem it;
+            it.role = n.role;
+            it.sub = n.sub;
+            it.title = n.title;
+            it.desc = n.desc;
+            it.ox = n.x; it.oy = n.y; it.ow = n.w; it.oh = n.h;
+            it.x = n.x; it.y = n.y; it.w = n.w; it.h = n.h;
+            it.depth = parent < 0 ? 0 : items[parent].depth + 1;
+            it.parent = parent;
+            bool has_text = !n.title.empty() || !n.desc.empty();
+            it.prop = nx::prop_of_role(n.role.c_str(), !n.kids.empty(),
+                                       has_text, n.w, n.h);
+            int idx = (int)items.size();
+            items.push_back(it);
+            for (const auto &k : n.kids) {
+                int c = add(k, idx);
+                items[idx].kids.push_back(c);
+            }
+            return idx;
+        };
+        for (const auto &r : roots) add(r, -1);
+    }
+
+
+    if (props_only) {
+        // 「なぜ空か」を property として列挙する。
+        int n_empty = 0, n_cont = 0, n_text = 0, n_sized = 0, n_deg = 0, n_opq = 0;
+        for (const auto &it : items) {
+            switch (it.prop) {
+                case nx::Prop::Empty:      n_empty++; break;
+                case nx::Prop::Container:  n_cont++; break;
+                case nx::Prop::Text:       n_text++; break;
+                case nx::Prop::Sized:      n_sized++; break;
+                case nx::Prop::Opaque:     n_opq++; break;
+                case nx::Prop::Degenerate: n_deg++; break;
+                default: break;
+            }
+        }
+        // 中身が AX に出ていない面 (Opaque)。空ではないので別に出す。
+        for (const auto &it : items) {
+            if (it.prop != nx::Prop::Opaque) continue;
+            std::fprintf(out, "  [opaque ] %-20s %.0fx%.0f @%.0f,%.0f  "
+                              "描画されているが AX 非公開 (空ではない)\n",
+                         it.role.c_str(), it.ow, it.oh, it.ox, it.oy);
+        }
+        // 中身が無い領域 (Sized) は「子もテキストも無いのに面積がある」。
+        for (const auto &it : items) {
+            if (it.prop != nx::Prop::Sized) continue;
+            std::fprintf(out, "  %-22s %-10s %.0fx%.0f @%.0f,%.0f kids=0 text=0\n",
+                         it.role.c_str(), nx::prop_name(it.prop),
+                         it.ow, it.oh, it.ox, it.oy);
+        }
+        std::fprintf(out, "nodes=%zu container=%d text=%d opaque=%d "
+                          "sized-empty=%d empty=%d degenerate=%d\n",
+                     items.size(), n_cont, n_text, n_opq, n_sized, n_empty, n_deg);
+        return 0;
+    }
+
+    // 詰め直し。neodax は元の座標を書き換えない (ox/oy に残る)。
+    nx::PackLayout pack;
+    double H = 0;
+    for (const auto &it : items) H = std::max(H, it.oy + it.oh);
+    if (H <= 0) H = 900;
+    double used = pack.arrange(items, 0, 0, width > 0 ? width : 1200, H);
+
+    char cap[512];
+    std::snprintf(cap, sizeof cap,
+                  "AE display (packed, %s): %s  used=%.0f",
+                  nx::prop_name(nx::Prop::Container), model_path, used);
+    std::string svg = nx::boxes_to_svg(items, cap, 1400, 1000);
+    if (save && *save) {
+        std::ofstream f(save);
+        if (!f) { std::fprintf(out, "書けません: %s\n", save); return 1; }
+        f << svg;
+        std::fprintf(out, "wrote %s (%zu boxes)\n", save, items.size());
+    } else {
+        std::fwrite(svg.data(), 1, svg.size(), stdout);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- axpick
+// 座標から要素を直接掴む。深さを辿らない。
+//
+// なぜ深さを辿らないか:
+//   AXWebArea の中身は AXChildren に現れないことがある。木を降りても取れない。
+//   AXUIElementCopyElementAtPosition は「その座標にある最も内側の要素」を
+//   直接返すので、表示されているものにアドレスで到達できる。
+//
+// 使い方: neodax --ax-pick <pid> <x> <y>
+extern "C" int nx_ax_pick(const char *pid_s, double x, double y, FILE *out) {
+    if (!out) out = stdout;
+    if (!pid_s) return 2;
+    pid_t pid = (pid_t)atoi(pid_s);
+    if (pid <= 0) { std::fprintf(out, "pid が不正: %s\n", pid_s); return 2; }
+
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    if (!app) return 1;
+    AXUIElementSetAttributeValue(app, CFSTR("AXManualAccessibility"), kCFBooleanTrue);
+
+    AXUIElementRef el = NULL;
+    AXError err = AXUIElementCopyElementAtPosition(app, (float)x, (float)y, &el);
+    if (err != kAXErrorSuccess || !el) {
+        std::fprintf(out, "座標 (%.0f,%.0f) に要素が無い (AXError=%d)\n", x, y, (int)err);
+        CFRelease(app);
+        return 1;
+    }
+
+    // 掴んだ要素の属性を列挙する。中身をどこから引くかは実物を見て決める。
+    std::string role = nx_ax_str(el, kAXRoleAttribute);
+    std::string sub  = nx_ax_str(el, kAXSubroleAttribute);
+    std::string ttl  = nx_ax_str(el, kAXTitleAttribute);
+    std::string dsc  = nx_ax_str(el, kAXDescriptionAttribute);
+    std::string val  = nx_ax_str(el, kAXValueAttribute);
+    double ex, ey, ew, eh;
+    nx_ax_frame(el, &ex, &ey, &ew, &eh);
+
+    std::fprintf(out, "element @(%.0f,%.0f)\n", x, y);
+    std::fprintf(out, "  frame    %.0f,%.0f %.0fx%.0f\n", ex, ey, ew, eh);
+    std::fprintf(out, "  role     %s\n", role.empty() ? "-" : role.c_str());
+    std::fprintf(out, "  sub      %s\n", sub.empty()  ? "-" : sub.c_str());
+    std::fprintf(out, "  title    %s\n", ttl.empty()  ? "-" : ttl.c_str());
+    std::fprintf(out, "  desc     %s\n", dsc.empty()  ? "-" : dsc.c_str());
+    std::fprintf(out, "  value    %s\n", val.empty()  ? "-" : val.c_str());
+
+    CFArrayRef attrs = NULL;
+    if (AXUIElementCopyAttributeNames(el, &attrs) == kAXErrorSuccess && attrs) {
+        CFIndex n = CFArrayGetCount(attrs);
+        std::fprintf(out, "  attrs(%ld):", (long)n);
+        for (CFIndex k = 0; k < n; k++) {
+            char an[128] = {0};
+            CFStringGetCString((CFStringRef)CFArrayGetValueAtIndex(attrs, k),
+                               an, sizeof an, kCFStringEncodingUTF8);
+            std::fprintf(out, " %s", an);
+        }
+        std::fprintf(out, "\n");
+        CFRelease(attrs);
+    }
+    CFRelease(el);
+    CFRelease(app);
+    return 0;
+}
+
+// vaddr をファイルオフセットに変換する (差分検証で範囲を確かめるため)。
+extern "C" int nx_vaddr_to_off(const char *path, uint64_t vaddr, uint64_t *out) {
+    if (!path || !out) return 2;
+    auto img = nx::MachOImage::open(path);
+    if (!img) return 1;
+    uint64_t off = 0;
+    if (!img->vm_to_off(vaddr, &off)) return 1;
+    *out = off;
     return 0;
 }

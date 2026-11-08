@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <stdint.h>
 #include "core/macho_static.h"
 #include "analysis/depflow.h"
@@ -378,7 +379,9 @@ int main(int argc, char *argv[]) {
     // fork 系は位置引数 (ソース) の後ろに置かれても効くよう、先に全部拾う。
     // 本体ループは値の読み飛ばしだけを行う。
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--fork") == 0) {
+        if (strcmp(argv[i], "--fix-app") == 0) {
+            g_opts.track_mode = 52;
+        } else if (strcmp(argv[i], "--fork") == 0) {
             g_opts.track_mode = 15;
         } else if (strcmp(argv[i], "--fork-launch") == 0) {
             g_opts.fork_launch = 1;
@@ -386,6 +389,7 @@ int main(int argc, char *argv[]) {
             g_opts.fork_move = 1;
         } else if (strcmp(argv[i], "--to") == 0 && i + 1 < argc) {
             snprintf(g_opts.fork_dest, sizeof(g_opts.fork_dest), "%s", argv[i + 1]);
+            i++;   // 値も読み飛ばす
         } else if (strcmp(argv[i], "--fork-patch") == 0 && i + 1 < argc) {
             const char *v = argv[i + 1];
             size_t l = strlen(g_opts.track_filter);
@@ -542,6 +546,20 @@ int main(int argc, char *argv[]) {
             snprintf(g_opts.workflow_out, sizeof(g_opts.workflow_out), "%s", argv[++optind]);
         } else if (strcmp(argv[optind], "--display-focus") == 0 && optind + 1 < argc) {
             snprintf(g_opts.display_focus, sizeof(g_opts.display_focus), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--fix-app") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 52;                // AE fork を 1 回で作る
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--ax-pick") == 0 && optind + 3 < argc) {
+            g_opts.track_mode = 51;                // 座標から要素を直接掴む
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+            g_opts.track_entry = (uint64_t)atoi(argv[++optind]);      // x (整数)
+            g_opts.track_pick  = atoi(argv[++optind]);                // y (整数)
+        } else if (strcmp(argv[optind], "--fill") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 49;                // 隙間を埋める再配置
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--fill-props") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 50;                // 空の性質だけ
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
         } else if (strcmp(argv[optind], "--virtual-display") == 0 && optind + 1 < argc) {
             g_opts.track_mode = 36;                // neodax の仮想ディスプレイ (app 非依存)
             snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
@@ -580,6 +598,9 @@ int main(int argc, char *argv[]) {
             g_opts.seek_time_ms = atoi(argv[++optind]);
         } else if (strcmp(argv[optind], "--lc") == 0) {
             g_opts.track_mode = 33;                // Mach-O load commands
+        } else if (strcmp(argv[optind], "--chain") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 48;                // 呼び出し元を上へ辿る
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
         } else if (strcmp(argv[optind], "--callers") == 0 && optind + 1 < argc) {
             g_opts.track_mode = 38;                // 呼び出し元を列挙
             g_opts.track_entry = strtoull(argv[++optind], NULL, 0);
@@ -779,6 +800,25 @@ int main(int argc, char *argv[]) {
         return nx_probe(g_opts.track_filter,
                         g_opts.track_pick > 0 ? g_opts.track_pick : 8000, stdout);
     }
+    if (g_opts.track_mode == 52) {
+        // AE の fork を 1 回で作る (複製→パッチ→差分検証→再署名→検証)。
+        extern int nx_appfix_make(const char *, const char *, int, FILE *);
+        return nx_appfix_make(g_opts.track_filter,
+                              g_opts.fork_dest[0] ? g_opts.fork_dest : NULL,
+                              g_opts.track_apply ? 1 : 0, stdout) == 0 ? 0 : 1;
+    }
+    if (g_opts.track_mode == 51) {
+        extern int nx_ax_pick(const char *, double, double, FILE *);
+        return nx_ax_pick(g_opts.track_filter, (double)g_opts.track_entry,
+                          (double)g_opts.track_pick, stdout);
+    }
+    if (g_opts.track_mode == 49 || g_opts.track_mode == 50) {
+        extern int nx_ui_fill(const char *, const char *, int, int, FILE *);
+        return nx_ui_fill(g_opts.track_filter,
+                          g_opts.wire_save[0] ? g_opts.wire_save : NULL,
+                          (int)g_opts.track_entry,
+                          g_opts.track_mode == 50, stdout);
+    }
     if (g_opts.track_mode == 36) {
         extern int nx_display_graph(const char *, const char *, FILE *);
         extern void nx_display_set_focus(const char *);
@@ -854,7 +894,9 @@ int main(int argc, char *argv[]) {
         g_opts.track_mode == 24 || g_opts.track_mode == 32 ||
         g_opts.track_mode == 33 || g_opts.track_mode == 34 || g_opts.track_mode == 38 ||
         g_opts.track_mode == 35 || g_opts.track_mode == 36 ||
-        g_opts.track_mode == 37 || g_opts.track_mode == 38) {
+        g_opts.track_mode == 37 || g_opts.track_mode == 38 ||
+        g_opts.track_mode == 48 || g_opts.track_mode == 49 ||
+        g_opts.track_mode == 50 || g_opts.track_mode == 52) {
         extern int nx_find_string(const char *, const char *, FILE *);
         extern int nx_guard_run(const char *, const char *, int, int, int, FILE *);
         extern int nx_list_symbols(const char *, const char *, FILE *);
@@ -867,6 +909,9 @@ int main(int argc, char *argv[]) {
         extern int nx_patch_ret(const char *, uint64_t, FILE *);
         extern int nx_patch_bytes(const char *, uint64_t, const char *, FILE *);
         extern int nx_callers(const char *, uint64_t, FILE *);
+        extern int nx_call_chain(const char *, const char *, int, FILE *);
+        if (g_opts.track_mode == 48)
+            return nx_call_chain(filename, g_opts.track_filter, 12, stdout);
         if (g_opts.track_mode == 38)
             return nx_callers(filename, g_opts.track_entry, stdout);
         extern int nx_load_commands(const char *, FILE *);

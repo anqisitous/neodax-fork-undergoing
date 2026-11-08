@@ -305,6 +305,10 @@ typedef struct {
     macho_block_t *blocks;
     int nblocks;
     int blocks_allocated;
+    // CFG を完全に作れなかったとき 1。境界が上限を超えた、または
+    // ブロック枠が枯れたことを示す。
+    // 0 なら「この関数集合について CFG は取りこぼしなし」と断言できる。
+    int cfg_truncated;
 
     // Instructions
     macho_insn_t *insns;

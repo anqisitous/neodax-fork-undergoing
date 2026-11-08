@@ -19,7 +19,7 @@ OBJS="src/macho.o src/arm64_decode.o src/x86_decode.o \
 
 clang++ -std=c++17 -O2 \
     -I src -I include -I gui \
-    gui/viewer_main.cpp gui/model/nx_graph.cpp gui/model/nx_render.cpp \
+    gui/viewer_main.cpp gui/model/nx_graph.cpp gui/model/nx_render.cpp gui/model/nx_uilayout.cpp \
     $OBJS -lpthread -lm \
     -o bin/neodax-viewer
 echo "built: bin/neodax-viewer"
@@ -53,8 +53,14 @@ clang++ -std=c++17 -O2 -c -I src -I include \
     src/integration/track/advise.cpp -o src/integration/track/advise.o
 clang++ -std=c++17 -O2 -c -I src -I include \
     src/integration/plan/nx_plan.cpp -o src/integration/plan/nx_plan.o
+clang++ -std=c++17 -O2 -c -I src -I include \
+    src/integration/plan/nx_case.cpp -o src/integration/plan/nx_case.o
+clang++ -std=c++17 -O2 -c -I src -I include \
+    src/integration/plan/nx_case_ae.cpp -o src/integration/plan/nx_case_ae.o
+clang++ -std=c++17 -O2 -c -I src -I include \
+    src/integration/nx_appfix_flow.cpp -o src/integration/nx_appfix_flow.o
 # nx_plan は事実を集めるのに nx_deepai / nx_state / nx_leveldb を使う。
-UI_OBJS="$UI_OBJS src/integration/track/advise.o src/integration/plan/nx_plan.o"
+UI_OBJS="$UI_OBJS src/integration/track/advise.o src/integration/plan/nx_plan.o src/integration/plan/nx_case.o src/integration/plan/nx_case_ae.o"
 clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 \
     -I src -I include \
     -framework Cocoa -framework CoreGraphics -framework ImageIO -framework CoreFoundation \
@@ -62,3 +68,30 @@ clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 \
     gui/neodax-ui.mm $UI_OBJS -lpthread -lm \
     -o bin/neodax-ui
 echo "built: bin/neodax-ui"
+
+# --- .app バンドル化 ---
+# 既存のバイナリ群を 1 つの .app にまとめ、解析用フォルダを中に置く。
+# 解析成果物 (SVG / display モデル / パッチ控え) の置き場所を
+# リポジトリの外へ散らかさないための入れ物。
+APP="bin/NeoDAX.app"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/Analysis"
+for t in neodax neodax-ui neodax-viewer neodax-screen neodax-artifact; do
+    [ -x "bin/$t" ] && cp -f "bin/$t" "$APP/Contents/MacOS/"
+done
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>NeoDAX</string>
+  <key>CFBundleDisplayName</key><string>NeoDAX</string>
+  <key>CFBundleIdentifier</key><string>org.neodax.tool</string>
+  <key>CFBundleExecutable</key><string>neodax-ui</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+</dict>
+</plist>
+PLIST
+echo "built: $APP (analysis dir: $APP/Contents/Resources/Analysis)"

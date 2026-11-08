@@ -6,6 +6,7 @@
 //   confidence 順序や並列の取りこぼしで結論が揺れないかを回帰で測る
 
 #include "nx_plan.hpp"
+#include "nx_case.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -39,9 +40,16 @@ Model::Model(std::string subject) : subject_(std::move(subject)) {}
 
 void Model::add_signal(Signal s) { signals_.push_back(std::move(s)); }
 
+void Model::use_case(std::shared_ptr<Case> c, std::shared_ptr<CaseTarget> t) {
+    case_ = std::move(c);
+    case_target_ = std::move(t);
+}
+
 void Model::collect() {
-    // 既定では何もしない。信号は呼び出し側 (CLI) が事実だけを渡す。
-    // ここを空にしておくことで「モデルが事実を作らない」ことを保証する。
+    // 案件があるなら、観測はその案件に任せる。
+    // 案件が無い場合は外から add_signal された事実だけを使う
+    // (モデルが事実を作らないことを保証する)。
+    if (case_ && case_target_) case_->collect(*case_target_, signals_);
 }
 
 // ------------------------------------------------------------------
@@ -49,6 +57,7 @@ void Model::collect() {
 // ------------------------------------------------------------------
 void Model::analyze() {
     findings_.clear();
+    if (case_) { case_->analyze(signals_, findings_); build_advice(); return; }
 
     // 1) 壊れた (閉じられない) 対象
     {
@@ -139,6 +148,11 @@ void Model::analyze() {
 // ------------------------------------------------------------------
 void Model::plan() {
     plan_ = Plan();
+    if (case_) {
+        case_->plan(findings_, plan_.steps);
+        if (!plan_.steps.empty()) topo_sort();
+        return;
+    }
     std::set<std::string> have;
     for (const auto &f : findings_) have.insert(f.id);
 
@@ -242,25 +256,33 @@ void Model::topo_sort() {
             plan_.error = "cycle or missing dependency in plan";
             return;
         }
-        // 同じ段に入れられるものは入れる (並列化)。ただし
-        // 相互に代替関係にある step は同段に置き、fallback として扱う。
+        // 同じ段に入れられるものは入れる (並列化)。
+        // 相互に代替関係にある step は**同じ段**に置いて fallback として扱う。
+        // 片方が前提を待つために別段へ落ちると「代替」の意味が消えるので、
+        // 代替相手が同段に居るなら前提を満たしたものとみなす。
         Group g;
-        std::set<std::string> claimed;
         for (const auto &id : ready) {
-            const Step &s = plan_.steps[idx[id]];
-            bool conflict = false;
-            for (const auto &c : claimed)
-                for (const auto &a : s.alternatives)
-                    if (a == c) conflict = true;
-            for (const auto &a : s.alternatives)
-                if (claimed.count(a)) conflict = true;
-            if (conflict && g.kind != OrderKind::Fallback) {
-                // 代替同士は同じ段にまとめる
-                g.kind = OrderKind::Fallback;
-            }
             g.steps.push_back(id);
-            claimed.insert(id);
             done.insert(id);
+        }
+        // 代替の相手が次段に落ちる場合は、同段へ引き上げる。
+        bool pulled = true;
+        while (pulled) {
+            pulled = false;
+            for (const auto &id : g.steps) {
+                for (const auto &a : plan_.steps[idx[id]].alternatives) {
+                    if (done.count(a)) continue;
+                    const Step &as = plan_.steps[idx[a]];
+                    // 相手の前提が、すべてこの段で満たされるなら引き上げる
+                    bool ok = true;
+                    for (const auto &r : as.requires)
+                        if (!done.count(r)) ok = false;
+                    if (!ok) continue;
+                    g.steps.push_back(a);
+                    done.insert(a);
+                    pulled = true;
+                }
+            }
         }
         g.attempted = (int)g.steps.size();
         plan_.order.push_back(g);
@@ -930,4 +952,101 @@ extern "C" int nx_plan_repair(const char *state_path, FILE *out) {
     }
     std::fprintf(out, "  [repair] max rounds reached\n");
     return 1;
+}
+
+// ==================================================================
+// 案件を使った自発解析: 対象に合う案件を選び、逐次に試す
+// ==================================================================
+
+extern "C" int nx_plan_analyze_case(const char *kind, const char *path,
+                                    const char *case_name, FILE *out) {
+    if (!out) out = stdout;
+    nx::register_builtin_cases();
+
+    nx::CaseTarget target;
+    target.kind = kind ? kind : "app";
+    target.path = path ? path : "";
+
+    std::vector<std::shared_ptr<nx::Case>> chosen;
+    if (case_name && *case_name) {
+        auto c = nx::CaseRegistry::instance().by_name(case_name);
+        if (c) chosen.push_back(c);
+    } else {
+        chosen = nx::CaseRegistry::instance().match(target);
+    }
+
+    if (chosen.empty()) {
+        std::fprintf(out, "  [case] no case applies to %s (%s)\n",
+                     target.path.c_str(), target.kind.c_str());
+        std::fprintf(out, "  [case] known cases:");
+        for (const auto &c : nx::CaseRegistry::instance().all())
+            std::fprintf(out, " %s", c->name());
+        std::fprintf(out, "\n");
+        return 2;
+    }
+
+    int rc = 0;
+    // 逐次に試す。最初に手を打てる案件を採用し、他は記録だけ残す。
+    for (const auto &c : chosen) {
+        auto t = std::make_shared<nx::CaseTarget>(target);
+        nx::Model m(target.path);
+        m.use_case(c, t);
+        m.collect();
+        m.analyze();
+        m.plan();
+        m.verify();
+
+        nx::Verdict v = m.evaluate();
+        std::fprintf(out, "=== case: %s ===\n", c->name());
+        std::fprintf(out, "observed_at=%s\n", nx_now_iso().c_str());
+        std::fprintf(out, "signals (%zu):\n", m.signals().size());
+        for (const auto &s : m.signals())
+            std::fprintf(out, "  %-28s %-9s %-10s %s\n", s.id.c_str(),
+                         s.persistence == nx::Persistence::Durable ? "durable" : "transient",
+                         s.observed ? "observed" : "missing", s.value.c_str());
+
+        std::fprintf(out, "findings (%zu):\n", m.findings().size());
+        for (const auto &f : m.findings()) {
+            std::fprintf(out, "  %-24s sev=%.2f fixable=%s  %s\n", f.id.c_str(),
+                         f.severity, f.fixable ? "yes" : "no", f.summary.c_str());
+            for (const auto &e : f.evidence)
+                std::fprintf(out, "      evidence: %s\n", e.c_str());
+        }
+
+        std::fprintf(out, "plan (%zu steps, %zu stages):\n",
+                     m.make_plan().steps.size(), m.make_plan().order.size());
+        int stage = 1;
+        for (const auto &g : m.make_plan().order) {
+            const char *k = g.kind == nx::OrderKind::Parallel   ? "parallel"
+                            : g.kind == nx::OrderKind::Fallback ? "fallback"
+                                                            : "sequential";
+            std::fprintf(out, "  stage %d (%s):\n", stage++, k);
+            for (const auto &id : g.steps)
+                for (const auto &s : m.make_plan().steps) {
+                    if (s.id != id) continue;
+                    std::fprintf(out, "    %-26s %s%s\n", s.id.c_str(), s.action.c_str(),
+                                 s.approved ? "  [needs approval]" : "");
+                    if (!s.requires.empty()) {
+                        std::fprintf(out, "      requires:");
+                        for (const auto &r : s.requires) std::fprintf(out, " %s", r.c_str());
+                        std::fprintf(out, "\n");
+                    }
+                    if (!s.alternatives.empty()) {
+                        std::fprintf(out, "      fallback:");
+                        for (const auto &a : s.alternatives) std::fprintf(out, " %s", a.c_str());
+                        std::fprintf(out, "\n");
+                    }
+                }
+        }
+
+        std::fprintf(out, "VERDICT=%s\n",
+                     v == nx::Verdict::NeedsFix ? "NEEDS_FIX"
+                     : v == nx::Verdict::Healthy ? "HEALTHY" : "UNKNOWN");
+        std::fprintf(out, "confidence=%.2f  (%s)\n", m.confidence().score,
+                     m.confidence().basis.c_str());
+        for (const auto &s : m.advice().steps) std::fprintf(out, "  - %s\n", s.c_str());
+        std::fprintf(out, "\n");
+        if (v == nx::Verdict::NeedsFix) rc = 1;
+    }
+    return rc;
 }
