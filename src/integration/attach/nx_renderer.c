@@ -72,15 +72,33 @@ int nx_renderer_eval_js(const nx_renderer_opts_t *opts, const char *payload_js,
     }
     fprintf(out, "  [renderer] inspector up on :%d\n", io.port ? io.port : 9229);
 
+    /* main プロセスの inspector 経由で式を送る。main には localStorage が
+       無いが、ここでは executeJavaScript を仕掛けるだけなので main でよい。 */
     if (nx_inspect_eval(io.port, expr, out) != 0) { free(expr); return -1; }
     free(expr);
 
-    /* 非同期結果 __NX_RESULT を読む。値が入るまで少し待って再試行。 */
+    /* 非同期結果 __NX_RESULT を読む。値が入るまで少し待って再試行する。
+       以前はここで結果を捨てていたため、renderer 側の失敗
+       (localStorage が null / store 未解決 / 例外) が全く見えず、
+       「成功したように見えて何も変わらない」状態になっていた。 */
     const char *poll = "globalThis.__NX_RESULT";
-    for (int i = 0; i < 30; i++) {
-        nx_inspect_eval(io.port, poll, out);
-        struct timespec ts = { 0, 200 * 1000 * 1000 };
+    int got = 0;
+    for (int i = 0; i < 40; i++) {
+        char *res = NULL;
+        if (nx_inspect_eval_capture(io.port, poll, &res, NULL) == 0) {
+            if (res && *res && strcmp(res, "null") != 0) {
+                fprintf(out, "  [renderer] result: %s\n", res);
+                /* 明らかな失敗は呼び出し側に伝える */
+                int bad = strstr(res, "\"err\"") || strstr(res, "store asset not loaded");
+                free(res);
+                got = 1;
+                return bad ? -1 : 0;
+            }
+        }
+        free(res);
+        struct timespec ts = { 0, 150 * 1000 * 1000 };
         nanosleep(&ts, NULL);
     }
-    return 0;
+    if (!got) fprintf(out, "  [renderer] no result (renderer did not report back)\n");
+    return got ? 0 : -1;
 }

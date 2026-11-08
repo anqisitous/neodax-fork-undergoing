@@ -21,6 +21,8 @@ CORE_SRCS = \
 	core/macho_static.c \
 	integration/nx_decode.c
 
+
+CORE_SRCS += integration/nx_update.c integration/nx_asar_patch.c
 # 旧 neodax エンジンのデコーダ。src/ 直下が正準で、framework もこれを compose する。
 LEGACY_SRCS = \
 	arm64_decode.c \

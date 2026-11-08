@@ -241,6 +241,47 @@ int nx_state_list_keys(const char *dir, const char *key_hint,
     return u.n;
 }
 
+/* ストア全体で観測された最大 seq (key_hint で絞り込み可)。 */
+typedef struct {
+    unsigned long long max_seq;
+    const char        *hint;
+} maxseq_ud_t;
+
+static void maxseq_cb(const char *key, size_t klen, const unsigned char *val,
+                      size_t vlen, unsigned long long seq, void *ud) {
+    (void)val; (void)vlen;
+    maxseq_ud_t *u = (maxseq_ud_t *)ud;
+    if (!key || !klen) return;
+    if (u->hint && !memfind(key, klen, u->hint, strlen(u->hint))) return;
+    if (seq > u->max_seq) u->max_seq = seq;
+}
+
+unsigned long long nx_state_max_seq(const char *dir, const char *key_hint) {
+    struct stat stt;
+    if (!dir || stat(dir, &stt) != 0) return 0;
+    maxseq_ud_t u;
+    memset(&u, 0, sizeof(u));
+    u.hint = key_hint;
+
+    if (S_ISDIR(stt.st_mode)) {
+        DIR *d = opendir(dir);
+        if (!d) return 0;
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.') continue;
+            if (!ends_with(e->d_name, ".ldb") && !ends_with(e->d_name, ".log"))
+                continue;
+            char fp[4096];
+            snprintf(fp, sizeof(fp), "%s/%s", dir, e->d_name);
+            nx_leveldb_scan_file(fp, maxseq_cb, &u);
+        }
+        closedir(d);
+    } else if (ends_with(dir, ".ldb") || ends_with(dir, ".log")) {
+        nx_leveldb_scan_file(dir, maxseq_cb, &u);
+    }
+    return u.max_seq;
+}
+
 char *nx_state_find_key(const char *dir, const char *key_hint,
                         size_t *out_key_len) {
     if (out_key_len) *out_key_len = 0;
@@ -314,4 +355,49 @@ char *nx_state_find_tabs_json(const char *path, const char *key_hint,
     if (win != &ldb) free(ldb.best), free(ldb.origin);
     if (win != &raw) free(raw.best), free(raw.origin);
     return result;
+}
+
+/* key_hint を含む key が今も生きているか (削除レコードを尊重) */
+typedef struct {
+    const char        *hint;
+    unsigned long long best_seq;
+    int                best_deleted;
+    int                seen;
+} live_ud_t;
+
+static void live_cb(const char *key, size_t klen, const unsigned char *val,
+                    size_t vlen, unsigned long long seq, void *ud) {
+    live_ud_t *u = (live_ud_t *)ud;
+    if (!key || !klen) return;
+    if (u->hint && !memfind(key, klen, u->hint, strlen(u->hint))) return;
+    if (!u->seen || seq >= u->best_seq) {
+        u->seen = 1;
+        u->best_seq = seq;
+        u->best_deleted = (val == NULL || vlen == 0);
+    }
+}
+
+int nx_state_key_is_live(const char *dir, const char *key_hint) {
+    struct stat stt;
+    if (!dir || stat(dir, &stt) != 0) return 0;
+    live_ud_t u;
+    memset(&u, 0, sizeof(u));
+    u.hint = key_hint;
+    if (S_ISDIR(stt.st_mode)) {
+        DIR *d = opendir(dir);
+        if (!d) return 0;
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.') continue;
+            if (!ends_with(e->d_name, ".ldb") && !ends_with(e->d_name, ".log"))
+                continue;
+            char fp[4096];
+            snprintf(fp, sizeof(fp), "%s/%s", dir, e->d_name);
+            nx_leveldb_scan_file(fp, live_cb, &u);
+        }
+        closedir(d);
+    } else if (ends_with(dir, ".ldb") || ends_with(dir, ".log")) {
+        nx_leveldb_scan_file(dir, live_cb, &u);
+    }
+    return (u.seen && !u.best_deleted) ? 1 : 0;
 }

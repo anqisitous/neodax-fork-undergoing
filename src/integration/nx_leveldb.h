@@ -42,6 +42,12 @@ int nx_leveldb_append_kv(const char *dir, const char *key, size_t klen,
                          const unsigned char *val, size_t vlen,
                          unsigned long long seq, const char *log_path, FILE *out);
 
+/* key を削除 (kTypeDeletion) として WAL に追記する。
+   空値の書き込みではなく、LevelDB 本来の削除レコードを書く。 */
+int nx_leveldb_append_delete(const char *dir, const char *key, size_t klen,
+                             unsigned long long seq, const char *log_path,
+                             FILE *out);
+
 #ifdef __cplusplus
 }
 #endif

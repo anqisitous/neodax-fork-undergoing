@@ -140,6 +140,94 @@ static char *http_get(int port, const char *path, size_t *out_len) {
     return body;
 }
 
+/* /json/list の各エントリのうち、"url" に substr を含む (または substr が
+   NULL なら最初の) ものの webSocketDebuggerUrl を返す。
+
+   なぜ必要か: Electron の inspector は main プロセスの inspector に集約され、
+   /json/list の先頭は main プロセス自身になる。main には DOM も localStorage
+   も無いので、そこへ localStorage 操作を投げても何も起きず、しかも失敗が
+   見えない (常に"sent")。描画側 (renderer, deepai-code://app) を明示的に
+   選ぶ必要がある。 */
+static char *extract_ws_url(const char *json);
+
+static char *extract_ws_url_for(const char *json, const char *substr) {
+    const char *cur = json;
+    while (cur && *cur) {
+        /* 1 エントリ = 1 つの { ... } (ネストしない前提でざっと括る) */
+        const char *open = strchr(cur, '{');
+        if (!open) break;
+        int depth = 0, in_str = 0, esc = 0;
+        const char *k = open;
+        for (; *k; k++) {
+            char c = *k;
+            if (in_str) {
+                if (esc) esc = 0;
+                else if (c == '\\') esc = 1;
+                else if (c == '"') in_str = 0;
+                continue;
+            }
+            if (c == '"') { in_str = 1; continue; }
+            if (c == '{') depth++;
+            else if (c == '}') { depth--; if (depth == 0) { k++; break; } }
+        }
+        size_t elen = (size_t)(k - open);
+        char *entry = (char *)malloc(elen + 1);
+        if (!entry) return NULL;
+        memcpy(entry, open, elen);
+        entry[elen] = 0;
+
+        int match = 1;
+        if (substr && *substr) {
+            match = strstr(entry, substr) != NULL;
+        }
+        char *ws = match ? extract_ws_url(entry) : NULL;
+        /* 既に ws を持つ最初のエントリが条件に合えばそれを採用 */
+        if (ws) { free(entry); return ws; }
+        free(entry);
+        cur = k;
+    }
+    return NULL;
+}
+
+/* Runtime.evaluate 応答から result.result.value (文字列) を取り出す。
+   CDP は値を二重に JSON エスケープして返すので、素直に取り出して戻す。 */
+static char *extract_result_value(const char *resp) {
+    if (!resp) return NULL;
+    const char *k = strstr(resp, "\"result\"");
+    if (!k) return NULL;
+    k += strlen("\"result\"");
+    /* "result":{"type":"string","value":"..."} を探す */
+    const char *v = strstr(k, "\"value\"");
+    if (!v) {
+        /* "value" が無い (undefined) 場合は description で代用 */
+        const char *d = strstr(k, "\"description\"");
+        if (!d) return NULL;
+        v = d;
+    }
+    v += (strncmp(v, "\"value\"", 7) == 0) ? 7 : strlen("\"description\"");
+    while (*v == ' ' || *v == '\t') v++;
+    if (*v != ':') return NULL;
+    v++;
+    while (*v == ' ' || *v == '\t') v++;
+    if (*v != '"') return NULL;
+    v++;
+    /* JSON 文字列の本文を、エスケープされたまま複製する。
+       デコードしてから終端を探すと、値の中の \" を終端と誤認して
+       途中で切れる (実際に { で切れていた)。 */
+    size_t cap = strlen(v) + 1;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    size_t o = 0, esc = 0;
+    for (; *v; v++) {
+        if (esc) { out[o++] = *v; esc = 0; continue; }
+        if (*v == '\\') { out[o++] = *v; esc = 1; continue; }
+        if (*v == '"') break;
+        out[o++] = *v;
+    }
+    out[o] = 0;
+    return out;
+}
+
 static char *extract_ws_url(const char *json) {
     const char *k = strstr(json, "\"webSocketDebuggerUrl\"");
     if (!k) return NULL;
@@ -305,7 +393,62 @@ int nx_inspect_start(long pid, int port, int wait_ms, FILE *out) {
     return -1;
 }
 
-int nx_inspect_eval(int port, const char *expression, FILE *out) {
+int nx_inspect_eval_capture(int port, const char *expression,
+                            char **value_out, const char *target_hint) {
+    if (value_out) *value_out = NULL;
+    if (port <= 0) port = 9229;
+    if (!expression) return -1;
+
+    size_t n = 0;
+    char *list = http_get(port, "/json/list", &n);
+    if (!list) return -1;
+    char *wsurl = extract_ws_url_for(list, target_hint);
+    if (!wsurl) wsurl = extract_ws_url(list);
+    free(list);
+    if (!wsurl) return -1;
+
+    char host[64] = "127.0.0.1"; int wport = port; char path[1024] = "/";
+    char *p = wsurl;
+    if (strncmp(p, "ws://", 5) == 0) p += 5;
+    char *slash = strchr(p, '/');
+    if (slash) { snprintf(path, sizeof(path), "%s", slash); *slash = 0; }
+    char *colon = strrchr(p, ':');
+    if (colon) { wport = atoi(colon + 1); *colon = 0; }
+    snprintf(host, sizeof(host), "%s", p);
+    int fd = ws_connect(host, wport, path);
+    free(wsurl);
+    if (fd < 0) return -1;
+
+    char *exjson = json_escape(expression);
+    if (!exjson) { close(fd); return -1; }
+    size_t rcap = strlen(exjson) + 256;
+    char *req = (char *)malloc(rcap);
+    if (!req) { free(exjson); close(fd); return -1; }
+    snprintf(req, rcap,
+        "{\"id\":1,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":%s,\"returnByValue\":true,\"awaitPromise\":true}}",
+        exjson);
+    free(exjson);
+    if (ws_send_text(fd, req) != 0) { free(req); close(fd); return -1; }
+    free(req);
+
+    char *result = NULL;
+    for (int i = 0; i < 40; i++) {
+        char *resp = ws_recv_text(fd);
+        if (!resp) break;
+        if (strstr(resp, "\"id\":1")) { result = resp; break; }
+        free(resp);
+        sleep_ms(100);
+    }
+    close(fd);
+    if (!result) return -1;
+    char *val = extract_result_value(result);
+    free(result);
+    if (value_out) *value_out = val; else free(val);
+    return 0;
+}
+
+int nx_inspect_eval_target(int port, const char *expression,
+                           const char *target_hint, FILE *out) {
     if (!out) out = stdout;
     if (port <= 0) port = 9229;
     if (!expression) return -1;
@@ -353,9 +496,23 @@ int nx_inspect_eval(int port, const char *expression, FILE *out) {
     }
     close(fd);
     if (!result) { fprintf(out, "  [inspect] no response\n"); return -1; }
-    fprintf(out, "  [inspect] %s\n", result);
+
+    /* 実際の評価結果を取り出す。以前は応答全体を出していたため、
+       main プロセスで localStorage が無い等の例外を見逃していた。 */
+    char *val = extract_result_value(result);
+    if (strstr(result, "\"exceptionDetails\"")) {
+        fprintf(out, "  [inspect] EXCEPTION: %s\n", val ? val : "(no value)");
+        free(val); free(result);
+        return -1;
+    }
+    fprintf(out, "  [inspect] %s\n", val ? val : result);
+    free(val);
     free(result);
     return 0;
+}
+
+int nx_inspect_eval(int port, const char *expression, FILE *out) {
+    return nx_inspect_eval_target(port, expression, NULL, out);
 }
 
 int nx_inspect_run(const nx_inspect_opts_t *opts, const char *expression,

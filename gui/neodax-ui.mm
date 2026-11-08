@@ -388,19 +388,45 @@ static int write_fixed_to_leveldb(const char *state_path, const char *key_hint,
     }
     printf("\n");
 
-    /* 既存最大 seq より大きい seq を選ぶ */
+    /* 既存最大 seq より「1 だけ大きい」seq を選ぶ。
+       以前は 1000000000 固定だったが、LevelDB は key ごとに最大 seq を
+       保持するため、実 seq (数千) より桁違いに大きい値を書くと、以降
+       アプリ自身の書き込みが「古い」と判定されて無視される。
+       その状態では neodax の値が永久に勝ち続け、アプリ側の変更が
+       一切永続化されなくなる。 */
     size_t vlen = strlen(fixed);
-    unsigned long long seq = 1000000000ULL; /* 通常の seq より十分大きい */
+    unsigned long long observed = nx_state_max_seq(dir, key_hint);
+    unsigned long long seq = observed + 1;
+    printf("  [apply] seq: observed max=%llu -> writing %llu\n", observed, seq);
     int rc = live
         ? nx_leveldb_append_kv(dir, key, klen, (const unsigned char *)fixed, vlen,
                                seq, NULL, stdout)
         : nx_leveldb_write_kv(dir, key, klen, (const unsigned char *)fixed, vlen,
                               seq, "000999_nxfix.log", stdout);
-    if (rc == 0) {
-        printf("  [apply] done.%s\n", live ? " (live WAL append)" : " (offline write)");
-    } else {
+    if (rc != 0) {
         printf("  [apply] write failed%s\n", live ? " (WAL not writable?)" : " (leveldb locked?)");
+        free(key);
+        return rc;
     }
+    printf("  [apply] done.%s\n", live ? " (live WAL append)" : " (offline write)");
+
+    /* 書いただけで成功とみなさない。ストアを読み直して、
+       意図した値が実際に解決されることを確かめる。
+       以前はここを確認していなかったため、壊れた追記でも
+       「persisted」と表示してしまうことがあった。 */
+    char *verify = nx_deepai_load_state(dir);
+    int ok = verify && strcmp(verify, fixed) == 0;
+    if (ok) {
+        printf("  [apply] verified: store now resolves to the written value\n");
+    } else if (verify) {
+        printf("  [apply] VERIFY FAILED: store resolves to a different value "
+               "(len %zu vs written %zu)\n", strlen(verify), vlen);
+        rc = -1;
+    } else {
+        printf("  [apply] VERIFY FAILED: store no longer resolves at all\n");
+        rc = -1;
+    }
+    free(verify);
     free(key);
     return rc;
 }
@@ -427,6 +453,124 @@ static void cmd_apply(const char *state_path, const char *key_hint,
     write_fixed_to_leveldb(state_path, key_hint, fixed, live);
     free(fixed);
     free(state);
+}
+
+/* 指定 id のタブを「無条件に」永続層から削除し、稼働中ストアにも反映する。
+
+   なぜ apply では足りないか:
+     - fix / apply(stale) / heal は「所有者スレッドが死んでいる surface」しか
+       対象にしない。所有者スレッドが生きているタブは nrem=0 になり、
+       何も書き込まれない。ユーザーが × で閉じられないタブはまさにこの
+       ケースなので、永久に消えない。
+     - 永続層だけ直しても、稼働中 renderer がメモリに持った状態を次の
+       persist で書き戻すため復活する。
+   よって「id 指定の無条件削除 + 永続層 + メモリ」を一度に行う。 */
+extern "C" int nx_advise_tabs(const char *source, const char *state_json,
+                             const char *check_id, FILE *out);
+extern "C" int nx_advise_tab_can_delete(const char *state_json, const char *id,
+                                     char *why_out, size_t why_cap);
+
+/* 自発解析: 対象 (store / 状態ファイル) から事実を集めて計画まで出す。
+   特定のタブ名に依存しない。CLI はこの 1 関数だけを呼ぶ。 */
+extern "C" int nx_plan_analyze_store(const char *state_path, FILE *out);
+extern "C" int nx_plan_repair(const char *state_path, FILE *out);
+static void cmd_delete(const char *state_path, const char *tab_id,
+                       const char *app, const char *store, const char *key,
+                       int live, int no_store_sync, int force) {
+    if (!tab_id) { printf("delete: --id required\n"); return; }
+
+    char *state = nx_deepai_load_state(state_path);
+    if (!state) { printf("ERROR: no state at %s\n", state_path); return; }
+
+    /* 0) 消す前に「壊れている根拠」を確かめる。
+          ここを飛ばして削除するのが以前の失敗だった。
+          所有者スレッドが生きている surface は壊れていないので、
+          勝手に消してはいけない (アプリが自分で閉じられる)。 */
+    printf("  [delete] advisory (before touching anything):\n");
+    nx_advise_tabs(state_path, state, NULL, stdout);
+    {
+        char why[256] = {0};
+        int ok = nx_advise_tab_can_delete(state, tab_id, why, sizeof(why));
+        if (!ok && !force) {
+            printf("  [delete] REFUSED: %s\n", why);
+            printf("  [delete] このタブは壊れていないため削除しません。\n");
+            printf("  [delete] それでも消すなら --force を付けてください。\n");
+            free(state);
+            return;
+        }
+        if (!ok && force) {
+            printf("  [delete] forced despite: %s\n", why);
+        } else {
+            printf("  [delete] removable: %s\n", why);
+        }
+    }
+
+    char *fixed = NULL;
+    int nrem = 0;
+    if (nx_deepai_remove_tab_json(state, strlen(state), tab_id, &fixed, &nrem,
+                                  stdout) != 0) {
+        printf("ERROR: cannot build fixed state\n");
+        free(state);
+        return;
+    }
+    free(state);
+    printf("  [delete] tabs removed: %d (id=%s)\n", nrem, tab_id);
+    if (nrem == 0) {
+        /* 本体にはもう居ない。ただし退避コピーに残っている可能性があるので
+           そちらは掃除する (残っていれば別の経路で復活しうる)。 */
+        printf("  [delete] id not present in current state; checking backups\n");
+        free(fixed);
+        fixed = NULL;
+    }
+
+    /* 1) 永続層 (LevelDB)。seq は実 max+1 を使う。 */
+    int rc = -1;
+    if (fixed) rc = write_fixed_to_leveldb(state_path, key, fixed, live);
+
+    /* 1b) 退避コピー (<key>.nx-backup) を tombstone で消す。
+            古いタブを抱えたまま残っていると、復元経路によっては
+            そこから戻る。これも「消したのに復活する」の一因。 */
+    {
+        char dir[4096];
+        snprintf(dir, sizeof(dir), "%s", state_path);
+        NSFileManager *fm2 = [NSFileManager defaultManager];
+        BOOL d2 = NO;
+        [fm2 fileExistsAtPath:[NSString stringWithUTF8String:state_path] isDirectory:&d2];
+        if (!d2) {
+            char *sl = strrchr(dir, '/');
+            if (sl) *sl = '\0';
+        }
+        char **bkeys = NULL;
+        size_t *blens = NULL;
+        int nb = nx_state_list_keys(dir, "nx-backup", &bkeys, &blens, 16);
+        if (nb > 0) {
+            unsigned long long bseq = nx_state_max_seq(dir, NULL) + 1;
+            for (int i = 0; i < nb; i++) {
+                if (nx_leveldb_append_delete(dir, bkeys[i], blens[i], bseq++, NULL,
+                                             stdout) == 0)
+                    printf("  [delete] purged backup copy (key #%d)\n", i);
+            }
+        }
+        for (int i = 0; i < nb; i++) free(bkeys[i]);
+        free(bkeys);
+        free(blens);
+    }
+
+    /* 2) 稼働中ストア (reload せず、メモリ側も同じ値にする)。
+          これをしないと次の persist で復活する。 */
+    if (!no_store_sync && fixed) {
+        nx_appfix_profile_t prof = *nx_appfix_default_profile();
+        if (app) prof.app_name = app;
+        if (store) prof.store_substr = store;
+        if (key) prof.key = key;
+        printf("  [delete] syncing live store (no reload)\n");
+        nx_appfix_apply(&prof, fixed, strlen(fixed), stdout);
+    }
+
+    printf("  [delete] %s\n",
+           fixed ? (rc == 0 ? "persisted" : "PERSIST FAILED")
+                 : "nothing to persist (backups checked)");
+    free(fixed);
 }
 
 /* 閉じられない surface タブを検出するだけ (変更しない)。 */
@@ -735,6 +879,8 @@ static void cmd_serve(void) {
             if (rest1 && rest2) nx_deepai_remove_tab_path(rest1, rest2, stdout);
         } else if (strcmp(cmd, "fix") == 0) {
             if (rest1) nx_deepai_fix_path(rest1, stdout);
+        } else if (strcmp(cmd, "delete") == 0) {
+            if (rest1 && rest2) cmd_delete(rest1, rest2, NULL, NULL, NULL, 1, 0, 0);
         } else if (strcmp(cmd, "replay") == 0) {
             cmd_replay(rest1, rest2);
         } else if (strcmp(cmd, "apply") == 0) {
@@ -772,6 +918,18 @@ static void usage(void) {
         "  display [--app NAME] [-o FILE] [--state PATH]\n"
         "  tabs     --state PATH\n"
         "  close    --state PATH --id ID\n"
+        "  repair   --state PATH\n"
+        "           1 つの永続手続き: 観測→計画→段順に実行→再観測 を健全になるまで繰り返す\n"
+        "  plan     --state PATH\n"
+        "           自発解析。事実→問題→計画 (順序と並列/代替)→自信 を出す。変更しない。\n"
+        "           特定のタブ名に依存せず、観測から「何を・どの順で直すか」を組み立てる\n"
+        "  advise   --state PATH [--id ID]\n"
+        "           壊れているかを先に判定する (変更はしない)。\n"
+        "           orphan surface = 閉じられない / live surface = アプリが自分で閉じられる\n"
+        "  delete   --state PATH --id ID [--live] [--force] [--no-store-sync] [--app NAME]\n"
+        "           先に advise と同じ判定を行い、壊れている (owner 不在) ときだけ削除する。\n"
+        "           live surface / chat は拒否する。--force でその限りでなく実行。\n"
+        "           永続層へ書き込み、同時に稼働中ストアも同じ値にする (reload なし)\n"
         "  fix      --state PATH\n"
         "  check    --state PATH                    閉じられない surface タブを検出 (変更なし)\n"
         "  heal     --state PATH [--app NAME] [--store SUBSTR] [--key HINT] [--dry-run]\n"
@@ -817,6 +975,32 @@ int main(int argc, char **argv) {
             const char *id = flag(argc, argv, "--id");
             if (!st || !id) { fprintf(stderr, "close: --state --id required\n"); return 1; }
             return nx_deepai_remove_tab_path(st, id, stdout);
+        } else if (strcmp(cmd, "delete") == 0) {
+            const char *st = flag(argc, argv, "--state");
+            const char *id = flag(argc, argv, "--id");
+            if (!st) { fprintf(stderr, "delete: --state required\n"); return 1; }
+            if (!id) { fprintf(stderr, "delete: --id required\n"); return 1; }
+            cmd_delete(st, id, flag(argc, argv, "--app"),
+                       flag(argc, argv, "--store"), flag(argc, argv, "--key"),
+                       has_flag(argc, argv, "--live"),
+                       has_flag(argc, argv, "--no-store-sync"),
+                       has_flag(argc, argv, "--force"));
+        } else if (strcmp(cmd, "plan") == 0) {
+            const char *st = flag(argc, argv, "--state");
+            if (!st) { fprintf(stderr, "plan: --state required\n"); return 1; }
+            return nx_plan_analyze_store(st, stdout) == 0 ? 0 : 1;
+        } else if (strcmp(cmd, "repair") == 0) {
+            const char *st = flag(argc, argv, "--state");
+            if (!st) { fprintf(stderr, "repair: --state required\n"); return 1; }
+            return nx_plan_repair(st, stdout) == 0 ? 0 : 1;
+        } else if (strcmp(cmd, "advise") == 0) {
+            const char *st = flag(argc, argv, "--state");
+            if (!st) { fprintf(stderr, "advise: --state required\n"); return 1; }
+            char *js = nx_deepai_load_state(st);
+            if (!js) { printf("ERROR: no state at %s\n", st); return 1; }
+            int rc = nx_advise_tabs(st, js, flag(argc, argv, "--id"), stdout);
+            free(js);
+            return rc == 2 ? 1 : 0;
         } else if (strcmp(cmd, "fix") == 0) {
             const char *st = flag(argc, argv, "--state");
             if (!st) { fprintf(stderr, "fix: --state required\n"); return 1; }

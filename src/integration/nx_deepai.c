@@ -110,7 +110,15 @@ static void asar_walk(const nx_json_t *files, const char *prefix,
         memset(&e, 0, sizeof(e));
         e.path = x_strdup(path);
         e.size = (size_t)nx_json_number(size, 0);
-        e.offset = (size_t)nx_json_number(nx_json_get(child, "offset"), 0);
+        // asar は offset を「文字列」で格納することがある ("82206")。
+        // nx_json_number は数値型しか見ないので、文字列なら自前で変換する。
+        {
+            const nx_json_t *ov = nx_json_get(child, "offset");
+            if (ov && ov->type == NX_JSON_STR)
+                e.offset = (size_t)strtoull(nx_json_str(ov), NULL, 10);
+            else
+                e.offset = (size_t)nx_json_number(ov, 0);
+        }
         nx_asar_entry_t *ne = (nx_asar_entry_t *)realloc(
             a->entries, (a->n_entries + 1) * sizeof(*ne));
         if (!ne) { free(e.path); return; }

@@ -190,6 +190,209 @@ void LoginModel::build_capabilities() {
     };
 }
 
+// ------------------------------------------------------------------
+// TabModel
+// ------------------------------------------------------------------
+
+TabModel::TabModel(std::string state_json, std::string source)
+    : json_(std::move(state_json)), source_(std::move(source)) {
+    char ts[32] = {0};
+    std::time_t now = std::time(NULL);
+    std::strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", std::localtime(&now));
+    observed_at_ = ts;
+}
+
+namespace {
+
+// 最小限の JSON フィールド取り出し。オブジェクト境界を自前で括るので、
+// 外部パーサに依存しない (この助言器は単体でリンクできる必要がある)。
+std::string field(const std::string &o, const std::string &key) {
+    std::string pat = "\"" + key + "\"";
+    size_t p = o.find(pat);
+    if (p == std::string::npos) return {};
+    p = o.find(':', p + pat.size());
+    if (p == std::string::npos) return {};
+    p++;
+    while (p < o.size() && std::isspace((unsigned char)o[p])) p++;
+    if (p >= o.size() || o[p] != '"') return {};
+    p++;
+    std::string out;
+    bool esc = false;
+    for (; p < o.size(); p++) {
+        char c = o[p];
+        if (esc) { out += c; esc = false; continue; }
+        if (c == '\\') { esc = true; continue; }
+        if (c == '"') break;
+        out += c;
+    }
+    return out;
+}
+
+// 指定位置の '{' に対応する '}' の次を返す。
+size_t obj_end(const std::string &s, size_t open) {
+    int depth = 0, in_str = 0, esc = 0;
+    for (size_t i = open; i < s.size(); i++) {
+        char c = s[i];
+        if (in_str) {
+            if (esc) esc = 0;
+            else if (c == '\\') esc = 1;
+            else if (c == '"') in_str = 0;
+            continue;
+        }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '{') depth++;
+        else if (c == '}') { depth--; if (depth == 0) return i + 1; }
+    }
+    return s.size();
+}
+
+} // namespace
+
+void TabModel::collect() {
+    tabs_.clear();
+    orphans_ = live_surfaces_ = 0;
+
+    // 1) tabs 配列の範囲を決める
+    size_t tp = json_.find("\"tabs\"");
+    if (tp == std::string::npos) { build_advice(); build_capabilities(); return; }
+    size_t lb = json_.find('[', tp);
+    if (lb == std::string::npos) { build_advice(); build_capabilities(); return; }
+
+    // 2) 各タブのオブジェクトを切り出す。
+    //    tabs 配列の直下にある要素だけを対象にするため、
+    //    配列の深さ (arr) とオブジェクトの深さ (obj) を別々に数える。
+    std::vector<std::string> objs;
+    int arr = 0, obj = 0, in_str = 0, esc = 0;
+    size_t start = 0;
+    for (size_t i = lb; i < json_.size(); i++) {
+        char c = json_[i];
+        if (in_str) {
+            if (esc) esc = 0;
+            else if (c == '\\') esc = 1;
+            else if (c == '"') in_str = 0;
+            continue;
+        }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '[') { arr++; continue; }
+        if (c == ']') { arr--; if (arr == 0) break; continue; }
+        if (c == '{') {
+            if (arr == 1 && obj == 0) start = i;   /* 配列直下の要素の開始 */
+            obj++;
+            continue;
+        }
+        if (c == '}') {
+            obj--;
+            if (arr == 1 && obj == 0 && start) {
+                objs.push_back(json_.substr(start, i - start + 1));
+                start = 0;
+            }
+            continue;
+        }
+    }
+
+    // 3) 生存スレッド (chat タブ) を集める
+    std::vector<std::pair<std::string, std::string>> live;
+    for (const auto &o : objs) {
+        if (field(o, "kind") != "chat") continue;
+        size_t tr = o.find("\"threadRef\"");
+        if (tr == std::string::npos) continue;
+        std::string tref = o.substr(tr, obj_end(o, o.find('{', tr)) - tr);
+        live.emplace_back(field(tref, "environmentId"), field(tref, "threadId"));
+    }
+
+    // 4) 分類
+    for (const auto &o : objs) {
+        TabFact f;
+        f.id = field(o, "id");
+        f.surface = field(o, "surfaceId");
+        std::string kind = field(o, "kind");
+        std::string env, th;
+        size_t tr = o.find("\"threadRef\"");
+        if (tr != std::string::npos) {
+            std::string tref = o.substr(tr, obj_end(o, o.find('{', tr)) - tr);
+            env = field(tref, "environmentId");
+            th = field(tref, "threadId");
+        }
+        f.owner = env + "/" + th;
+
+        if (kind == "chat") {
+            f.kind = TabKind::Chat;
+        } else if (kind == "surface") {
+            bool alive = false;
+            for (const auto &l : live)
+                if (l.first == env && l.second == th) { alive = true; break; }
+            f.kind = alive ? TabKind::SurfaceLive : TabKind::SurfaceOrphan;
+            if (alive) live_surfaces_++; else orphans_++;
+        } else {
+            f.kind = TabKind::Unknown;
+        }
+        tabs_.push_back(f);
+    }
+    build_advice();
+    build_capabilities();
+}
+
+Verdict TabModel::evaluate() const {
+    if (orphans_ > 0) return Verdict::Yes;      // 閉じられないタブがある
+    return Verdict::No;
+}
+
+void TabModel::build_advice() {
+    advice_.summary.clear();
+    advice_.steps.clear();
+    if (orphans_ > 0) {
+        advice_.summary = "閉じられない surface タブが " + std::to_string(orphans_) +
+                          " 件。所有者スレッドがタブ帯に存在しない (削除は妥当)。";
+        advice_.steps = {
+            "これらのタブは×では閉じられない (親スレッドが無いため解決できない)。",
+            "`delete --id <ID> --live` で永続層と稼働中ストアを同時に更新する。",
+            "削除後に `tabs` を再読して、本当に消えたかを確かめる。",
+        };
+    } else if (live_surfaces_ > 0) {
+        advice_.summary = "surface タブは " + std::to_string(live_surfaces_) +
+                          " 件あるが、すべて所有者スレッドが生存。壊れていない。";
+        advice_.steps = {
+            "これらは普通に×で閉じられる。削除は不要。",
+            "閉じられないように見える場合、原因は所有者ではなく別の層 (メモリ/描画) の可能性。",
+            "勝手に削除しない。まず観測を増やす。",
+        };
+    } else {
+        advice_.summary = "surface タブは無い。削除対象は無い。";
+        advice_.steps = { "状態は健全。何もしない。" };
+    }
+}
+
+void TabModel::build_capabilities() {
+    caps_ = {
+        {"Read workspace-tabs state",   "file-read", false, true},
+        {"Classify tabs (live/orphan)",  "in-process", false, true},
+        {"Delete tab from LevelDB",     "file-write (app state)", true, false},
+        {"Sync live renderer store",    "inspector + JS", true, false},
+    };
+}
+
+bool TabModel::removable(const std::string &id, std::string &why) const {
+    for (const auto &t : tabs_) {
+        if (t.id != id) continue;
+        switch (t.kind) {
+            case TabKind::SurfaceOrphan:
+                why = "owner thread is gone (cannot be closed from the UI)";
+                return true;
+            case TabKind::SurfaceLive:
+                why = "owner thread is alive; the app can close this itself";
+                return false;
+            case TabKind::Chat:
+                why = "chat tab (never deleted automatically)";
+                return false;
+            default:
+                why = "unknown kind";
+                return false;
+        }
+    }
+    why = "id not present in state";
+    return false;
+}
+
 bool AdvisorySvg::write(const LoginModel &m, const std::string &path, std::string &err) {
     std::ofstream f(path);
     if (!f) { err = "書けません: " + path; return false; }
@@ -336,4 +539,62 @@ extern "C" int nx_advise_ae(const char *save_svg, FILE *out) {
         std::fprintf(out, "SVG: %s\n", save_svg);
     }
     return v == nx::Verdict::Yes ? 1 : v == nx::Verdict::No ? 0 : 2;
+}
+
+/*
+ * タブ状態のアドバイザ (C エントリ)。
+ *   state_json: workspace-tabs の JSON (NULL なら何もしない)
+ *   check_id:   指定すると、その id を削除してよいかを判定して出力する
+ * 戻り値: 0 = 健全 (削除不要), 1 = 閉じられないタブがある, 2 = 判定不能
+ */
+extern "C" int nx_advise_tabs(const char *source, const char *state_json,
+                              const char *check_id, FILE *out) {
+    if (!out) out = stdout;
+    if (!state_json) {
+        std::fprintf(out, "  [advise] no state to evaluate\n");
+        return 2;
+    }
+    nx::TabModel m(state_json ? state_json : "", source ? source : "");
+    m.collect();
+    nx::Verdict v = m.evaluate();
+
+    std::fprintf(out, "=== NeoDAX advisory (workspace tabs) ===\n");
+    std::fprintf(out, "observed_at=%s\n", m.observed_at().c_str());
+    std::fprintf(out, "source=%s\n", m.source().c_str());
+    for (const auto &t : m.tabs()) {
+        const char *k = t.kind == nx::TabKind::Chat           ? "chat"
+                        : t.kind == nx::TabKind::SurfaceLive  ? "surface(live)"
+                        : t.kind == nx::TabKind::SurfaceOrphan ? "surface(orphan)"
+                                                              : "unknown";
+        std::fprintf(out, "  %-17s %-28s owner=%s\n", k,
+                     t.surface.empty() ? "(chat)" : t.surface.c_str(),
+                     t.owner.c_str());
+    }
+    std::fprintf(out, "VERDICT=%s\n",
+                 v == nx::Verdict::Yes ? "YES" : v == nx::Verdict::No ? "NO" : "UNKNOWN");
+    std::fprintf(out, "  %s\n", m.advice().summary.c_str());
+    for (const auto &s : m.advice().steps) std::fprintf(out, "  - %s\n", s.c_str());
+
+    if (check_id && *check_id) {
+        std::string why;
+        bool ok = m.removable(check_id, why);
+        std::fprintf(out, "ID=%s removable=%s (%s)\n", check_id,
+                     ok ? "yes" : "no", why.c_str());
+        if (!ok) return 1;
+    }
+    return v == nx::Verdict::Yes ? 1 : v == nx::Verdict::No ? 0 : 2;
+}
+
+/* 1 つの id を削除してよいかだけを問う (実行はしない)。 */
+extern "C" int nx_advise_tab_can_delete(const char *state_json, const char *id,
+                                        char *why_out, size_t why_cap) {
+    if (!state_json || !id) return 0;
+    nx::TabModel m(state_json, "");
+    m.collect();
+    std::string why;
+    bool ok = m.removable(id, why);
+    if (why_out && why_cap) {
+        std::snprintf(why_out, why_cap, "%s", why.c_str());
+    }
+    return ok ? 1 : 0;
 }

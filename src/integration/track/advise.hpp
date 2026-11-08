@@ -50,6 +50,48 @@ struct Capability {
     bool available = true;
 };
 
+// ------------------------------------------------------------------
+// タブの IT アドバイザ
+//   「削除していいか」を先に判定して、理由付きで提示する。
+//   削除そのものは行わない (判断と実行を分ける)。
+// ------------------------------------------------------------------
+
+enum class TabKind { Chat, SurfaceLive, SurfaceOrphan, Unknown };
+
+struct TabFact {
+    std::string id;
+    std::string surface;
+    std::string owner;
+    TabKind kind = TabKind::Unknown;
+};
+
+class TabModel {
+public:
+    explicit TabModel(std::string state_json, std::string source);
+    void collect();
+    Verdict evaluate() const;   // Yes = 閉じられないタブがある
+    const std::vector<TabFact> &tabs() const { return tabs_; }
+    const std::vector<Capability> &capabilities() const { return caps_; }
+    const Advice &advice() const { return advice_; }
+    std::string observed_at() const { return observed_at_; }
+    std::string source() const { return source_; }
+
+    // この id を「削除してよい」と分類上言えるか。
+    bool removable(const std::string &id, std::string &why) const;
+
+private:
+    std::string json_;
+    std::string source_;
+    std::string observed_at_;
+    std::vector<TabFact> tabs_;
+    std::vector<Capability> caps_;
+    Advice advice_;
+    int orphans_ = 0;
+    int live_surfaces_ = 0;
+    void build_advice();
+    void build_capabilities();
+};
+
 class LoginModel {
 public:
     explicit LoginModel(std::string home);

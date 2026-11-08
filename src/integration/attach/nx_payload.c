@@ -76,17 +76,32 @@ char *nx_payload_build_rehydrate(const char *store_substr,
         size_t cur = strlen(js);
         snprintf(js + cur, cap - cur,
             "const b64='%s';"
-            "if(b64){const val=decodeURIComponent(escape(atob(b64)));localStorage.setItem('%s',val);}",
+            "let stored=null;"
+            "if(b64){const val=decodeURIComponent(escape(atob(b64)));"
+            "try{stored=JSON.parse(val);}catch(e){stored=null;}"
+            "localStorage.setItem('%s',val);}",
             b64, key);
     }
     append_store_resolve(js, cap, store_substr, export_names);
     {
         size_t cur = strlen(js);
+        /* ここが肝。
+           localStorage を書いて rehydrate() するだけでは足りない。
+           rehydrate は localStorage を読み直すが、その後アプリが
+           「メモリに残った古い状態」を次の persist で書き戻すので
+           結局元に戻る (これが「消しても復活する」の本体)。
+           メモリ側の state も同じ値にしないと永続化されない。 */
         snprintf(js + cur, cap - cur,
-            "const before=store.getState().tabs?store.getState().tabs.length:Object.keys(store.getState()).length;"
+            "const cnt=st=>st.tabs?st.tabs.length:Object.keys(st).length;"
+            "const before=cnt(store.getState());"
+            "if(stored&&typeof stored.state==='object'&&store.setState){"
+            "const s=stored.state;const patch={};"
+            "for(const k of Object.keys(s))patch[k]=s[k];"
+            "store.setState(patch,false);"
+            "}"
             "if(store.persist&&store.persist.rehydrate)await store.persist.rehydrate();"
-            "const after=store.getState().tabs?store.getState().tabs.length:Object.keys(store.getState()).length;"
-            "return JSON.stringify({ok:true,rehydrated:!!(store.persist&&store.persist.rehydrate),before,after});"
+            "const after=cnt(store.getState());"
+            "return JSON.stringify({ok:true,set:!!stored,before,after});"
             "})()");
     }
     free(b64);

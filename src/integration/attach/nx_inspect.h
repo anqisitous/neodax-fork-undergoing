@@ -41,6 +41,18 @@ int nx_inspect_start(long pid, int port, int wait_ms, FILE *out);
    expression は self-contained な JS。成功で 0。 */
 int nx_inspect_eval(int port, const char *expression, FILE *out);
 
+/* target_hint: /json/list の url に含まれるべき文字列 (例 "deepai-code://app")。
+   NULL なら従来通り先頭 target。Electron では先頭が main プロセスになり、
+   main には localStorage が無いので、DOM を触る式には hint が必須。
+   評価結果が例外なら -1 を返し、例外内容を out に出す。 */
+int nx_inspect_eval_target(int port, const char *expression,
+                           const char *target_hint, FILE *out);
+
+/* nx_inspect_eval_target と同じだが、評価値 (文字列) を *value_out に返す
+   (malloc 済み, 呼び出し側 free)。出力はしない。 */
+int nx_inspect_eval_capture(int port, const char *expression,
+                            char **value_out, const char *target_hint);
+
 /* 上記をまとめて実行する簡易エントリ。
    成功で 0。result_out に結果 (malloc) を返すこともできる。 */
 int nx_inspect_run(const nx_inspect_opts_t *opts, const char *expression,

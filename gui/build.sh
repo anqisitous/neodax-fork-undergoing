@@ -48,6 +48,13 @@ done
 ATTACH_OBJS="src/integration/attach/nx_inspect.o src/integration/attach/nx_renderer.o src/integration/attach/nx_payload.o src/integration/attach/nx_appfix.o"
 SPEC_OBJS="src/integration/spec/nx_spec.o src/integration/spec/nx_specs_builtin.o src/integration/spec/nx_recog.o src/integration/spec/nx_gen.o src/integration/spec/nx_pe.o src/integration/spec/nx_pe_disasm.o src/integration/spec/nx_pipeline.o"
 UI_OBJS="src/integration/nx_decode.o src/x86_decode.o src/arm64_decode.o src/integration/nx_json.o src/integration/nx_leveldb.o src/integration/nx_state.o src/integration/nx_deepai.o src/integration/nx_sim.o $ATTACH_OBJS $SPEC_OBJS"
+# 修復の「判断」(advise) と「計画」(nx_plan) も UI から使う。
+clang++ -std=c++17 -O2 -c -I src -I include \
+    src/integration/track/advise.cpp -o src/integration/track/advise.o
+clang++ -std=c++17 -O2 -c -I src -I include \
+    src/integration/plan/nx_plan.cpp -o src/integration/plan/nx_plan.o
+# nx_plan は事実を集めるのに nx_deepai / nx_state / nx_leveldb を使う。
+UI_OBJS="$UI_OBJS src/integration/track/advise.o src/integration/plan/nx_plan.o"
 clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 \
     -I src -I include \
     -framework Cocoa -framework CoreGraphics -framework ImageIO -framework CoreFoundation \

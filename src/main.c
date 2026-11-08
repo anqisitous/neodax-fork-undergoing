@@ -466,6 +466,15 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[optind], "--scan-strings") == 0 && optind + 1 < argc) {
             g_opts.track_mode = 13;                // 生の文字列走査 (strip されても見える)
             snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--asar-patch") == 0 && optind + 3 < argc) {
+            g_opts.track_mode = 46;                // asar 内 1 ファイルを同長で書換
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+            snprintf(g_opts.asar_entry, sizeof(g_opts.asar_entry), "%s", argv[++optind]);
+            snprintf(g_opts.asar_find, sizeof(g_opts.asar_find), "%s", argv[++optind]);
+            snprintf(g_opts.asar_repl, sizeof(g_opts.asar_repl), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--update") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 45;                // 署名済みアプリの更新 feed を読む
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
         } else if (strcmp(argv[optind], "--term") == 0 && optind + 1 < argc) {
             g_opts.track_mode = 16;                // 止まったプロセスを解放 (neodax 内部)
             snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
@@ -724,6 +733,19 @@ int main(int argc, char *argv[]) {
     if (g_opts.track_mode == 40) {
         extern int nx_ngl_reset(int, FILE *);
         return nx_ngl_reset(g_opts.track_apply, stdout);
+    }
+    // --asar-patch は asar 内 1 ファイルを同長で差し替える (要: 再署名)。
+    if (g_opts.track_mode == 46) {
+        extern int nx_asar_patch_bytes(const char *, const char *, const char *, const char *, FILE *);
+        return nx_asar_patch_bytes(g_opts.track_filter, g_opts.asar_entry,
+                                   g_opts.asar_find, g_opts.asar_repl, stdout);
+    }
+    // --update は署名済みアプリの更新チャネルを読む (封印を壊さない)。
+    if (g_opts.track_mode == 45) {
+        extern int nx_update_check(const char *, int, FILE *);
+        extern int nx_update_fetch(const char *, const char *, int, FILE *);
+        if (!g_opts.track_apply) return nx_update_check(g_opts.track_filter, 0, stdout);
+        return nx_update_fetch(g_opts.track_filter, g_opts.wire_save, 1, stdout);
     }
     // --term はプロセス名で止まった相手を解放する (入力はバイナリではない)。
     if (g_opts.track_mode == 16) {

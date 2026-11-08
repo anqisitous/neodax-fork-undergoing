@@ -42,6 +42,19 @@ char *nx_state_find_key(const char *dir, const char *key_hint,
 int nx_state_list_keys(const char *dir, const char *key_hint,
                        char ***out_keys, size_t **out_lens, int max);
 
+/* ストア内で観測された最大 seq を返す。書き戻し時は「この値より大きい」seq を
+   使う必要がある。LevelDB は key ごとに最大 seq を持つため、実 seq より
+   極端に大きい値を書くと、以降アプリ側の書き込みが「古い」と判定されて
+   無視される (sed 汚染)。見つからなければ 0。
+   key_hint を指定するとその文字列を含む key だけを対象にする。 */
+unsigned long long nx_state_max_seq(const char *dir, const char *key_hint);
+
+/* key_hint を含む key が「今も生きているか」を返す。
+   削除レコード (kTypeDeletion) を最大 seq として尊重する。
+   列挙 (nx_state_list_keys) は履歴を拾うので、生存判定には使えない。
+   戻り値: 1 = 生きている値あり, 0 = 削除済み/無し */
+int nx_state_key_is_live(const char *dir, const char *key_hint);
+
 #ifdef __cplusplus
 }
 #endif

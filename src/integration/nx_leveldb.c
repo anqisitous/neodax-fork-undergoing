@@ -405,15 +405,28 @@ static unsigned char *mk_batch(const char *key, size_t klen,
     return b;
 }
 
-static unsigned char *mk_log_record(const unsigned char *rec, size_t rlen,
-                                    size_t *out_len) {
-    /* 32KB ブロック単位でログレコード化。単発なら type=1 (FULL)。 */
+static unsigned char *mk_log_record_at(const unsigned char *rec, size_t rlen,
+                                       size_t start_off, size_t *out_len) {
+    /* 32KB ブロック単位でログレコード化。単発なら type=1 (FULL)。
+
+       start_off は「このレコードを書き込むファイル先頭からのオフセット」。
+       既存 WAL の末尾に追記する場合、ブロック境界の判定に lp (新規バッファ内
+       の位置) を使うと、実際のファイル位置とずれてブロック境界をまたぐ
+       長さを計算してしまう。その結果、書いたレコードの途中に次のヘッダが
+       埋まり、リーダがそこで解析を打ち切る (追記した値が読めない)。 */
     size_t cap = rlen + 7 * (rlen / 32761 + 2) + 65536;
-    unsigned char *log = (unsigned char *)malloc(cap);
+    size_t pad_head = 0;
+    {
+        size_t bo = start_off % 32768;
+        size_t left = 32768 - bo;
+        if (left < 7) pad_head = left;   /* まず残りをゼロ埋め */
+    }
+    unsigned char *log = (unsigned char *)malloc(cap + pad_head);
     if (!log) return NULL;
     size_t lp = 0, off = 0;
+    for (size_t i = 0; i < pad_head; i++) log[lp++] = 0;
     while (off < rlen) {
-        size_t block_left = 32768 - (lp % 32768);
+        size_t block_left = 32768 - ((start_off + lp) % 32768);
         if (block_left < 7) {
             for (size_t i = 0; i < block_left; i++) log[lp++] = 0;
             continue;
@@ -442,6 +455,63 @@ static unsigned char *mk_log_record(const unsigned char *rec, size_t rlen,
     }
     *out_len = lp;
     return log;
+}
+
+static unsigned char *mk_log_record(const unsigned char *rec, size_t rlen,
+                                    size_t *out_len) {
+    return mk_log_record_at(rec, rlen, 0, out_len);
+}
+
+static long wal_end_offset(const unsigned char *b, size_t n);
+static const char *find_latest_log(const char *dir, char *buf, size_t bufsz);
+
+/* key の削除を表す書き込み (kTypeDeletion=0) をログへ追記する。
+
+   LevelDB では「値を空にする」のではなく kTypeDeletion を書くのが正しい
+   削除。空文字列は依然として「値が空のキー」であり、復元経路によっては
+   読まれてしまう。 */
+int nx_leveldb_append_delete(const char *dir, const char *key, size_t klen,
+                             unsigned long long seq, const char *log_path,
+                             FILE *out) {
+    if (!dir || !key) return -1;
+
+    char path[4200];
+    if (log_path) snprintf(path, sizeof(path), "%s", log_path);
+    else if (!find_latest_log(dir, path, sizeof(path))) return -1;
+
+    /* WriteBatch: seq(8) + count(4) + [type=0, keylen, key] */
+    size_t scope = 12 + 1 + 10 + klen;
+    unsigned char *batch = (unsigned char *)malloc(scope);
+    if (!batch) return -1;
+    size_t p = 0;
+    uint64_t s = (uint64_t)seq;
+    for (int i = 0; i < 8; i++) batch[p++] = (unsigned char)((s >> (8 * i)) & 0xff);
+    uint32_t cnt = 1;
+    for (int i = 0; i < 4; i++) batch[p++] = (unsigned char)((cnt >> (8 * i)) & 0xff);
+    batch[p++] = 0; /* kTypeDeletion */
+    p += put_varint(batch + p, klen);
+    memcpy(batch + p, key, klen); p += klen;
+
+    /* 追記先の実オフセットを先に求める (ブロック境界の計算に必要) */
+    size_t cur = 0;
+    unsigned char *cb = read_entire(path, &cur);
+    long end = cb ? wal_end_offset(cb, cur) : 0;
+    free(cb);
+    if (end < 0) end = 0;
+
+    size_t llen = 0;
+    unsigned char *log = mk_log_record_at(batch, p, (size_t)end, &llen);
+    free(batch);
+    if (!log) return -1;
+
+    FILE *fp = fopen(path, "ab");
+    if (!fp) { free(log); return -1; }
+    size_t wr = fwrite(log, 1, llen, fp);
+    fclose(fp);
+    free(log);
+    if (wr != llen) return -1;
+    if (out) fprintf(out, "  [apply-live] deleted key -> %s (seq=%llu)\n", path, seq);
+    return 0;
 }
 
 int nx_leveldb_write_kv(const char *dir, const char *key, size_t klen,
@@ -535,32 +605,23 @@ int nx_leveldb_append_kv(const char *dir, const char *key, size_t klen,
     size_t blen = 0;
     unsigned char *batch = mk_batch(key, klen, val, vlen, seq, &blen);
     if (!batch) return -1;
-    size_t llen = 0;
-    unsigned char *log = mk_log_record(batch, blen, &llen);
-    free(batch);
-    if (!log) return -1;
 
-    /* 現在のファイルを読み、末尾位置を求める */
+    /* 現在のファイル末尾位置を先に求め、それを基準にレコード化する。
+       (以前は lp%32768 で境界を判定していたため、追記時にブロック境界を
+        またぐ長さを計算し、書いたレコードが壊れて読めなくなっていた) */
     size_t cur = 0;
     unsigned char *cb = read_entire(path, &cur);
     long end = cb ? wal_end_offset(cb, cur) : 0;
     free(cb);
     if (end < 0) end = 0;
 
-    /* ブロック残量に応じてレコード種別を調整 (末尾追記なので FULL/LAST で十分) */
-    size_t bo = ((size_t)end) % 32768;
-    size_t left = 32768 - bo;
-    /* 必要: 7 + llen。収まらない場合は残りをゼロ埋めして次ブロックへ */
+    size_t llen = 0;
+    unsigned char *log = mk_log_record_at(batch, blen, (size_t)end, &llen);
+    free(batch);
+    if (!log) return -1;
+
     FILE *fp = fopen(path, "ab");
     if (!fp) { free(log); return -1; }
-    if (left < 7 + llen) {
-        unsigned char z[8] = {0};
-        if (left <= sizeof(z)) fwrite(z, 1, left, fp);
-        else { /* 大きな残りはゼロで埋める */ 
-            unsigned char *pad = (unsigned char *)calloc(left, 1);
-            if (pad) { fwrite(pad, 1, left, fp); free(pad); }
-        }
-    }
     size_t wr = fwrite(log, 1, llen, fp);
     fclose(fp);
     free(log);

@@ -422,6 +422,11 @@ typedef struct {
     int      wire_hex;             // 1=wire_send は hex 表記
     char     wire_save[1024];      // 受信バイトの保存先 (保険として残す)
 
+    // asar-patch: 同長で差し替える (find -> repl は同じ長さ)
+    char     asar_entry[256];     // 対象ファイル名の一部
+    char     asar_find[512];      // 置換前の文字列
+    char     asar_repl[512];      // 置換後の文字列 (同長)
+
     // ネイティブ検索 (grep 相当)。C++ の TextQuery/Searcher が使う。
     char     seek_pattern[512];    // 検索語 (literal または正規表現)
     char     seek_include[256];    // "*.txt,*.plist" (空なら全部)
