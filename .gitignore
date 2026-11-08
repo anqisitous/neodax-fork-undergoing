@@ -1,9 +1,14 @@
 # build artifacts
 bin/
 *.o
+*.o.tmp
 *.dSYM/
 neodax
 neodax.exe
+js/neodax.node
+
+# neodax runtime state
+.nx-tmp/
 
 # gui runtime state
 gui/.last.json
