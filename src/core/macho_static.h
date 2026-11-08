@@ -422,6 +422,17 @@ typedef struct {
     int      wire_hex;             // 1=wire_send は hex 表記
     char     wire_save[1024];      // 受信バイトの保存先 (保険として残す)
 
+    // ネイティブ検索 (grep 相当)。C++ の TextQuery/Searcher が使う。
+    char     seek_pattern[512];    // 検索語 (literal または正規表現)
+    char     seek_include[256];    // "*.txt,*.plist" (空なら全部)
+    int      seek_flags;           // 1=大小無視 2=正規表現 4=バイナリ 8=ファイル名のみ 16=単語
+    int      seek_context;         // 前後の行数
+    int      seek_limit;           // 一致行の上限 (0=無制限)
+    int      seek_time_ms;         // 走査時間の上限
+
+    // 仮想ディスプレイの表示対象 (role/sub/title/desc の部分一致)
+    char     display_focus[128];
+
 } macho_opts_t;
 
 // ============================================================================

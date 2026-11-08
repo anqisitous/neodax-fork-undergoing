@@ -11,19 +11,19 @@
 /* ============================================================================
  * NeoDAX Unified Static Analysis
  *
- * Class-based design (C). One Regression Ring with nested Groups, each
+ * Class-based design (C). One Regression Annulus with nested Groups, each
  * containing Functions as leaves. Follows Bend language principles:
- *   - Regression Ring (環): analysis loops over phases, evidence accumulates
+ *   - Regression Annulus (環): analysis loops over phases, evidence accumulates
  *   - Progression (前進): each iteration pushes the frontier outward
  *   - Deterministic parallel: order and conditions are statically preserved
  *
  * Flow: Mach-O parse → Function detection → Variable/dependency tracing
  *       → Execution order prediction → Parallel/beam detection → State tracking
- *       → Regression ring build → SVG output
+ *       → Regression annulus build → SVG output
  * ============================================================================ */
 
 /* ---------- Limits ---------- */
-#define ND_STATIC_MAX_RINGS       1
+#define ND_STATIC_MAX_ANNULI       1
 #define ND_STATIC_MAX_ITERATIONS  4
 #define ND_STATIC_MAX_GROUPS      64
 #define ND_STATIC_MAX_FUNCTIONS   4096
@@ -167,7 +167,7 @@ typedef struct {
     int      condition_conditional; /* 1 if group only runs on condition */
 } nd_group_t;
 
-/* ---------- Ring (one ring, multiple iterations) ---------- */
+/* ---------- Annulus (one annulus, multiple iterations) ---------- */
 
 typedef struct {
     uint64_t id;
@@ -180,7 +180,7 @@ typedef struct {
     char     detail[256];
     double   x, y;                /* SVG layout */
     double   r;
-} nd_ring_cell_t;
+} nd_annulus_cell_t;
 
 typedef struct {
     char     binary[512];
@@ -188,7 +188,7 @@ typedef struct {
     int      iterations;
     int      phase_count;
     int      ncell;
-    nd_ring_cell_t cells[ND_STATIC_MAX_ITERATIONS * ND_PHASE_MAX];
+    nd_annulus_cell_t cells[ND_STATIC_MAX_ITERATIONS * ND_PHASE_MAX];
 
     /* Aggregates */
     uint64_t sections, symbols, functions, xrefs;
@@ -200,7 +200,7 @@ typedef struct {
 
     uint64_t total_evidence;
     double   avg_confidence;
-} nd_ring_t;
+} nd_annulus_t;
 
 /* ---------- Flow Tracer: variable → caller chain ---------- */
 
@@ -237,7 +237,7 @@ typedef struct {
     int            nedges;
     nd_group_t     *groups;
     int            ngroups;
-    nd_ring_t      ring;
+    nd_annulus_t      annulus;
 
     /* Flow tracing results */
     nd_var_flow_list_t var_flows;
@@ -281,15 +281,15 @@ int nd_group_add(nd_static_ctx_t *ctx, const char *name, nd_group_type_t type,
                  uint64_t dispatch_addr, uint64_t join_addr);
 int nd_group_add_function(nd_static_ctx_t *ctx, uint64_t group_id, uint64_t func_id);
 
-/* Ring class methods */
-void nd_ring_init(nd_ring_t *ring, const char *binary, const char *arch);
-int nd_ring_build(nd_static_ctx_t *ctx);
-void nd_ring_print(const nd_ring_t *ring, FILE *out);
-/* nd_static_write_svg — ring → group → function hierarchy. */
+/* Annulus class methods */
+void nd_annulus_init(nd_annulus_t *annulus, const char *binary, const char *arch);
+int nd_annulus_build(nd_static_ctx_t *ctx);
+void nd_annulus_print(const nd_annulus_t *annulus, FILE *out);
+/* nd_static_write_svg — annulus → group → function hierarchy. */
 int  nd_static_write_svg(nd_static_ctx_t *ctx, const char *path);
 
 /* ============================================================================
- * Analysis Pipeline (one ring, multiple phases)
+ * Analysis Pipeline (one annulus, multiple phases)
  * ============================================================================ */
 
 int nd_static_analyze(nd_static_ctx_t *ctx);   /* run full pipeline */

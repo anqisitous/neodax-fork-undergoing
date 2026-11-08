@@ -1,7 +1,7 @@
 /*
  * static_analysis.c — NeoDAX unified static analysis
  *
- * Class-based (C) implementation of one Regression Ring with nested Groups
+ * Class-based (C) implementation of one Regression Annulus with nested Groups
  * and Functions as leaves.
  *
  *   Mach-O parse
@@ -12,8 +12,8 @@
  *     → Parallel  (groups: beam search, thread pool, conditional dispatch)
  *     → Verify    (state checkpoints, regression inside loops)
  *
- * The ring is the analysis loop; each lap gathers more evidence and the
- * frontier moves outward (progression). SVG renders ring → group → function.
+ * The annulus is the analysis loop; each lap gathers more evidence and the
+ * frontier moves outward (progression). SVG renders annulus → group → function.
  */
 
 #include "static_analysis.h"
@@ -1227,7 +1227,7 @@ static int nd_verify(nd_static_ctx_t *ctx) {
     dax_binary_t *bin = ctx->bin;
     if (!bin) return -1;
 
-    /* A "regression" in the ring sense: a function that is re-entered
+    /* A "regression" in the annulus sense: a function that is re-entered
      * (called from more than one place) and mutates shared state. */
     for (int i = 0; i < ctx->nfunctions; i++) {
         nd_function_t *f = &ctx->functions[i];
@@ -1246,34 +1246,34 @@ static int nd_verify(nd_static_ctx_t *ctx) {
 }
 
 /* ============================================================================
- * Ring construction
+ * Annulus construction
  * ============================================================================ */
 
-void nd_ring_init(nd_ring_t *ring, const char *binary, const char *arch) {
-    if (!ring) return;
-    memset(ring, 0, sizeof(*ring));
-    ring->phase_count = ND_PHASE_MAX;
-    nd_copy(ring->binary, sizeof(ring->binary), binary);
-    nd_copy(ring->arch, sizeof(ring->arch), arch);
+void nd_annulus_init(nd_annulus_t *annulus, const char *binary, const char *arch) {
+    if (!annulus) return;
+    memset(annulus, 0, sizeof(*annulus));
+    annulus->phase_count = ND_PHASE_MAX;
+    nd_copy(annulus->binary, sizeof(annulus->binary), binary);
+    nd_copy(annulus->arch, sizeof(annulus->arch), arch);
 }
 
-static void nd_ring_cell_set(nd_ring_t *ring, int iteration, int phase,
+static void nd_annulus_cell_set(nd_annulus_t *annulus, int iteration, int phase,
                              uint32_t evidence, int confidence,
                              uint64_t addr, const char *sample, const char *fmt, ...) {
-    if (!ring) return;
+    if (!annulus) return;
     if (iteration < 0 || iteration >= ND_STATIC_MAX_ITERATIONS) return;
     if (phase < 0 || phase >= ND_PHASE_MAX) return;
 
-    nd_ring_cell_t *c = NULL;
-    for (int i = 0; i < ring->ncell; i++) {
-        if (ring->cells[i].iteration == iteration && ring->cells[i].phase == phase) {
-            c = &ring->cells[i];
+    nd_annulus_cell_t *c = NULL;
+    for (int i = 0; i < annulus->ncell; i++) {
+        if (annulus->cells[i].iteration == iteration && annulus->cells[i].phase == phase) {
+            c = &annulus->cells[i];
             break;
         }
     }
     if (!c) {
-        if (ring->ncell >= ND_STATIC_MAX_ITERATIONS * ND_PHASE_MAX) return;
-        c = &ring->cells[ring->ncell++];
+        if (annulus->ncell >= ND_STATIC_MAX_ITERATIONS * ND_PHASE_MAX) return;
+        c = &annulus->cells[annulus->ncell++];
         memset(c, 0, sizeof(*c));
         c->iteration = iteration;
         c->phase = phase;
@@ -1291,10 +1291,10 @@ static void nd_ring_cell_set(nd_ring_t *ring, int iteration, int phase,
     }
 }
 
-int nd_ring_build(nd_static_ctx_t *ctx) {
+int nd_annulus_build(nd_static_ctx_t *ctx) {
     if (!ctx || !ctx->bin) return -1;
     dax_binary_t *bin = ctx->bin;
-    nd_ring_t *ring = &ctx->ring;
+    nd_annulus_t *annulus = &ctx->annulus;
 
     const char *arch = "unknown";
     switch (bin->arch) {
@@ -1303,46 +1303,46 @@ int nd_ring_build(nd_static_ctx_t *ctx) {
         case ARCH_RISCV64: arch = "riscv64"; break;
         default: break;
     }
-    nd_ring_init(ring, bin->filepath, arch);
+    nd_annulus_init(annulus, bin->filepath, arch);
 
-    ring->sections  = (uint64_t)bin->nsections;
-    ring->symbols   = (uint64_t)bin->nsymbols;
-    ring->functions = (uint64_t)ctx->nfunctions;
-    ring->xrefs     = (uint64_t)bin->nxrefs;
-    ring->variables = (uint64_t)ctx->nvariables;
-    ring->groups    = (uint64_t)ctx->ngroups;
-    ring->dep_nodes = (uint64_t)ctx->nvariables + ctx->nfunctions;
-    ring->dep_edges = (uint64_t)ctx->nedges;
-    ring->exec_nodes = (uint64_t)ctx->nfunctions;
-    ring->parallel_groups = (uint64_t)ctx->ngroups;
+    annulus->sections  = (uint64_t)bin->nsections;
+    annulus->symbols   = (uint64_t)bin->nsymbols;
+    annulus->functions = (uint64_t)ctx->nfunctions;
+    annulus->xrefs     = (uint64_t)bin->nxrefs;
+    annulus->variables = (uint64_t)ctx->nvariables;
+    annulus->groups    = (uint64_t)ctx->ngroups;
+    annulus->dep_nodes = (uint64_t)ctx->nvariables + ctx->nfunctions;
+    annulus->dep_edges = (uint64_t)ctx->nedges;
+    annulus->exec_nodes = (uint64_t)ctx->nfunctions;
+    annulus->parallel_groups = (uint64_t)ctx->ngroups;
 
     for (int g = 0; g < ctx->ngroups; g++) {
-        if (ctx->groups[g].type == ND_GROUP_BEAM_SEARCH) ring->beam_searches++;
-        if (ctx->groups[g].type == ND_GROUP_PARALLEL) ring->dispatch_points++;
+        if (ctx->groups[g].type == ND_GROUP_BEAM_SEARCH) annulus->beam_searches++;
+        if (ctx->groups[g].type == ND_GROUP_PARALLEL) annulus->dispatch_points++;
     }
 
     /* Lap 1 — survey */
-    nd_ring_cell_set(ring, 0, ND_PHASE_SURVEY,
-                     (uint32_t)(ring->sections + ring->functions),
-                     ring->functions ? 90 : 30, bin->entry, "entry",
+    nd_annulus_cell_set(annulus, 0, ND_PHASE_SURVEY,
+                     (uint32_t)(annulus->sections + annulus->functions),
+                     annulus->functions ? 90 : 30, bin->entry, "entry",
                      "sections=%llu functions=%llu",
-                     (unsigned long long)ring->sections,
-                     (unsigned long long)ring->functions);
+                     (unsigned long long)annulus->sections,
+                     (unsigned long long)annulus->functions);
 
     /* Lap 1 — classify */
-    nd_ring_cell_set(ring, 0, ND_PHASE_CLASSIFY,
-                     (uint32_t)ring->variables,
-                     ring->variables ? 70 : 20, 0, "",
+    nd_annulus_cell_set(annulus, 0, ND_PHASE_CLASSIFY,
+                     (uint32_t)annulus->variables,
+                     annulus->variables ? 70 : 20, 0, "",
                      "variables=%llu groups=%llu",
-                     (unsigned long long)ring->variables,
-                     (unsigned long long)ring->groups);
+                     (unsigned long long)annulus->variables,
+                     (unsigned long long)annulus->groups);
 
     /* Lap 1 — trace */
-    nd_ring_cell_set(ring, 0, ND_PHASE_TRACE,
+    nd_annulus_cell_set(annulus, 0, ND_PHASE_TRACE,
                      (uint32_t)ctx->nedges,
                      ctx->nedges ? 80 : 25, 0, "",
                      "edges=%llu flows=%d",
-                     (unsigned long long)ring->dep_edges,
+                     (unsigned long long)annulus->dep_edges,
                      ctx->var_flows.count);
 
     /* Lap 1 — predict */
@@ -1350,53 +1350,53 @@ int nd_ring_build(nd_static_ctx_t *ctx) {
     for (int i = 0; i < ctx->nfunctions; i++) {
         if (ctx->functions[i].execution_order > 0) ordered++;
     }
-    ring->exec_order_len = (uint64_t)ordered;
-    nd_ring_cell_set(ring, 0, ND_PHASE_PREDICT,
+    annulus->exec_order_len = (uint64_t)ordered;
+    nd_annulus_cell_set(annulus, 0, ND_PHASE_PREDICT,
                      (uint32_t)ctx->nfunctions,
-                     ring->functions ? 75 : 25, 0, "",
+                     annulus->functions ? 75 : 25, 0, "",
                      "functions=%llu order_len=%llu",
-                     (unsigned long long)ring->functions,
-                     (unsigned long long)ring->exec_order_len);
+                     (unsigned long long)annulus->functions,
+                     (unsigned long long)annulus->exec_order_len);
 
     /* Lap 1 — parallel */
-    nd_ring_cell_set(ring, 0, ND_PHASE_PARALLEL,
-                     (uint32_t)ring->parallel_groups,
-                     ring->parallel_groups ? 75 : 25, 0, "",
+    nd_annulus_cell_set(annulus, 0, ND_PHASE_PARALLEL,
+                     (uint32_t)annulus->parallel_groups,
+                     annulus->parallel_groups ? 75 : 25, 0, "",
                      "parallel=%llu beam=%llu",
-                     (unsigned long long)ring->dispatch_points,
-                     (unsigned long long)ring->beam_searches);
+                     (unsigned long long)annulus->dispatch_points,
+                     (unsigned long long)annulus->beam_searches);
 
     /* Lap 1 — verify */
-    nd_ring_cell_set(ring, 0, ND_PHASE_VERIFY,
+    nd_annulus_cell_set(annulus, 0, ND_PHASE_VERIFY,
                      (uint32_t)ctx->nfunctions,
                      60, 0, "",
-                     "checked=%llu", (unsigned long long)ring->functions);
+                     "checked=%llu", (unsigned long long)annulus->functions);
 
     /* Lap 2 — progression: symbols + xrefs discovered in lap 1 */
-    nd_ring_cell_set(ring, 1, ND_PHASE_SURVEY,
-                     (uint32_t)(ring->symbols + ring->xrefs),
-                     ring->symbols ? 80 : 30, 0, "",
+    nd_annulus_cell_set(annulus, 1, ND_PHASE_SURVEY,
+                     (uint32_t)(annulus->symbols + annulus->xrefs),
+                     annulus->symbols ? 80 : 30, 0, "",
                      "symbols=%llu xrefs=%llu",
-                     (unsigned long long)ring->symbols,
-                     (unsigned long long)ring->xrefs);
+                     (unsigned long long)annulus->symbols,
+                     (unsigned long long)annulus->xrefs);
 
     /* Lap 2 — classify: role breakdown */
     int roles = 0;
     for (int v = 0; v < ctx->nvariables; v++) {
         if (strcmp(nd_classify_role(ctx->variables[v].name), "unknown") != 0) roles++;
     }
-    nd_ring_cell_set(ring, 1, ND_PHASE_CLASSIFY,
+    nd_annulus_cell_set(annulus, 1, ND_PHASE_CLASSIFY,
                      (uint32_t)roles, roles ? 80 : 20, 0, "",
                      "roles_known=%d/%d", roles, ctx->nvariables);
 
     /* Lap 2 — trace: caller chains */
-    nd_ring_cell_set(ring, 1, ND_PHASE_TRACE,
+    nd_annulus_cell_set(annulus, 1, ND_PHASE_TRACE,
                      (uint32_t)ctx->var_flows.count,
                      ctx->var_flows.count ? 85 : 25, 0, "",
                      "caller_chains=%d", ctx->var_flows.count);
 
     /* Lap 2 — predict: ordered function count */
-    nd_ring_cell_set(ring, 1, ND_PHASE_PREDICT,
+    nd_annulus_cell_set(annulus, 1, ND_PHASE_PREDICT,
                      (uint32_t)ordered, ordered ? 80 : 25, 0, "",
                      "ordered=%d/%d", ordered, ctx->nfunctions);
 
@@ -1405,25 +1405,25 @@ int nd_ring_build(nd_static_ctx_t *ctx) {
     for (int g = 0; g < ctx->ngroups; g++) {
         if (ctx->groups[g].condition_conditional) cond_groups++;
     }
-    nd_ring_cell_set(ring, 1, ND_PHASE_PARALLEL,
+    nd_annulus_cell_set(annulus, 1, ND_PHASE_PARALLEL,
                      (uint32_t)cond_groups, cond_groups ? 85 : 30, 0, "",
                      "conditional_groups=%d", cond_groups);
 
     /* Lap 2 — verify */
-    nd_ring_cell_set(ring, 1, ND_PHASE_VERIFY,
-                     (uint32_t)ring->functions, 65, 0, "",
-                     "verified=%llu", (unsigned long long)ring->functions);
+    nd_annulus_cell_set(annulus, 1, ND_PHASE_VERIFY,
+                     (uint32_t)annulus->functions, 65, 0, "",
+                     "verified=%llu", (unsigned long long)annulus->functions);
 
     /* Totals */
     uint64_t conf = 0;
     int max_iter = 0;
-    for (int i = 0; i < ring->ncell; i++) {
-        ring->total_evidence += ring->cells[i].evidence;
-        conf += (uint64_t)ring->cells[i].confidence;
-        if (ring->cells[i].iteration > max_iter) max_iter = ring->cells[i].iteration;
+    for (int i = 0; i < annulus->ncell; i++) {
+        annulus->total_evidence += annulus->cells[i].evidence;
+        conf += (uint64_t)annulus->cells[i].confidence;
+        if (annulus->cells[i].iteration > max_iter) max_iter = annulus->cells[i].iteration;
     }
-    ring->avg_confidence = ring->ncell ? (double)conf / (double)ring->ncell : 0.0;
-    ring->iterations = max_iter + 1;
+    annulus->avg_confidence = annulus->ncell ? (double)conf / (double)annulus->ncell : 0.0;
+    annulus->iterations = max_iter + 1;
 
     return 0;
 }
@@ -1444,7 +1444,7 @@ int nd_static_analyze(nd_static_ctx_t *ctx) {
     nd_static_detect_parallel(ctx);
     nd_static_detect_beam_search(ctx);
     nd_verify(ctx);
-    nd_ring_build(ctx);
+    nd_annulus_build(ctx);
 
     return 0;
 }
@@ -1453,33 +1453,33 @@ int nd_static_analyze(nd_static_ctx_t *ctx) {
  * Console output
  * ============================================================================ */
 
-void nd_ring_print(const nd_ring_t *ring, FILE *out) {
-    if (!ring || !out) return;
+void nd_annulus_print(const nd_annulus_t *annulus, FILE *out) {
+    if (!annulus || !out) return;
 
-    fprintf(out, "\n=== Regression Ring (advanced analysis) ===\n");
-    fprintf(out, "  Binary     : %s\n", ring->binary);
-    fprintf(out, "  Arch       : %s\n", ring->arch);
-    fprintf(out, "  Iterations : %d\n", ring->iterations);
+    fprintf(out, "\n=== Regression Annulus (advanced analysis) ===\n");
+    fprintf(out, "  Binary     : %s\n", annulus->binary);
+    fprintf(out, "  Arch       : %s\n", annulus->arch);
+    fprintf(out, "  Iterations : %d\n", annulus->iterations);
     fprintf(out, "  Evidence   : %llu (avg confidence %.0f%%)\n",
-            (unsigned long long)ring->total_evidence, ring->avg_confidence);
+            (unsigned long long)annulus->total_evidence, annulus->avg_confidence);
 
     static const char *phase_names[ND_PHASE_MAX] = {
         "SURVEY", "CLASSIFY", "TRACE", "PREDICT", "PARALLEL", "VERIFY"
     };
 
     fprintf(out, "\n  %-10s", "phase");
-    for (int it = 0; it < ring->iterations; it++) fprintf(out, "  pass%-2d     ", it + 1);
+    for (int it = 0; it < annulus->iterations; it++) fprintf(out, "  pass%-2d     ", it + 1);
     fprintf(out, "\n  ----------");
-    for (int it = 0; it < ring->iterations; it++) fprintf(out, "  ----------");
+    for (int it = 0; it < annulus->iterations; it++) fprintf(out, "  ----------");
     fprintf(out, "\n");
 
-    for (int p = 0; p < ring->phase_count; p++) {
+    for (int p = 0; p < annulus->phase_count; p++) {
         fprintf(out, "  %-10s", phase_names[p]);
-        for (int it = 0; it < ring->iterations; it++) {
-            const nd_ring_cell_t *c = NULL;
-            for (int i = 0; i < ring->ncell; i++) {
-                if (ring->cells[i].iteration == it && ring->cells[i].phase == p) {
-                    c = &ring->cells[i]; break;
+        for (int it = 0; it < annulus->iterations; it++) {
+            const nd_annulus_cell_t *c = NULL;
+            for (int i = 0; i < annulus->ncell; i++) {
+                if (annulus->cells[i].iteration == it && annulus->cells[i].phase == p) {
+                    c = &annulus->cells[i]; break;
                 }
             }
             if (c) fprintf(out, "  %5u (%3d%%)", c->evidence, c->confidence);
@@ -1489,8 +1489,8 @@ void nd_ring_print(const nd_ring_t *ring, FILE *out) {
     }
 
     fprintf(out, "\n  Details:\n");
-    for (int i = 0; i < ring->ncell; i++) {
-        const nd_ring_cell_t *c = &ring->cells[i];
+    for (int i = 0; i < annulus->ncell; i++) {
+        const nd_annulus_cell_t *c = &annulus->cells[i];
         if (!c->detail[0]) continue;
         fprintf(out, "    lap%-2d %-9s  %s\n", c->iteration + 1,
                 phase_names[c->phase], c->detail);
@@ -1579,31 +1579,31 @@ void nd_static_print_parallel(nd_static_ctx_t *ctx, FILE *out) {
 
 void nd_static_print_report(nd_static_ctx_t *ctx, FILE *out) {
     if (!ctx || !out) return;
-    nd_ring_print(&ctx->ring, out);
+    nd_annulus_print(&ctx->annulus, out);
     nd_static_print_order(ctx, out);
     nd_static_print_parallel(ctx, out);
     nd_static_print_flow(ctx, out);
 }
 
 /* ============================================================================
- * SVG output — ring → group → function hierarchy
+ * SVG output — annulus → group → function hierarchy
  *
  * Layout:
- *   - Outer: regression rings (one per iteration), dashed, with a
+ *   - Outer: regression annuli (one per iteration), dashed, with a
  *     clockwise arrow showing the loop back.
- *   - Middle: groups placed on the current ring radius.
+ *   - Middle: groups placed on the current annulus radius.
  *   - Inner: functions inside each group (the lowest-level group).
  *   - Progression: outward spiral arcs from lap N to lap N+1.
  * ============================================================================ */
 
 
 /* ============================================================================
- * SVG output — ring → group → function
+ * SVG output — annulus → group → function
  *
  * Layout
- *   Left  : the Regression Ring. One dashed circle per lap, a clockwise
+ *   Left  : the Regression Annulus. One dashed circle per lap, a clockwise
  *           arrow showing the loop back, an outward spiral (progression)
- *           between laps, and the six phases as nodes on the inner ring.
+ *           between laps, and the six phases as nodes on the inner annulus.
  *   Right : the group tree. Every group is a box; inside it each function
  *           is listed one by one — the function is the lowest-level group.
  *           Functions that belong to no group fall into a "sequential"
@@ -1734,7 +1734,7 @@ static void nd_svg_group_box(FILE *f, const nd_static_ctx_t *ctx, int g,
 }
 
 int nd_static_write_svg(nd_static_ctx_t *ctx, const char *path) {
-    const nd_ring_t *ring;
+    const nd_annulus_t *annulus;
     FILE *f;
     int g;
     double py;
@@ -1744,7 +1744,7 @@ int nd_static_write_svg(nd_static_ctx_t *ctx, const char *path) {
     int nassigned = 0;
 
     if (!ctx || !path) return -1;
-    ring = &ctx->ring;
+    annulus = &ctx->annulus;
 
     f = fopen(path, "w");
     if (!f) {
@@ -1766,7 +1766,7 @@ int nd_static_write_svg(nd_static_ctx_t *ctx, const char *path) {
         fprintf(f, "      <path d=\"M 0 0 L 10 5 L 0 10 z\" fill=\"%s\"/>\n", nd_phase_color[p]);
         fprintf(f, "    </marker>\n");
     }
-    fprintf(f, "    <marker id=\"arwRing\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" "
+    fprintf(f, "    <marker id=\"arwAnnulus\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" "
                "markerWidth=\"6\" markerHeight=\"6\" orient=\"auto\">\n");
     fprintf(f, "      <path d=\"M 0 0 L 10 5 L 0 10 z\" fill=\"#6b7688\"/>\n");
     fprintf(f, "    </marker>\n");
@@ -1778,17 +1778,17 @@ int nd_static_write_svg(nd_static_ctx_t *ctx, const char *path) {
 
     /* Title */
     fprintf(f, "  <text x=\"28\" y=\"36\" fill=\"#e6edf3\" font-size=\"20\" font-weight=\"bold\">"
-               "Advanced Analysis — Regression Ring, Progression &amp; Group Tree</text>\n");
+               "Advanced Analysis — Regression Annulus, Progression &amp; Group Tree</text>\n");
     fprintf(f, "  <text x=\"28\" y=\"58\" fill=\"#8b949e\" font-size=\"12\">");
-    nd_svg_escape(f, ring->binary);
+    nd_svg_escape(f, annulus->binary);
     fprintf(f, "  ·  %s  ·  %d laps  ·  %llu functions  ·  %llu groups  ·  "
                "%llu findings  ·  avg confidence %.0f%%</text>\n",
-            ring->arch, ring->iterations,
-            (unsigned long long)ring->functions, (unsigned long long)ring->groups,
-            (unsigned long long)ring->total_evidence, ring->avg_confidence);
+            annulus->arch, annulus->iterations,
+            (unsigned long long)annulus->functions, (unsigned long long)annulus->groups,
+            (unsigned long long)annulus->total_evidence, annulus->avg_confidence);
 
-    /* ---- Rings (regression) ---- */
-    for (int it = 0; it < ring->iterations; it++) {
+    /* ---- Annuli (regression) ---- */
+    for (int it = 0; it < annulus->iterations; it++) {
         double radius = ND_SVG_R0 + (double)it * ND_SVG_DR;
         fprintf(f, "  <circle cx=\"%d\" cy=\"%d\" r=\"%.1f\" fill=\"none\" stroke=\"#2b3440\" "
                    "stroke-width=\"1.4\" stroke-dasharray=\"4 6\"/>\n",
@@ -1797,8 +1797,8 @@ int nd_static_write_svg(nd_static_ctx_t *ctx, const char *path) {
                 ND_SVG_CX - 16, ND_SVG_CY - radius - 6, it + 1);
     }
 
-    /* ---- Ring arrow (regression = loop back) ---- */
-    for (int it = 0; it < ring->iterations; it++) {
+    /* ---- Annulus arrow (regression = loop back) ---- */
+    for (int it = 0; it < annulus->iterations; it++) {
         double radius = ND_SVG_R0 + (double)it * ND_SVG_DR;
         double a0 = -90.0 + 300.0, a1 = -90.0 + 360.0;
         double x0 = ND_SVG_CX + radius * cos(a0 * M_PI / 180.0);
@@ -1807,17 +1807,17 @@ int nd_static_write_svg(nd_static_ctx_t *ctx, const char *path) {
         double y1 = ND_SVG_CY + radius * sin(a1 * M_PI / 180.0);
         fprintf(f, "  <path d=\"M %.1f %.1f A %.1f %.1f 0 0 1 %.1f %.1f\" fill=\"none\" "
                    "stroke=\"#6b7688\" stroke-width=\"2\" stroke-dasharray=\"7 5\" "
-                   "marker-end=\"url(#arwRing)\" opacity=\"0.85\"/>\n",
+                   "marker-end=\"url(#arwAnnulus)\" opacity=\"0.85\"/>\n",
                 x0, y0, radius, radius, x1, y1);
     }
 
     /* ---- Progression: outward arcs lap N → lap N+1 ---- */
-    for (int it = 0; it + 1 < ring->iterations; it++) {
+    for (int it = 0; it + 1 < annulus->iterations; it++) {
         for (int p = 0; p < ND_PHASE_MAX; p++) {
-            const nd_ring_cell_t *a = NULL, *b = NULL;
-            for (int i = 0; i < ring->ncell; i++) {
-                if (ring->cells[i].iteration == it     && ring->cells[i].phase == p) a = &ring->cells[i];
-                if (ring->cells[i].iteration == it + 1 && ring->cells[i].phase == p) b = &ring->cells[i];
+            const nd_annulus_cell_t *a = NULL, *b = NULL;
+            for (int i = 0; i < annulus->ncell; i++) {
+                if (annulus->cells[i].iteration == it     && annulus->cells[i].phase == p) a = &annulus->cells[i];
+                if (annulus->cells[i].iteration == it + 1 && annulus->cells[i].phase == p) b = &annulus->cells[i];
             }
             if (!a || !b) continue;
 
@@ -1838,7 +1838,7 @@ int nd_static_write_svg(nd_static_ctx_t *ctx, const char *path) {
         }
     }
 
-    /* ---- Phase nodes on the innermost ring ---- */
+    /* ---- Phase nodes on the innermost annulus ---- */
     {
         double pr = ND_SVG_R0;
         for (int p = 0; p < ND_PHASE_MAX; p++) {
@@ -1848,10 +1848,10 @@ int nd_static_write_svg(nd_static_ctx_t *ctx, const char *path) {
             uint32_t ev = 0;
             int conf = 0;
             double rad;
-            for (int i = 0; i < ring->ncell; i++) {
-                if (ring->cells[i].iteration == 0 && ring->cells[i].phase == p) {
-                    ev = ring->cells[i].evidence;
-                    conf = ring->cells[i].confidence;
+            for (int i = 0; i < annulus->ncell; i++) {
+                if (annulus->cells[i].iteration == 0 && annulus->cells[i].phase == p) {
+                    ev = annulus->cells[i].evidence;
+                    conf = annulus->cells[i].confidence;
                 }
             }
             rad = 8.0 + (ev > 60 ? 8.0 : ev * 0.12);
@@ -1872,7 +1872,7 @@ int nd_static_write_svg(nd_static_ctx_t *ctx, const char *path) {
     fprintf(f, "  <text x=\"%d\" y=\"%d\" font-size=\"12.5\" fill=\"#e6edf3\" text-anchor=\"middle\" "
                "font-weight=\"bold\">REASONING</text>\n", ND_SVG_CX, ND_SVG_CY - 10);
     fprintf(f, "  <text x=\"%d\" y=\"%d\" font-size=\"10.5\" fill=\"#8b949e\" text-anchor=\"middle\">"
-               "ring = regression</text>\n", ND_SVG_CX, ND_SVG_CY + 8);
+               "annulus = regression</text>\n", ND_SVG_CX, ND_SVG_CY + 8);
     fprintf(f, "  <text x=\"%d\" y=\"%d\" font-size=\"10.5\" fill=\"#8b949e\" text-anchor=\"middle\">"
                "spiral = progression</text>\n", ND_SVG_CX, ND_SVG_CY + 24);
 
@@ -1885,7 +1885,7 @@ int nd_static_write_svg(nd_static_ctx_t *ctx, const char *path) {
         fprintf(f, "  <line x1=\"28\" y1=\"%.1f\" x2=\"62\" y2=\"%.1f\" stroke=\"#6b7688\" "
                    "stroke-width=\"2\" stroke-dasharray=\"7 5\"/>\n", ly - 4, ly - 4);
         fprintf(f, "  <text x=\"70\" y=\"%.1f\" font-size=\"11\" fill=\"#c9d1d9\">"
-                   "regression (loop back to the same ring)</text>\n", ly);
+                   "regression (loop back to the same annulus)</text>\n", ly);
         ly += 18;
         fprintf(f, "  <line x1=\"28\" y1=\"%.1f\" x2=\"62\" y2=\"%.1f\" stroke=\"#f2b134\" "
                    "stroke-width=\"2.2\"/>\n", ly - 4, ly - 4);
@@ -1959,7 +1959,7 @@ int nd_static_write_svg(nd_static_ctx_t *ctx, const char *path) {
 
     /* ---- Footer ---- */
     fprintf(f, "  <text x=\"28\" y=\"%d\" font-size=\"11\" fill=\"#6b7688\">"
-               "NeoDAX advanced analysis — ring = regression loop, outward spiral = forward "
+               "NeoDAX advanced analysis — annulus = regression loop, outward spiral = forward "
                "progress, groups nest their functions as leaves</text>\n", ND_SVG_H - 20);
 
     fprintf(f, "</svg>\n");

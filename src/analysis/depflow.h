@@ -228,7 +228,7 @@ typedef struct depflow_func_summary_t {
     int      n_extcalls;               // calls to imports/undefined symbols
     int      nindirect;                // indirect calls (unresolvable)
     int      is_recursive;
-    int      ring_id;                  // SCC id: functions in the same ring
+    int      annulus_id;                  // SCC id: functions in the same annulus
     int      dirty;                    // worklist: needs (re)propagation
     int      confidence;               // 0-100
 } depflow_func_summary_t;
@@ -270,8 +270,8 @@ typedef struct depflow_graph_t {
     depflow_first_call_t *first_call;
     int first_call_count;
 
-    // Call-graph SCCs ("rings"): mutually recursive function sets
-    int ring_count;
+    // Call-graph SCCs ("annuli"): mutually recursive function sets
+    int annulus_count;
 
     // Edge dedup: identical (from,to,type) share one edge (address sharing)
     int  edge_ht_cap;
@@ -330,7 +330,7 @@ int depflow_graph_add_edge_origin(depflow_graph_t *graph, uint64_t from, uint64_
 int depflow_build_summaries(macho_binary_t *bin, depflow_graph_t *graph);
 int depflow_summaries_fixpoint(macho_binary_t *bin, depflow_graph_t *graph);
 int depflow_cache_first_calls(macho_binary_t *bin, depflow_graph_t *graph);
-int depflow_build_rings(macho_binary_t *bin, depflow_graph_t *graph);
+int depflow_build_annuli(macho_binary_t *bin, depflow_graph_t *graph);
 const char *depflow_origin_str(int origin);
 const char *depflow_cond_str(int kind);
 

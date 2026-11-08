@@ -70,25 +70,48 @@ static void print_usage(const char *progname) {
     printf("Shogi AI Specific:\n");
     printf("  --shogi               Enable Shogi AI specific analysis\n");
     printf("  --track               復元コードを静的に逆trackする\n");
-    printf("  --track-rings         環 (call-graph SCC) を解析する\n");
+    printf("  --track-annuli         環 (call-graph SCC) を解析する\n");
     printf("  --track-prune         線を 必要/邪魔/どうでもいい に分類する\n");
     printf("  --track-files         このモジュールが読むファイルを洗い出す\n");
-    printf("  --rings               neodax 本来の環を報告する\n");
+    printf("  --annuli               neodax 本来の環を報告する\n");
     printf("  --classify            分類器と役割をまとめて出す\n");
     printf("  --find-string S       文字列を参照する箇所と関数を一覧 (静的のみ)\n");
     printf("  --guard S             起動を止める検知を静的に無効化 (--apply で実書換)\n");
     printf("  --find-symbol S      定義シンボルを名前の部分一致で一覧 (静的のみ)\n");
     printf("  --deps               リンクしているライブラリを一覧 (otool -L 相当)\n");
     printf("  --deps-tree          依存の連鎖を再帰的に辿る (@rpath 展開込み)\n");
-    printf("  --scan-strings S     生の文字列を走査する (strings + grep 相当)\n");
+    printf("  --scan-strings S     生の文字列を走査する (strings 相当)\n");
     printf("  --heal-state         SSO フラグを良い状態に揃える (Mach-O は触らない, --apply)\n");
+    printf("  --ngl-reset          NGL の状態を退避する (Group Container / Scripts / ~/Library/NGL)\n");
+    printf("  --predict-login      NGL プロファイルと SSO からログインダイアログを静的に予測\n");
+    printf("  --advise-ae [--save F.svg]  AE 起動/ログインの IT アドバイザ (非 HTML 表示)\n");
+    printf("  --ae-login-purge     AE のログイン状態とアクセスログを退避する (--apply)\n");
     printf("  --term S             実行パスに S を含むプロセスを解放 (--apply で SIGTERM)\n");
     printf("  --classes [S]        C++ vtable/typeinfo からクラスと仮想メソッドを復元\n");
     printf("  --imports [S]        取り込む外部シンボルと GOT スロットを一覧\n");
+    printf("  --seek PATTERN [PATH] neodax の検索 (再帰・C++ クラス設計)\n");
+    printf("  --seek-ignore-case   大小を無視 / --seek-regex 正規表現 / --seek-word 単語境界\n");
+    printf("  --seek-include G     対象を絞る (例 '*.txt,*.plist')\n");
+    printf("  --seek-context N     一致行の前後 N 行を出す\n");
+    printf("  --seek-limit N       一致行の上限 (0=無制限) / --seek-time MS 走査時間の上限\n");
+    printf("  --seek-files         一致したファイル名のみ / --seek-binary バイナリも走査\n");
+    printf("  --lc                 Mach-O load commands を全部出す\n");
+    printf("  --motion ADDR        指定関数から仮想運動 (--count steps)\n");
+    printf("  --class-graph [S]    関数グラフからクラスグラフを導出 (--save で SVG)\n");
+    printf("  --display-graph S    実画面/保存モデルのノード木を cpp/svg に多態出力 (--save F)\n");
+    printf("  --virtual-display S  neodax の仮想ディスプレイ (保存済み DVNode/PID -> cpp/svg)\n");
+    printf("  --display-focus S    仮想ディスプレイを role/title の部分一致で絞る\n");
+    printf("  --class-svg ADDR OUT class + 呼び出しを SVG に (部分構造)\n");
+    printf("  --prune-svg OUT      重要+状態依存だけを SVG に (irrelevant は捨てる)\n");
     printf("  --patch-ret ADDR     関数先頭を ret に潰す (実バイナリ書換)\n");
+    printf("  --patch-bytes ADDR HEX  任意バイトを vaddr に書く\n");
     printf("  --resign PATH        ad-hoc 再署名 + 検証\n");
     printf("  --stasis S           対象が停滞かどうかを測る (--count ms)\n");
     printf("  --probe APP          起動して停滞を測定 (--count ms) を一つで\n");
+    printf("  --launch APP         バンドルを直接 detached 起動 (open なし)\n");
+    printf("  --activate APP       起動してウィンドウブロックを観測 (--count ms)\n");
+    printf("  --ax PID|S           Accessibility でウィンドウの role/title を同定\n");
+    printf("  --ax-press PID|S D   Accessibility で desc=D の要素を押す\n");
     printf("  --wire HOST:PORT     汎用バイト列プローブ (--send-text/--send-hex, --count N, --save F)\n");
     printf("  --watch S            S を含む実行パスのプロセスが現れたら終了 (--count grace_ms)\n");
     printf("  --finder-move SRC DST Finder に移動を依頼 (App Management の対象外)\n");
@@ -335,6 +358,8 @@ int main(int argc, char *argv[]) {
     g_opts.depflow_target_func[0] = '\0';
     g_opts.depflow_target_var[0] = '\0';
     g_opts.depflow_dot[0] = '\0';
+    g_opts.seek_limit = 1000;
+    g_opts.seek_time_ms = 15000;
     
     // --priv-run は以降の全引数をツールとその引数として扱い、ここで処理する。
     // (パスワード許可ダイアログの開始手続きを neodax が持つ)
@@ -411,13 +436,13 @@ int main(int argc, char *argv[]) {
             g_opts.state_tracking = 1;
         } else if (strcmp(argv[optind], "--track") == 0) {
             g_opts.track_mode = 1;                 // 復元コードの逆track
-        } else if (strcmp(argv[optind], "--track-rings") == 0) {
+        } else if (strcmp(argv[optind], "--track-annuli") == 0) {
             g_opts.track_mode = 2;                 // 環 (SCC) 解析
         } else if (strcmp(argv[optind], "--track-prune") == 0) {
             g_opts.track_mode = 3;                 // 線の分類と分析断ち切り
         } else if (strcmp(argv[optind], "--track-files") == 0) {
             g_opts.track_mode = 4;                 // このモジュールが読むファイル
-        } else if (strcmp(argv[optind], "--rings") == 0) {
+        } else if (strcmp(argv[optind], "--annuli") == 0) {
             g_opts.track_mode = 5;
         } else if (strcmp(argv[optind], "--classify") == 0) {
             g_opts.track_mode = 6;
@@ -469,11 +494,28 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[optind], "--watch") == 0 && optind + 1 < argc) {
             g_opts.track_mode = 19;                // 現れたら猶予後に終了 (サインイン窓対策)
             snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--patch-bytes") == 0 && optind + 2 < argc) {
+            g_opts.track_mode = 32;                // 任意バイトを vaddr に書く
+            g_opts.track_entry = strtoull(argv[++optind], NULL, 0);
+            snprintf(g_opts.workflow_out, sizeof(g_opts.workflow_out), "%s", argv[++optind]);
         } else if (strcmp(argv[optind], "--patch-ret") == 0 && optind + 1 < argc) {
             g_opts.track_mode = 24;                // 関数先頭を ret に
             g_opts.track_entry = strtoull(argv[++optind], NULL, 0);
         } else if (strcmp(argv[optind], "--resign") == 0 && optind + 1 < argc) {
             g_opts.track_mode = 25;                // ad-hoc 再署名 + 検証
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--ax-press") == 0 && optind + 2 < argc) {
+            g_opts.track_mode = 31;                // AX でボタンを押す
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+            snprintf(g_opts.workflow_out, sizeof(g_opts.workflow_out), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--ax") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 30;                // Accessibility でウィンドウ同定
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--activate") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 29;                // 起動 + ウィンドウブロック観測
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--launch") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 28;                // 直接 detached 起動
             snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
         } else if (strcmp(argv[optind], "--probe") == 0 && optind + 1 < argc) {
             g_opts.track_mode = 27;                // 起動 + 停滞測定を一つに
@@ -481,6 +523,53 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[optind], "--stasis") == 0 && optind + 1 < argc) {
             g_opts.track_mode = 26;                // 生きているが進んでいない状態を測る
             snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--prune-svg") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 37;                // 重要だけの SVG
+            snprintf(g_opts.workflow_out, sizeof(g_opts.workflow_out), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--class-svg") == 0 && optind + 2 < argc) {
+            g_opts.track_mode = 38;                // class + annulus を SVG に
+            g_opts.track_entry = strtoull(argv[++optind], NULL, 0);
+            snprintf(g_opts.workflow_out, sizeof(g_opts.workflow_out), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--display-focus") == 0 && optind + 1 < argc) {
+            snprintf(g_opts.display_focus, sizeof(g_opts.display_focus), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--virtual-display") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 36;                // neodax の仮想ディスプレイ (app 非依存)
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--display-graph") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 36;                // 実画面のノード木 -> cpp/svg
+            snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--class-graph") == 0) {
+            g_opts.track_mode = 35;                // 関数グラフ -> クラスグラフ導出
+            if (optind + 1 < argc && argv[optind + 1][0] != '-')
+                snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
+            else
+                g_opts.track_filter[0] = '\0';
+        } else if (strcmp(argv[optind], "--motion") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 34;                // 仮想運動 (制御流れ)
+            g_opts.track_entry = strtoull(argv[++optind], NULL, 0);
+        } else if (strcmp(argv[optind], "--seek") == 0 && optind + 1 < argc) {
+            g_opts.track_mode = 39;                // neodax の検索 ()
+            snprintf(g_opts.seek_pattern, sizeof(g_opts.seek_pattern), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--seek-ignore-case") == 0) {
+            g_opts.seek_flags |= 1;
+        } else if (strcmp(argv[optind], "--seek-regex") == 0) {
+            g_opts.seek_flags |= 2;
+        } else if (strcmp(argv[optind], "--seek-binary") == 0) {
+            g_opts.seek_flags |= 4;
+        } else if (strcmp(argv[optind], "--seek-files") == 0) {
+            g_opts.seek_flags |= 8;
+        } else if (strcmp(argv[optind], "--seek-word") == 0) {
+            g_opts.seek_flags |= 16;
+        } else if (strcmp(argv[optind], "--seek-include") == 0 && optind + 1 < argc) {
+            snprintf(g_opts.seek_include, sizeof(g_opts.seek_include), "%s", argv[++optind]);
+        } else if (strcmp(argv[optind], "--seek-context") == 0 && optind + 1 < argc) {
+            g_opts.seek_context = atoi(argv[++optind]);
+        } else if (strcmp(argv[optind], "--seek-limit") == 0 && optind + 1 < argc) {
+            g_opts.seek_limit = atoi(argv[++optind]);
+        } else if (strcmp(argv[optind], "--seek-time") == 0 && optind + 1 < argc) {
+            g_opts.seek_time_ms = atoi(argv[++optind]);
+        } else if (strcmp(argv[optind], "--lc") == 0) {
+            g_opts.track_mode = 33;                // Mach-O load commands
         } else if (strcmp(argv[optind], "--imports") == 0) {
             g_opts.track_mode = 23;                // import シンボル一覧
             if (optind + 1 < argc && argv[optind + 1][0] != '-')
@@ -493,6 +582,16 @@ int main(int argc, char *argv[]) {
                 snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
             else
                 g_opts.track_filter[0] = '\0';
+        } else if (strcmp(argv[optind], "--ae-login-purge") == 0) {
+            g_opts.track_mode = 43;                // AE のログイン状態/ログを退避
+        } else if (strcmp(argv[optind], "--purge") == 0) {
+            g_opts.track_taken = 1;                // --ae-login-purge のバックアップも完全削除
+        } else if (strcmp(argv[optind], "--advise-ae") == 0) {
+            g_opts.track_mode = 44;                // AE 起動/ログインの IT アドバイザ
+        } else if (strcmp(argv[optind], "--predict-login") == 0) {
+            g_opts.track_mode = 42;                // ログインダイアログの静的予測
+        } else if (strcmp(argv[optind], "--ngl-reset") == 0) {
+            g_opts.track_mode = 40;                // NGL の状態を退避 (--apply)
         } else if (strcmp(argv[optind], "--heal-state") == 0) {
             g_opts.track_mode = 14;                // SSO フラグを良い状態に揃える
         } else if (strcmp(argv[optind], "--fork") == 0 ||
@@ -511,7 +610,7 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[optind], "--taken") == 0) {
             g_opts.track_taken = 1;
         } else if (strcmp(argv[optind], "--workflow") == 0 && optind + 1 < argc) {
-            snprintf(g_opts.workflow_out, sizeof(g_opts.workflow_out), "%s", argv[++optind]);                 // neodax 本来の環 (depflow_build_rings)
+            snprintf(g_opts.workflow_out, sizeof(g_opts.workflow_out), "%s", argv[++optind]);                 // neodax 本来の環 (depflow_build_annuli)
         } else if (strcmp(argv[optind], "--track-filter") == 0 && optind + 1 < argc) {
             snprintf(g_opts.track_filter, sizeof(g_opts.track_filter), "%s", argv[++optind]);
         } else if (strcmp(argv[optind], "--track-entry") == 0 && optind + 1 < argc) {
@@ -602,16 +701,64 @@ int main(int argc, char *argv[]) {
         extern int nx_state_heal(const char *, int, FILE *);
         return nx_state_heal(NULL, g_opts.track_apply, stdout);
     }
+    // --advise-ae は Signal を分類して Verdict/Advice を出し、SVG に描く。
+    if (g_opts.track_mode == 44) {
+        extern int nx_advise_ae(const char *, FILE *);
+        return nx_advise_ae(g_opts.wire_save[0] ? g_opts.wire_save : NULL, stdout);
+    }
+    // --ae-login-purge は AE のログイン状態とアクセスログを退避する。
+    if (g_opts.track_mode == 43) {
+        extern int nx_ae_login_purge(int, int, FILE *);
+        return nx_ae_login_purge(g_opts.track_apply, g_opts.track_taken, stdout);
+    }
+    // --predict-login は NGL の状態だけを見て、ログインダイアログを静的に予測する。
+    if (g_opts.track_mode == 42) {
+        extern int nx_predict_login(FILE *);
+        return nx_predict_login(stdout);
+    }
+    // --ngl-reset は NGL の状態をアクティブな場所から退避する。
+    if (g_opts.track_mode == 40) {
+        extern int nx_ngl_reset(int, FILE *);
+        return nx_ngl_reset(g_opts.track_apply, stdout);
+    }
     // --term はプロセス名で止まった相手を解放する (入力はバイナリではない)。
     if (g_opts.track_mode == 16) {
         extern int nx_release_proc(const char *, int, FILE *);
         return nx_release_proc(g_opts.track_filter, g_opts.track_apply, stdout);
+    }
+    // --ax-press は Accessibility で要素を押す。
+    if (g_opts.track_mode == 31) {
+        extern int nx_ax_press(const char *, const char *, FILE *);
+        return nx_ax_press(g_opts.track_filter, g_opts.workflow_out, stdout);
+    }
+    // --ax は Accessibility でウィンドウを同定する。
+    if (g_opts.track_mode == 30) {
+        extern int nx_ax_windows(const char *, FILE *);
+        return nx_ax_windows(g_opts.track_filter, stdout);
+    }
+    // --activate は起動し、ウィンドウブロックを pid で観測する (キャプチャなし)。
+    if (g_opts.track_mode == 29) {
+        extern int nx_activate(const char *, int, FILE *);
+        return nx_activate(g_opts.track_filter,
+                           g_opts.track_pick > 0 ? g_opts.track_pick : 10000, stdout);
+    }
+    // --launch はバンドルの実行ファイルを直接起動する。
+    if (g_opts.track_mode == 28) {
+        extern int nx_launch(const char *, FILE *);
+        return nx_launch(g_opts.track_filter, stdout);
     }
     // --probe は起動して停滞を測るまでを一つで行う。
     if (g_opts.track_mode == 27) {
         extern int nx_probe(const char *, int, FILE *);
         return nx_probe(g_opts.track_filter,
                         g_opts.track_pick > 0 ? g_opts.track_pick : 8000, stdout);
+    }
+    if (g_opts.track_mode == 36) {
+        extern int nx_display_graph(const char *, const char *, FILE *);
+        extern void nx_display_set_focus(const char *);
+        if (g_opts.display_focus[0]) nx_display_set_focus(g_opts.display_focus);
+        return nx_display_graph(g_opts.track_filter,
+                                g_opts.wire_save[0] ? g_opts.wire_save : NULL, stdout);
     }
     // --stasis は対象の停滞を測る (入力はバイナリではない)。
     if (g_opts.track_mode == 26) {
@@ -654,6 +801,16 @@ int main(int argc, char *argv[]) {
                        2000, g_opts.wire_save, stdout);
     }
 
+    // --seek は入力がバイナリでなくてもよい (ディレクトリ・テキストを走査する)。
+    if (g_opts.track_mode == 39) {
+        extern int nx_seek(const char *, const char *, const char *, int, int, int, int, FILE *);
+        const char *root = (optind < argc) ? argv[optind] : ".";
+        return nx_seek(g_opts.seek_pattern, root,
+                       g_opts.seek_include[0] ? g_opts.seek_include : NULL,
+                       g_opts.seek_flags, g_opts.seek_context,
+                       g_opts.seek_limit, g_opts.seek_time_ms, stdout);
+    }
+
     // Check if we have a binary file
     if (optind >= argc) {
         fprintf(stderr, "Error: No binary file specified\n");
@@ -668,7 +825,10 @@ int main(int argc, char *argv[]) {
         g_opts.track_mode == 10 || g_opts.track_mode == 11 || g_opts.track_mode == 12 ||
         g_opts.track_mode == 13 || g_opts.track_mode == 15 ||
         g_opts.track_mode == 17 || g_opts.track_mode == 23 ||
-        g_opts.track_mode == 24) {
+        g_opts.track_mode == 24 || g_opts.track_mode == 32 ||
+        g_opts.track_mode == 33 || g_opts.track_mode == 34 ||
+        g_opts.track_mode == 35 || g_opts.track_mode == 36 ||
+        g_opts.track_mode == 37 || g_opts.track_mode == 38) {
         extern int nx_find_string(const char *, const char *, FILE *);
         extern int nx_guard_run(const char *, const char *, int, int, int, FILE *);
         extern int nx_list_symbols(const char *, const char *, FILE *);
@@ -679,6 +839,27 @@ int main(int argc, char *argv[]) {
         extern int nx_cpp_classes(const char *, const char *, FILE *);
         extern int nx_list_imports(const char *, const char *, FILE *);
         extern int nx_patch_ret(const char *, uint64_t, FILE *);
+        extern int nx_patch_bytes(const char *, uint64_t, const char *, FILE *);
+        extern int nx_load_commands(const char *, FILE *);
+        extern int nx_motion(const char *, uint64_t, int, FILE *);
+        extern int nx_class_graph(const char *, const char *, const char *, FILE *);
+        extern int nx_class_svg(const char *, uint64_t, const char *, int, FILE *);
+        extern int nx_prune_svg(const char *, const char *, FILE *);
+        if (g_opts.track_mode == 37)
+            return nx_prune_svg(filename, g_opts.workflow_out, stdout);
+        if (g_opts.track_mode == 38)
+            return nx_class_svg(filename, g_opts.track_entry, g_opts.workflow_out,
+                                g_opts.track_pick > 0 ? g_opts.track_pick : 600, stdout);
+        if (g_opts.track_mode == 35)
+            return nx_class_graph(filename, g_opts.track_filter,
+                                  g_opts.wire_save[0] ? g_opts.wire_save : NULL, stdout);
+        if (g_opts.track_mode == 34)
+            return nx_motion(filename, g_opts.track_entry,
+                             g_opts.track_pick > 0 ? g_opts.track_pick : 400, stdout);
+        if (g_opts.track_mode == 33)
+            return nx_load_commands(filename, stdout);
+        if (g_opts.track_mode == 32)
+            return nx_patch_bytes(filename, g_opts.track_entry, g_opts.workflow_out, stdout);
         if (g_opts.track_mode == 24)
             return nx_patch_ret(filename, g_opts.track_entry, stdout);
         if (g_opts.track_mode == 23)
@@ -713,7 +894,7 @@ int main(int argc, char *argv[]) {
     }
 
     // --track は独立したモード。生の call 命令は使わない。
-    // 環は neodax 本来の depflow_build_rings の結果をそのまま読む。
+    // 環は neodax 本来の depflow_build_annuli の結果をそのまま読む。
     if (g_opts.track_mode) {
         macho_binary_t bin;
         macho_init(&bin);
@@ -727,7 +908,7 @@ int main(int argc, char *argv[]) {
 
         // 環の報告は depflow の戻り値依存辺から作る (効率的・本来の意味)。
         if (g_opts.track_mode == 5 || g_opts.track_mode == 6) {
-            extern int nx_rings_report(macho_binary_t *, depflow_graph_t *, FILE *);
+            extern int nx_annuli_report(macho_binary_t *, depflow_graph_t *, FILE *);
             extern int nx_classify_report(macho_binary_t *, depflow_graph_t *, const char *, FILE *);
             macho_analyze(&bin, &g_opts);
             extern int nx_narrow_functions(macho_binary_t *);
@@ -737,7 +918,7 @@ int main(int argc, char *argv[]) {
             depflow_graph_init(&dg);
             depflow_build_dependency_graph(&bin, &dg);
             if (g_opts.track_mode == 5)
-                nx_rings_report(&bin, &dg, stdout);
+                nx_annuli_report(&bin, &dg, stdout);
             else
                 nx_classify_report(&bin, &dg, g_opts.workflow_out, stdout);
             depflow_graph_free(&dg);

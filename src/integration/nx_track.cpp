@@ -53,7 +53,11 @@
 #include <fcntl.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <CFNetwork/CFNetwork.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <ApplicationServices/ApplicationServices.h>
 #include <cctype>
+#include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <Carbon/Carbon.h>
 #include <Security/Authorization.h>
@@ -1079,9 +1083,9 @@ std::vector<BackTracker::Finding> BackTracker::track(const std::string &substr,
     return out;
 }
 
-// ============================================================ RingAnalyzer
+// ============================================================ AnnulusAnalyzer
 //
-// depflow_build_rings と同じ概念の環 (call-graph SCC) を、静的な呼び出し関係から作る。
+// depflow_build_annuli と同じ概念の環 (call-graph SCC) を、静的な呼び出し関係から作る。
 //
 // 狙い:
 //   「待ち」と「動かないブロック」は同じ形をしている。
@@ -1093,7 +1097,7 @@ std::vector<BackTracker::Finding> BackTracker::track(const std::string &substr,
 //   環の中で待ちエッジが閉じている場合、その環は
 //   「待っても何もできない」状態になる。切るべきはその待ちエッジ1本。
 
-class RingAnalyzer {
+class AnnulusAnalyzer {
 public:
     struct Node {
         uint64_t addr = 0;          // 内部関数の先頭。外部は 0
@@ -1106,16 +1110,16 @@ public:
     };
 
     void build(const MachOImage &img, const XRefIndex &xr);
-    void find_rings();                       // Tarjan SCC
+    void find_annuli();                       // Tarjan SCC
 
-    struct StallRing {
+    struct StallAnnulus {
         std::vector<std::string> members;
         std::vector<std::string> wait_edges;  // 切る候補
         std::vector<std::string> spawn_edges;
     };
-    std::vector<StallRing> stall_rings() const;
+    std::vector<StallAnnulus> stall_annuli() const;
     const std::vector<Node> &nodes() const { return nodes_; }
-    size_t ring_count() const { return rings_; }
+    size_t annulus_count() const { return annuli_; }
 
     static bool is_wait_symbol(const std::string &s);
     static bool is_spawn_symbol(const std::string &s);
@@ -1124,14 +1128,14 @@ private:
     std::vector<Node> nodes_;
     std::map<uint64_t, size_t> addr_to_node_;
     std::map<std::string, size_t> ext_to_node_;
-    size_t rings_ = 0;
+    size_t annuli_ = 0;
 
     const MachOImage *img_ = nullptr;
     std::vector<uint64_t> func_starts_;
     uint64_t func_of(uint64_t addr) const;
 };
 
-bool RingAnalyzer::is_wait_symbol(const std::string &s) {
+bool AnnulusAnalyzer::is_wait_symbol(const std::string &s) {
     // 注意: "Block"/"block" は「コードブロック」の意でも使われるため除外する。
     //        "lock" 小文字は "block" に部分一致するので使わない。
     static const char *pat[] = {
@@ -1146,7 +1150,7 @@ bool RingAnalyzer::is_wait_symbol(const std::string &s) {
     return false;
 }
 
-bool RingAnalyzer::is_spawn_symbol(const std::string &s) {
+bool AnnulusAnalyzer::is_spawn_symbol(const std::string &s) {
     static const char *pat[] = {
         "Spawn", "spawn", "Launch", "launch", "Relaunch", "relaunch",
         "CreateProcess", "NSTask", "Fork", "fork", "Exec", "exec",
@@ -1157,14 +1161,14 @@ bool RingAnalyzer::is_spawn_symbol(const std::string &s) {
     return false;
 }
 
-uint64_t RingAnalyzer::func_of(uint64_t addr) const {
+uint64_t AnnulusAnalyzer::func_of(uint64_t addr) const {
     if (func_starts_.empty()) return addr;
     auto it = std::upper_bound(func_starts_.begin(), func_starts_.end(), addr);
     if (it == func_starts_.begin()) return addr;
     return *(--it);
 }
 
-void RingAnalyzer::build(const MachOImage &img, const XRefIndex &xr) {
+void AnnulusAnalyzer::build(const MachOImage &img, const XRefIndex &xr) {
     img_ = &img;
 
     // 関数一覧 (LC_FUNCTION_STARTS + defined シンボル)
@@ -1231,7 +1235,7 @@ void RingAnalyzer::build(const MachOImage &img, const XRefIndex &xr) {
     }
 }
 
-void RingAnalyzer::find_rings() {
+void AnnulusAnalyzer::find_annuli() {
     // Tarjan SCC (反復実装: 深い呼び出しでも再帰を作らない)
     const size_t N = nodes_.size();
     std::vector<int> index(N, -1), low(N, 0), onstk(N, 0);
@@ -1282,7 +1286,7 @@ void RingAnalyzer::find_rings() {
                         if (w == vv) break;
                     }
                     if (comp > 1) {
-                        int id = (int)rings_++;
+                        int id = (int)annuli_++;
                         for (size_t w : members) nodes_[w].scc = id;
                     } else {
                         nodes_[vv].scc = -1;
@@ -1293,11 +1297,11 @@ void RingAnalyzer::find_rings() {
     }
 }
 
-std::vector<RingAnalyzer::StallRing> RingAnalyzer::stall_rings() const {
-    std::map<int, StallRing> by_scc;
+std::vector<AnnulusAnalyzer::StallAnnulus> AnnulusAnalyzer::stall_annuli() const {
+    std::map<int, StallAnnulus> by_scc;
     for (const auto &n : nodes_) {
         if (n.scc < 0) continue;
-        StallRing &r = by_scc[n.scc];
+        StallAnnulus &r = by_scc[n.scc];
         if (!n.name.empty())
             r.members.push_back(n.name + (n.is_wait ? "   [WAIT]" : (n.is_spawn ? "   [SPAWN]" : "")));
         for (const auto &e : n.callee_ext) {
@@ -1305,13 +1309,13 @@ std::vector<RingAnalyzer::StallRing> RingAnalyzer::stall_rings() const {
             if (is_spawn_symbol(e)) r.spawn_edges.push_back(n.name + "  --spawn--> " + e);
         }
     }
-    std::vector<StallRing> out;
+    std::vector<StallAnnulus> out;
     for (auto &kv : by_scc) {
         // 待ちエッジを持つ環を先に、持たない環も含めて返す。
         // 持たない環は「健全な相互再帰」、持つ環が「待ちが閉じた環」の候補。
         out.push_back(kv.second);
     }
-    std::sort(out.begin(), out.end(), [](const StallRing &a, const StallRing &b) {
+    std::sort(out.begin(), out.end(), [](const StallAnnulus &a, const StallAnnulus &b) {
         size_t aw = a.wait_edges.size() + a.spawn_edges.size();
         size_t bw = b.wait_edges.size() + b.spawn_edges.size();
         if (aw != bw) return aw > bw;
@@ -1352,7 +1356,7 @@ public:
         bool internal = false;
     };
 
-    void run(const RingAnalyzer &ra, uint64_t entry);
+    void run(const AnnulusAnalyzer &ra, uint64_t entry);
     const std::vector<EdgeInfo> &edges() const { return edges_; }
     size_t cuts() const { return cuts_; }
     size_t reached() const { return reached_; }
@@ -1373,7 +1377,7 @@ const char *EdgeClassifier::cls_name(Cls c) {
     return "?";
 }
 
-void EdgeClassifier::run(const RingAnalyzer &ra, uint64_t entry) {
+void EdgeClassifier::run(const AnnulusAnalyzer &ra, uint64_t entry) {
     const auto &ns = ra.nodes();
     if (ns.empty()) return;
 
@@ -1441,8 +1445,8 @@ void EdgeClassifier::run(const RingAnalyzer &ra, uint64_t entry) {
             e.from = nu.name;
             e.to = sym;
             e.internal = false;
-            e.wait = RingAnalyzer::is_wait_symbol(sym);
-            e.spawn = RingAnalyzer::is_spawn_symbol(sym);
+            e.wait = AnnulusAnalyzer::is_wait_symbol(sym);
+            e.spawn = AnnulusAnalyzer::is_spawn_symbol(sym);
             // 外部の待ち/起動は「状態で動く・動かない」を決めるので必要線として残す。
             e.cls = (e.wait || e.spawn) ? Cls::Necessary : Cls::Irrelevant;
             edges_.push_back(std::move(e));
@@ -1462,7 +1466,7 @@ void EdgeClassifier::run(const RingAnalyzer &ra, uint64_t entry) {
 
 class Importance {
 public:
-    void build(const RingAnalyzer &ra, uint64_t entry);
+    void build(const AnnulusAnalyzer &ra, uint64_t entry);
     bool reaches(uint64_t f) const { return reachable_.count(f) != 0; }
     bool important(uint64_t f) const { return important_.count(f) != 0; }
     size_t reachable_count() const { return reachable_.size(); }
@@ -1473,7 +1477,7 @@ private:
     std::set<uint64_t> important_;
 };
 
-void Importance::build(const RingAnalyzer &ra, uint64_t entry) {
+void Importance::build(const AnnulusAnalyzer &ra, uint64_t entry) {
     const auto &ns = ra.nodes();
     std::map<uint64_t, size_t> by_addr;
     for (size_t i = 0; i < ns.size(); i++)
@@ -1521,7 +1525,7 @@ public:
         std::string effect;               // 終端の効果
     };
 
-    void build(const RingAnalyzer &ra) {
+    void build(const AnnulusAnalyzer &ra) {
         ns_ = &ra.nodes();
         for (size_t i = 0; i < ns_->size(); i++)
             if ((*ns_)[i].addr) by_addr_[(*ns_)[i].addr] = i;
@@ -1532,7 +1536,7 @@ public:
                      Found *out) const;
 
 private:
-    const std::vector<RingAnalyzer::Node> *ns_ = nullptr;
+    const std::vector<AnnulusAnalyzer::Node> *ns_ = nullptr;
     std::map<uint64_t, size_t> by_addr_;
 };
 
@@ -1588,7 +1592,7 @@ bool PathFinder::find_effect(uint64_t entry, const std::vector<std::string> &pat
         std::vector<std::string> filters;
         bool symbols_only = false;
         bool verbose = false;
-        bool rings = false;      // 環 (SCC) 解析モード
+        bool annuli = false;      // 環 (SCC) 解析モード
         bool prune = false;      // 分析断ち切り (エッジ分類) モード
         bool files = false;      // ファイルアクセス解析モード
         bool widget = false;     // ウィジェット構成のシミュレート
@@ -1679,11 +1683,11 @@ int RestoreLocator::run(const std::string &path, FILE *out) {
     BackTracker bt(*img, xr);
 
     // 重要な関数に届くかを再現する (時間や件数では切らない)
-    RingAnalyzer rings;
-    rings.build(*img, xr);
-    rings.find_rings();
+    AnnulusAnalyzer annuli;
+    annuli.build(*img, xr);
+    annuli.find_annuli();
     Importance imp;
-    imp.build(rings, img->entry());
+    imp.build(annuli, img->entry());
     store.observe("reachable_bucket", std::to_string(imp.reachable_count() / 64));
     store.observe("important_bucket", std::to_string(imp.important_count() / 64));
 
@@ -1729,9 +1733,9 @@ int RestoreLocator::run(const std::string &path, FILE *out) {
 
     // 分析を断ち切る: 線を 必要 / 邪魔 / どうでもいい に分類し、進展ゼロで探索を打ち切る
     if (opt_.prune) {
-        RingAnalyzer ra;
+        AnnulusAnalyzer ra;
         ra.build(*img, xr);
-        ra.find_rings();
+        ra.find_annuli();
 
         EdgeClassifier ec;
         uint64_t entry = opt_.entry ? opt_.entry : img->entry();
@@ -1778,16 +1782,16 @@ int RestoreLocator::run(const std::string &path, FILE *out) {
     }
 
     // 環 (SCC) 解析: 「待ち」と「ブロック」を同一機構で検出する
-    if (opt_.rings) {
-        RingAnalyzer ra;
+    if (opt_.annuli) {
+        AnnulusAnalyzer ra;
         ra.build(*img, xr);
-        ra.find_rings();
-        auto rings = ra.stall_rings();
-        (void)rings;
-        fprintf(out, "  nodes=%zu  rings(SCC>1)=%zu\n",
-                ra.nodes().size(), ra.ring_count());
+        ra.find_annuli();
+        auto annuli = ra.stall_annuli();
+        (void)annuli;
+        fprintf(out, "  nodes=%zu  annuli(SCC>1)=%zu\n",
+                ra.nodes().size(), ra.annulus_count());
         size_t shown = 0;
-        for (const auto &r : ra.stall_rings()) {
+        for (const auto &r : ra.stall_annuli()) {
             if (++shown > 12) break;
             bool has_wait = !r.wait_edges.empty() || !r.spawn_edges.empty();
             fprintf(out, "  --- 環 #%zu  members=%zu %s ---\n", shown, r.members.size(),
@@ -1844,7 +1848,7 @@ int RestoreLocator::run(const std::string &path, FILE *out) {
     // 意味のある結果になったかを再現する。
     // 件数や時間ではなく、「入口から具体的な効果までの経路が実在するか」で判定する。
     PathFinder pf;
-    pf.build(rings);
+    pf.build(annuli);
     std::vector<std::string> effects;
     for (const auto &f : filters) effects.push_back(f);
     for (const char *e : {"open", "fopen", "access", "stat", "exit", "abort",
@@ -1872,7 +1876,7 @@ int RestoreLocator::run(const std::string &path, FILE *out) {
 
 // ============================================================ C 入口
 // neodax_static (C の CLI) から呼ぶための薄いラッパ。
-// mode: 0=既定(逆track) 1=--rings 2=--prune 3=--files
+// mode: 0=既定(逆track) 1=--annuli 2=--prune 3=--files
 
 extern "C" int nx_track_run(const char *path, int mode, uint64_t entry,
                            const char *filter, int symbols_only, FILE *out) {
@@ -1889,7 +1893,7 @@ extern "C" int nx_track_run(const char *path, int mode, uint64_t entry,
         if (!cur.empty()) opt.filters.push_back(cur);
     }
     switch (mode) {
-        case 1: opt.rings = true; break;
+        case 1: opt.annuli = true; break;
         case 2: opt.prune = true; break;
         case 3: opt.files = true; break;
         default: break;
@@ -1901,24 +1905,24 @@ extern "C" int nx_track_run(const char *path, int mode, uint64_t entry,
 
 // ---------------------------------------------------------------- 環の報告
 //
-// neodax 本来の環は depflow_build_rings が作る。
+// neodax 本来の環は depflow_build_annuli が作る。
 // 戻り値由来の呼び出し辺 (DEPFLOW_ORIGIN_CALLEE_RET) だけを
 // Kosaraju SCC でまとめたもの。生の call 命令は使わない。
-// ここはその結果 (summaries[i].ring_id) を読むだけで、作り直さない。
+// ここはその結果 (summaries[i].annulus_id) を読むだけで、作り直さない。
 //
-extern "C" int nx_rings_report(macho_binary_t *bin, depflow_graph_t *g, FILE *out) {
+extern "C" int nx_annuli_report(macho_binary_t *bin, depflow_graph_t *g, FILE *out) {
     if (!out) out = stdout;
     // どこで環が生まれなかったかが分かるように、まず数を出す。
     std::fprintf(out, "関数は %d 個で、シンボルは %d 個で、xref は %d 個で、要約は %d 個で、環は %d 個です。\n",
                  bin ? bin->nfunctions : 0, bin ? bin->nsymbols : 0,
                  bin ? bin->nxrefs : 0,
-                 g ? g->summary_count : 0, g ? g->ring_count : 0);
+                 g ? g->summary_count : 0, g ? g->annulus_count : 0);
     if (!bin || !g || !g->summaries || g->summary_count <= 0) {
         std::fprintf(out, "意味がありませんでした\n");
         return 0;
     }
 
-    // 環は辺から自分で求める。depflow の ring_id は戻り値依存辺しか見ておらず、
+    // 環は辺から自分で求める。depflow の annulus_id は戻り値依存辺しか見ておらず、
     // 相互再帰を取り逃すためである。呼び出し辺 (CONTROL, 非間接) を使う。
     std::vector<std::vector<int>> adj(bin->nfunctions);
     int n_ctrl = 0, n_mapped = 0;
@@ -2248,8 +2252,8 @@ extern "C" int nx_classify_report(macho_binary_t *bin, depflow_graph_t *g,
     // 変数の住所を関数の住所として引いてはいけない。参照する関数側で揃える。
     auto group_of = [&](int fi) -> int {
         if (fi < 0) return -1;
-        if (g->summaries && fi < g->summary_count && g->summaries[fi].ring_id >= 0)
-            return g->summaries[fi].ring_id;
+        if (g->summaries && fi < g->summary_count && g->summaries[fi].annulus_id >= 0)
+            return g->summaries[fi].annulus_id;
         char role[64];
         if (!depflow_function_role(bin, g, fi, role, sizeof(role))) return -1;
         int hv = 0;
@@ -2540,7 +2544,13 @@ extern "C" int nx_scan_strings(const char *path, const char *needle, FILE *out) 
     if (files.empty()) { std::fprintf(out, "ファイルがありません: %s\n", path); return 1; }
     std::fprintf(out, "%zu 個の Mach-O を走査します。\n", files.size());
     int total = 0, hitfiles = 0;
+    auto t0 = std::chrono::steady_clock::now();
     for (const auto &f : files) {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count() > 5000) {
+            std::fprintf(out, "[5秒上限] 残りは打ち切り\n");
+            break;
+        }
         std::ifstream in(f, std::ios::binary);
         if (!in) continue;
         std::string data((std::istreambuf_iterator<char>(in)),
@@ -2743,8 +2753,17 @@ extern "C" int nx_list_deps(const char *path, int recursive, FILE *out) {
 
     std::set<std::string> seen;
     std::vector<std::pair<int, std::string>> queue;
-    queue.push_back({0, root});
+    struct stat rst;
+    if (stat(root.c_str(), &rst) == 0 && S_ISDIR(rst.st_mode)) {
+        std::vector<std::string> roots;
+        nx_walk_macho(root, roots, 0);
+        std::fprintf(out, "ディレクトリ: %zu 個の Mach-O を起点にします。\n", roots.size());
+        for (const auto &r : roots) queue.push_back({0, r});
+    } else {
+        queue.push_back({0, root});
+    }
     int total = 0, unresolved = 0, files = 0;
+    auto t0 = std::chrono::steady_clock::now();
     // dyld は @rpath を「読み込み連鎖全体の rpath」で解決する。
     // ローダ単体の rpath だけでは足りないので、走査した全イメージの
     // rpath を集めて使う (ルートを最初に処理するので順序も保たれる)。
@@ -2754,6 +2773,11 @@ extern "C" int nx_list_deps(const char *path, int recursive, FILE *out) {
         std::string p = queue.front().second;
         queue.erase(queue.begin());
         if (!seen.insert(p).second) continue;
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count() > 10000) {
+            std::fprintf(out, "[10秒上限] 打ち切り\n");
+            break;
+        }
         if (recursive && depth > 8) continue;
         auto img = nx::MachOImage::open(p);
         if (!img) continue;
@@ -2810,6 +2834,10 @@ static const nx_state_rule k_state_rules[] = {
     { "adobe", "Library/Application Support/Adobe",
       { { ".adobestatusnotification", "IMS_ACTIVE" },
         { ".adobelicnotification",   "SIGNIN" } } },
+    // NGL は Group Container 側にも V2 の通知フラグを持つ。
+    // アプリ本体側だけ揃えても、こちらが SIGNOUT のままだとサインアウトされる。
+    { "ngl", NULL,
+      { { ".adobelicnotificationV2", "SIGNIN" } } },
 };
 
 static std::string nx_trim(const std::string &s) {
@@ -2833,6 +2861,27 @@ static bool nx_write_small(const std::string &p, const std::string &v) {
     return (bool)f;
 }
 
+// Group Containers の "<TEAM>.<suffix>" を探す (TEAM は環境で変わる)。
+static std::string nx_find_suffix_in(const std::string &dir, const std::string &suffix) {
+    DIR *d = opendir(dir.c_str());
+    if (!d) return {};
+    std::string found;
+    while (struct dirent *e = readdir(d)) {
+        std::string n = e->d_name;
+        if (n.size() >= suffix.size() &&
+            n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            found = nx_join_path(dir, n);
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+static std::string nx_find_group_container(const std::string &home, const std::string &suffix) {
+    return nx_find_suffix_in(nx_join_path(home, "Library/Group Containers"), suffix);
+}
+
 extern "C" int nx_state_heal(const char *name, int apply, FILE *out) {
     if (!out) out = stdout;
     const char *h = std::getenv("HOME");
@@ -2841,7 +2890,18 @@ extern "C" int nx_state_heal(const char *name, int apply, FILE *out) {
     for (const auto &r : k_state_rules) {
         if (name && *name && std::string(name) != r.name) continue;
         handled++;
-        std::string dir = nx_join_path(home, r.rel_dir);
+        std::string dir;
+        if (r.rel_dir && *r.rel_dir) {
+            dir = nx_join_path(home, r.rel_dir);
+        } else {
+            // rel_dir が無い規則は Group Container を名前で探す。
+            std::string gc = nx_find_group_container(home, "com.adobe.NGL");
+            if (gc.empty()) {
+                std::fprintf(out, "=== %s ===\n  Group Container が見つかりません\n\n", r.name);
+                continue;
+            }
+            dir = nx_join_path(gc, "licflags");
+        }
         std::fprintf(out, "=== %s ===\n  dir: %s\n", r.name, dir.c_str());
 
         struct Item { std::string path; const char *want; bool ok; bool exists; };
@@ -2900,6 +2960,246 @@ extern "C" int nx_state_heal(const char *name, int apply, FILE *out) {
         std::fprintf(out, "対象がありません: %s\n", name ? name : "");
         return 1;
     }
+    return 0;
+}
+
+// NGL の状態 (Group Container / Application Scripts / ~/Library/NGL) を
+// アクティブな場所から退避する。削除ではなく rename で戻せる形にする。
+// apply=0 は提示のみ。
+extern "C" int nx_ngl_reset(int apply, FILE *out) {
+    if (!out) out = stdout;
+    const char *h = std::getenv("HOME");
+    std::string home = h ? h : "";
+
+    std::vector<std::string> targets;
+    std::string gc = nx_find_group_container(home, "com.adobe.NGL");
+    if (!gc.empty()) targets.push_back(gc);
+    std::string scripts = nx_find_suffix_in(
+        nx_join_path(home, "Library/Application Scripts"), "com.adobe.NGL");
+    if (!scripts.empty()) targets.push_back(scripts);
+    targets.push_back(nx_join_path(home, "Library/NGL"));
+
+    std::vector<std::string> existing;
+    for (const auto &p : targets)
+        if (nx_path_exists(p)) existing.push_back(p);
+
+    if (existing.empty()) {
+        std::fprintf(out, "NGL の状態は見つかりませんでした。\n");
+        return 1;
+    }
+
+    char ts[32] = {0};
+    std::time_t now = std::time(NULL);
+    std::strftime(ts, sizeof ts, "%Y%m%d-%H%M%S", std::localtime(&now));
+
+    for (const auto &p : existing) {
+        std::string bak = p + ".nx-backup-" + ts;
+        if (!apply) {
+            std::fprintf(out, "[dry-run] %s -> %s\n", p.c_str(), bak.c_str());
+            continue;
+        }
+        if (std::rename(p.c_str(), bak.c_str()) == 0) {
+            std::fprintf(out, "退避: %s -> %s\n", p.c_str(), bak.c_str());
+        } else {
+            std::fprintf(out, "退避できません: %s\n", p.c_str());
+        }
+    }
+    if (!apply) std::fprintf(out, "--apply で退避します。\n");
+    return 0;
+}
+
+// ログイン/ライセンスダイアログの静的予測。
+//
+// back-track (実測した呼び出し鎖):
+//   NGLWMessageManager::_getSUSIURL
+//     -> NglController::SignInWithoutSpinner
+//     -> NGL auth workflow -> CEF
+//     -> Contents/Resources/ngl/resources/ui/index.html ("Adobe Licensing")
+//   aelicensing::HaveUser -> GetIMSUserID
+//   aelicensing::OnLicenseChanged -> licensingglue::GetNGLProfileAsJSON
+//     -> AccessProfileData::Deserialize("NGL_ACCESSPROFILE")
+//
+// 予測式: login = !profile || !sso
+//   profile = Group Container の ASNPsv2 に NGL アクセスプロファイルがある
+//   sso     = .adobelicnotification == SIGNIN かつ .adobestatusnotification == IMS_ACTIVE
+static bool nx_dir_has_entries(const std::string &p) {
+    DIR *d = opendir(p.c_str());
+    if (!d) return false;
+    bool any = false;
+    while (struct dirent *e = readdir(d)) {
+        if (std::strcmp(e->d_name, ".") && std::strcmp(e->d_name, "..")) { any = true; break; }
+    }
+    closedir(d);
+    return any;
+}
+
+extern "C" int nx_predict_login(FILE *out) {
+    if (!out) out = stdout;
+    const char *h = std::getenv("HOME");
+    std::string home = h ? h : "";
+
+    std::string oobe = nx_join_path(home, "Library/Application Support/Adobe/OOBE");
+    std::string prefs;
+    nx_read_small(nx_join_path(oobe, "com.adobe.acc.container.default.prefs"), prefs);
+    bool logged_out = prefs.find("LoggedOutModeEnabled\">true") != std::string::npos;
+    bool logged_in_flag = prefs.find("LoggedOutModeEnabled\">false") != std::string::npos;
+
+    std::string gc = nx_find_group_container(home, "com.adobe.NGL");
+    bool have_gc = !gc.empty();
+
+    std::string adobe = nx_join_path(home, "Library/Application Support/Adobe");
+    std::string st, lic, v2;
+    nx_read_small(nx_join_path(adobe, ".adobestatusnotification"), st);
+    nx_read_small(nx_join_path(adobe, ".adobelicnotification"), lic);
+    if (have_gc) nx_read_small(nx_join_path(gc, "licflags/.adobelicnotificationV2"), v2);
+    st = nx_trim(st); lic = nx_trim(lic); v2 = nx_trim(v2);
+    bool sso = (st == "IMS_ACTIVE") && (lic == "SIGNIN") && (v2 == "SIGNIN");
+
+    // 判定は「起動時点で持続している状態」だけを使う。
+    // NGL コンテナの有無は on-demand に作り直されるので判定に使わない。
+    const char *verdict;
+    const char *why;
+    if (logged_out) {
+        verdict = "YES"; why = "OOBE LoggedOutModeEnabled=true (持続マーカー)";
+    } else if (logged_in_flag && sso) {
+        verdict = "NO";  why = "LoggedOutMode=false かつ SSO/V2 が SIGNIN";
+    } else {
+        verdict = "UNKNOWN"; why = "持続マーカーが無い (NGL は起動時に生成されるため現在の不在は根拠にならない)";
+    }
+
+    char ts[32] = {0};
+    std::time_t now = std::time(NULL);
+    std::strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", std::localtime(&now));
+    std::fprintf(out, "=== login dialog prediction (static, observed_at=%s) ===\n", ts);
+    std::fprintf(out, "  OOBE prefs           : %s\n", prefs.empty() ? "(無し)" : "present");
+    std::fprintf(out, "  LoggedOutModeEnabled : %s\n", logged_out ? "true" : logged_in_flag ? "false" : "(不明)");
+    std::fprintf(out, "  SSO status           : \"%s\"\n", st.c_str());
+    std::fprintf(out, "  SSO lic notification : \"%s\"\n", lic.c_str());
+    std::fprintf(out, "  SSO V2 notification  : \"%s\"\n", v2.empty() ? "(無し)" : v2.c_str());
+    std::fprintf(out, "  sso (3 つ揃ったか)   : %s\n", sso ? "true" : "false");
+    std::fprintf(out, "  NGL container        : %s (informative only; on-demand)\n",
+                 have_gc ? "present" : "absent now");
+    std::fprintf(out, "LOGIN_DIALOG=%s\n", verdict);
+    std::fprintf(out, "  reason: %s\n", why);
+    if (logged_out) {
+        std::fprintf(out, "  chain: aelicensing::HaveUser -> GetIMSUserID (空)\n");
+        std::fprintf(out, "         _getSUSIURL -> NglController::SignInWithoutSpinner -> NGL UI\n");
+    }
+    return logged_out ? 1 : (logged_in_flag && sso ? 0 : 2);
+}
+
+// 再帰削除 (purge 用)。シンボリックリンクは辿らない。
+static bool nx_rm_rf(const std::string &p) {
+    struct stat st;
+    if (lstat(p.c_str(), &st) != 0) return false;
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(p.c_str());
+        if (d) {
+            while (struct dirent *e = readdir(d)) {
+                if (!std::strcmp(e->d_name, ".") || !std::strcmp(e->d_name, "..")) continue;
+                nx_rm_rf(nx_join_path(p, e->d_name));
+            }
+            closedir(d);
+        }
+        return rmdir(p.c_str()) == 0;
+    }
+    return unlink(p.c_str()) == 0;
+}
+
+// AE のログイン/アクセス状態とログを、アクティブな場所から退避する。
+// purge=1 なら、これまでに作った .nx-purged-* / .nx-backup* も完全削除する。
+extern "C" int nx_ae_login_purge(int apply, int purge, FILE *out) {
+    if (!out) out = stdout;
+    const char *h = std::getenv("HOME");
+    std::string home = h ? h : "";
+
+    char ts[32] = {0};
+    std::time_t now = std::time(NULL);
+    std::strftime(ts, sizeof ts, "%Y%m%d-%H%M%S", std::localtime(&now));
+
+    std::vector<std::string> targets;
+    std::string gc = nx_find_group_container(home, "com.adobe.NGL");
+    if (!gc.empty()) targets.push_back(gc);
+    std::string scripts = nx_find_suffix_in(
+        nx_join_path(home, "Library/Application Scripts"), "com.adobe.NGL");
+    if (!scripts.empty()) targets.push_back(scripts);
+    targets.push_back(nx_join_path(home, "Library/NGL"));
+
+    const char *rel[] = {
+        "Library/Application Support/Adobe/.adobelicnotification",
+        "Library/Application Support/Adobe/.adobelicnotification.nx-backup",
+        "Library/Application Support/Adobe/.adobestatusnotification",
+        "Library/Application Support/Adobe/.adobestatusnotification.nx-backup",
+        "Library/Application Support/Adobe/.adobefeatureflagnotification",
+        "Library/Application Support/Adobe/OOBE/logged_out_guid",
+        "Library/Application Support/Adobe/OOBE/logged_out_guid.nx-backup",
+        "Library/Application Support/Adobe/OOBE/temp_ins_lbs_wid",
+        "Library/Application Support/Adobe/OOBE/temp_lbs_wid",
+        "Library/Application Support/Adobe/OOBE/com.adobe.acc.container.default.prefs",
+        "Library/Application Support/Adobe/OOBE/com.adobe.acc.container.default.prefs.nx-backup",
+        "Library/Application Support/Adobe/OOBE/com.adobe.acc.container/loggedOutFeatures/AnonymousUser",
+        "Library/Application Support/Adobe/UPI",
+        "Library/Logs/Adobe/Adobe After Effects 2026",
+        "Library/Logs/Adobe/AdobeCRCommon",
+        "Library/Logs/Adobe/AdobeGCClient",
+        "Library/Logs/Adobe/UPI",
+        "Library/Logs/Adobe/com.adobe.dunamis",
+        "Library/Logs/Adobe/GrowthSDK/Production",
+    };
+    for (const char *r : rel) targets.push_back(nx_join_path(home, r));
+
+    int moved = 0, missing = 0;
+    for (const auto &p : targets) {
+        if (!nx_path_exists(p)) { missing++; continue; }
+        std::string bak = p + ".nx-purged-" + ts;
+        if (!apply) {
+            std::fprintf(out, "[dry-run] %s -> %s\n", p.c_str(), bak.c_str());
+            moved++;
+            continue;
+        }
+        if (std::rename(p.c_str(), bak.c_str()) == 0) {
+            std::fprintf(out, "退避: %s -> %s\n", p.c_str(), bak.c_str());
+            moved++;
+        } else {
+            std::fprintf(out, "退避できません: %s\n", p.c_str());
+        }
+    }
+
+    int purged = 0;
+    if (apply && purge) {
+        const char *dirs[] = {
+            "Library/Group Containers",
+            "Library/Application Scripts",
+            "Library",
+            "Library/Application Support/Adobe",
+            "Library/Application Support/Adobe/OOBE",
+            "Library/Logs/Adobe",
+            "Library/Logs/Adobe/GrowthSDK",
+        };
+        for (const char *rd : dirs) {
+            std::string dir = nx_join_path(home, rd);
+            DIR *d = opendir(dir.c_str());
+            if (!d) continue;
+            std::vector<std::string> kill;
+            while (struct dirent *e = readdir(d)) {
+                std::string n = e->d_name;
+                if (n.find(".nx-purged-") != std::string::npos ||
+                    n.find(".nx-backup") != std::string::npos)
+                    kill.push_back(nx_join_path(dir, n));
+            }
+            closedir(d);
+            for (const auto &k : kill) {
+                if (nx_rm_rf(k)) {
+                    std::fprintf(out, "削除: %s\n", k.c_str());
+                    purged++;
+                }
+            }
+        }
+    }
+
+    std::fprintf(out, "AE login purge: %s 退避 %d 件 / 完全削除 %d 件 (存在しない %d 件)\n",
+                 apply ? "実行" : "dry-run", moved, purged, missing);
+    if (!apply) std::fprintf(out, "--apply で退避します。 --purge も付けるとバックアップを完全削除します。\n");
     return 0;
 }
 
@@ -3348,6 +3648,32 @@ extern "C" int nx_patch_ret(const char *path, uint64_t vaddr, FILE *out) {
     return 0;
 }
 
+static int nx_hexval(int c);
+extern "C" int nx_patch_bytes(const char *path, uint64_t vaddr, const char *hex, FILE *out) {
+    if (!out) out = stdout;
+    if (!path || !hex) return 2;
+    auto img = nx::MachOImage::open(path);
+    if (!img) { std::fprintf(out, "[skip] not a 64-bit Mach-O: %s\n", path); return 1; }
+    uint64_t off = 0;
+    if (!img->vm_to_off(vaddr, &off)) { std::fprintf(out, "vaddr を変換できません\n"); return 1; }
+    std::vector<unsigned char> b;
+    int hi = -1;
+    for (const char *p = hex; *p; p++) {
+        int v = nx_hexval(*p);
+        if (v < 0) { hi = -1; continue; }
+        if (hi < 0) hi = v; else { b.push_back((unsigned char)((hi << 4) | v)); hi = -1; }
+    }
+    if (b.empty()) { std::fprintf(out, "hex が空\n"); return 1; }
+    FILE *f = std::fopen(path, "r+b");
+    if (!f) { std::fprintf(out, "開けません\n"); return 1; }
+    std::fseek(f, (long)off, SEEK_SET);
+    size_t w = std::fwrite(b.data(), 1, b.size(), f);
+    std::fclose(f);
+    std::fprintf(out, "patch: %zu バイト vaddr 0x%llx (file 0x%llx)\n",
+                 w, (unsigned long long)vaddr, (unsigned long long)off);
+    return w == b.size() ? 0 : 1;
+}
+
 // ad-hoc 再署名 (codesign --force --sign -) + 検証。
 extern "C" int nx_resign(const char *path, FILE *out) {
     if (!out) out = stdout;
@@ -3536,6 +3862,301 @@ extern "C" int nx_probe(const char *app, int total_ms, FILE *out) {
     return nx_stasis_watch(app, total_ms, out);
 }
 
+// ---------------------------------------------------------------- launch
+// バンドルの実行ファイルを直接 detached で起動する (open / LaunchServices を使わない)。
+extern "C" int nx_launch(const char *app, FILE *out) {
+    if (!out) out = stdout;
+    if (!app || !*app) { std::fprintf(out, "使い方: neodax --launch <app>\n"); return 2; }
+    std::string exe = nx_resolve_target(app);
+    if (!nx_path_exists(exe)) {
+        std::fprintf(out, "実行ファイルがありません: %s\n", exe.c_str());
+        return 1;
+    }
+    pid_t pid = fork();
+    if (pid < 0) { std::fprintf(out, "fork 失敗\n"); return 1; }
+    if (pid == 0) {
+        setsid();
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); }
+        execl(exe.c_str(), exe.c_str(), (char *)NULL);
+        _exit(127);
+    }
+    std::fprintf(out, "launch: pid=%d  %s\n", (int)pid, exe.c_str());
+    return 0;
+}
+
+extern "C" int nx_activate(const char *app, int total_ms, FILE *out) {
+    if (!out) out = stdout;
+    if (!app || !*app) { std::fprintf(out, "使い方: neodax --activate <app> [--count ms]\n"); return 2; }
+    if (total_ms <= 0) total_ms = 10000;
+    std::string exe = nx_resolve_target(app);
+    if (!nx_path_exists(exe)) { std::fprintf(out, "実行ファイルがありません: %s\n", exe.c_str()); return 1; }
+    std::fprintf(out, "起動: %s\n", exe.c_str());
+    pid_t pid = fork();
+    if (pid < 0) { std::fprintf(out, "fork 失敗\n"); return 1; }
+    if (pid == 0) {
+        setsid();
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); }
+        execl(exe.c_str(), exe.c_str(), (char *)NULL);
+        _exit(127);
+    }
+    struct blk { double x, y, w, h, alpha; int layer, onscreen; char owner[128], title[128]; };
+    int waited = 0;
+    for (;;) {
+        usleep(1000000);
+        waited += 1000;
+        if (kill(pid, 0) != 0) {
+            std::fprintf(out, "exited (pid=%d) after %d ms\n", (int)pid, waited);
+            return 0;
+        }
+        std::vector<blk> bs;
+        CFArrayRef arr = CGWindowListCopyWindowInfo(
+            kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+        if (arr) {
+            for (CFIndex i = 0; i < CFArrayGetCount(arr); i++) {
+                CFDictionaryRef d = (CFDictionaryRef)CFArrayGetValueAtIndex(arr, i);
+                CFNumberRef pp = (CFNumberRef)CFDictionaryGetValue(d, kCGWindowOwnerPID);
+                int wp = 0;
+                if (pp) CFNumberGetValue(pp, kCFNumberIntType, &wp);
+                if (wp != pid) continue;
+                blk b;
+                std::memset(&b, 0, sizeof b);
+                CFDictionaryRef bg = (CFDictionaryRef)CFDictionaryGetValue(d, kCGWindowBounds);
+                CGRect r = CGRectZero;
+                if (bg) CGRectMakeWithDictionaryRepresentation(bg, &r);
+                b.x = r.origin.x; b.y = r.origin.y; b.w = r.size.width; b.h = r.size.height;
+                CFNumberRef lay = (CFNumberRef)CFDictionaryGetValue(d, kCGWindowLayer);
+                if (lay) CFNumberGetValue(lay, kCFNumberIntType, &b.layer);
+                CFNumberRef al = (CFNumberRef)CFDictionaryGetValue(d, kCGWindowAlpha);
+                if (al) CFNumberGetValue(al, kCFNumberDoubleType, &b.alpha);
+                CFBooleanRef on = (CFBooleanRef)CFDictionaryGetValue(d, kCGWindowIsOnscreen);
+                b.onscreen = on ? (int)CFBooleanGetValue(on) : 0;
+                CFStringRef ow = (CFStringRef)CFDictionaryGetValue(d, kCGWindowOwnerName);
+                if (ow) CFStringGetCString(ow, b.owner, sizeof b.owner, kCFStringEncodingUTF8);
+                CFStringRef nm = (CFStringRef)CFDictionaryGetValue(d, kCGWindowName);
+                if (nm) CFStringGetCString(nm, b.title, sizeof b.title, kCFStringEncodingUTF8);
+                bs.push_back(b);
+            }
+            CFRelease(arr);
+        }
+        double maxA = 0;
+        for (const auto &b : bs)
+            if (!(b.h < 50 && b.y < 10)) { double a = b.w * b.h; if (a > maxA) maxA = a; }
+        for (const auto &b : bs) {
+            const char *cls = (b.h < 50 && b.y < 10) ? "menubar"
+                            : (maxA > 0 && b.w * b.h >= maxA - 0.5) ? "main"
+                            : "panel/dialog";
+            std::fprintf(out,
+                "  t=%dms %-12s %.0fx%.0f @ %.0f,%.0f layer=%d alpha=%.2f on=%d owner=\"%s\" title=\"%s\"\n",
+                waited, cls, b.w, b.h, b.x, b.y, b.layer, b.alpha, b.onscreen,
+                b.owner, b.title);
+        }
+        std::fprintf(out, "  t=%dms windows=%zu\n", waited, bs.size());
+        if (waited >= total_ms) {
+            std::fprintf(out, "観測終了 (生きたまま windows=%zu)\n", bs.size());
+            return 0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- ax
+// Accessibility でウィンドウの identity (role/subrole/title) を取る。ピクセルなし。
+static std::string nx_ax_str(AXUIElementRef el, CFStringRef attr) {
+    CFTypeRef v = NULL;
+    std::string r;
+    if (AXUIElementCopyAttributeValue(el, attr, &v) != kAXErrorSuccess || !v) return r;
+    if (CFGetTypeID(v) == CFStringGetTypeID()) {
+        char b[512] = {0};
+        if (CFStringGetCString((CFStringRef)v, b, sizeof b, kCFStringEncodingUTF8)) r = b;
+    }
+    CFRelease(v);
+    return r;
+}
+
+static void nx_ax_dump(AXUIElementRef el, int depth, FILE *out) {
+    if (depth > 4) return;
+    std::string role = nx_ax_str(el, kAXRoleAttribute);
+    std::string sub = nx_ax_str(el, kAXSubroleAttribute);
+    std::string title = nx_ax_str(el, kAXTitleAttribute);
+    std::string desc = nx_ax_str(el, kAXDescriptionAttribute);
+    std::string val;
+    CFTypeRef v = NULL;
+    if (AXUIElementCopyAttributeValue(el, kAXValueAttribute, &v) == kAXErrorSuccess && v) {
+        if (CFGetTypeID(v) == CFStringGetTypeID()) {
+            char b[512] = {0};
+            if (CFStringGetCString((CFStringRef)v, b, sizeof b, kCFStringEncodingUTF8)) val = b;
+        }
+        CFRelease(v);
+    }
+    std::fprintf(out, "%*s%s", depth * 2, "", role.c_str());
+    if (!sub.empty()) std::fprintf(out, "[%s]", sub.c_str());
+    if (!title.empty()) std::fprintf(out, " \"%s\"", title.c_str());
+    if (!desc.empty()) std::fprintf(out, " desc=\"%s\"", desc.c_str());
+    if (!val.empty()) std::fprintf(out, " value=\"%s\"", val.c_str());
+    std::fprintf(out, "\n");
+    CFTypeRef kids = NULL;
+    if (AXUIElementCopyAttributeValue(el, kAXChildrenAttribute, &kids) == kAXErrorSuccess && kids) {
+        CFArrayRef a = (CFArrayRef)kids;
+        CFIndex kc = CFArrayGetCount(a);
+        for (CFIndex i = 0; i < kc; i++)
+            nx_ax_dump((AXUIElementRef)CFArrayGetValueAtIndex(a, i), depth + 1, out);
+        CFRelease(kids);
+    }
+}
+
+// pid 解決 (target が数字なら pid、そうでなければ実行パス部分一致)
+static pid_t nx_resolve_pid(const char *target) {
+    if (!target || !*target) return -1;
+    if (std::isdigit((unsigned char)target[0])) return (pid_t)std::atoi(target);
+    int np = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+    if (np <= 0) return -1;
+    std::vector<pid_t> pids((size_t)np / sizeof(pid_t) + 64);
+    np = proc_listpids(PROC_ALL_PIDS, 0, pids.data(), (int)(pids.size() * sizeof(pid_t)));
+    int cnt = np / (int)sizeof(pid_t);
+    pid_t first = -1, best = -1;
+    size_t best_len = 0;
+    for (int i = 0; i < cnt; i++) {
+        pid_t p = pids[i];
+        if (p <= 1) continue;
+        char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+        if (proc_pidpath(p, path, sizeof path) <= 0) continue;
+        if (!std::strstr(path, target)) continue;
+        if (first < 0) first = p;
+        // 補助プロセス (crashpad/Helper/GPU/Renderer) を除外し、本体を優先する
+        bool helper = std::strstr(path, "crashpad") || std::strstr(path, "Helper") ||
+                      std::strstr(path, "GPU") || std::strstr(path, "Renderer");
+        if (!helper) {
+            size_t l = std::strlen(path);
+            if (l > best_len) { best_len = l; best = p; }
+        }
+    }
+    if (best > 0) return best;
+    return first;
+}
+
+static AXUIElementRef nx_ax_find_desc(AXUIElementRef el, const char *desc, int depth) {
+    if (depth > 6) return NULL;
+    std::string d = nx_ax_str(el, kAXDescriptionAttribute);
+    std::string t = nx_ax_str(el, kAXTitleAttribute);
+    std::string sb = nx_ax_str(el, kAXSubroleAttribute);
+    if ((!d.empty() && d == desc) || (!t.empty() && t == desc) || (!sb.empty() && sb == desc))
+        return (AXUIElementRef)CFRetain(el);
+    CFTypeRef kids = NULL;
+    if (AXUIElementCopyAttributeValue(el, kAXChildrenAttribute, &kids) == kAXErrorSuccess && kids) {
+        CFArrayRef a = (CFArrayRef)kids;
+        CFIndex kc = CFArrayGetCount(a);
+        for (CFIndex i = 0; i < kc; i++) {
+            AXUIElementRef r = nx_ax_find_desc((AXUIElementRef)CFArrayGetValueAtIndex(a, i), desc, depth + 1);
+            if (r) { CFRelease(kids); return r; }
+        }
+        CFRelease(kids);
+    }
+    return NULL;
+}
+
+extern "C" int nx_ax_press(const char *target, const char *desc, FILE *out) {
+    if (!out) out = stdout;
+    if (!target || !desc) { std::fprintf(out, "使い方: neodax --ax-press <pid|S> <desc>\n"); return 2; }
+    pid_t pid = nx_resolve_pid(target);
+    if (pid <= 0) { std::fprintf(out, "対象が見つかりません: %s\n", target); return 1; }
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    if (!app) return 1;
+    AXUIElementSetAttributeValue(app, CFSTR("AXManualAccessibility"), kCFBooleanTrue);
+    CFTypeRef wins = NULL;
+    for (int tries = 0; tries < 12; tries++) {
+        wins = NULL;
+        if (AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, &wins) == kAXErrorSuccess && wins)
+            break;
+        if (wins) { CFRelease(wins); wins = NULL; }
+        usleep(500000);
+    }
+    if (!wins) {
+        std::fprintf(out, "windows を取得できません\n");
+        CFRelease(app);
+        return 1;
+    }
+    CFArrayRef a = (CFArrayRef)wins;
+    AXUIElementRef hit = NULL;
+    for (CFIndex i = 0; i < CFArrayGetCount(a) && !hit; i++)
+        hit = nx_ax_find_desc((AXUIElementRef)CFArrayGetValueAtIndex(a, i), desc, 0);
+    CFRelease(wins);
+    CFRelease(app);
+    if (!hit) { std::fprintf(out, "要素が見つかりません: \"%s\"\n", desc); return 1; }
+    AXError e = AXUIElementPerformAction(hit, kAXPressAction);
+    CFRelease(hit);
+    std::fprintf(out, "press \"%s\": %s\n", desc, e == kAXErrorSuccess ? "ok" : "failed");
+    return e == kAXErrorSuccess ? 0 : 1;
+}
+
+extern "C" int nx_ax_windows(const char *target, FILE *out) {
+    if (!out) out = stdout;
+    if (!target || !*target) { std::fprintf(out, "使い方: neodax --ax <pid|path-substr>\n"); return 2; }
+    pid_t pid = 0;
+    if (std::isdigit((unsigned char)target[0])) {
+        pid = (pid_t)std::atoi(target);
+    } else {
+        int np = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+        if (np > 0) {
+            std::vector<pid_t> pids((size_t)np / sizeof(pid_t) + 64);
+            np = proc_listpids(PROC_ALL_PIDS, 0, pids.data(), (int)(pids.size() * sizeof(pid_t)));
+            int cnt = np / (int)sizeof(pid_t);
+            for (int i = 0; i < cnt; i++) {
+                pid_t p = pids[i];
+                if (p <= 1) continue;
+                char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+                if (proc_pidpath(p, path, sizeof path) <= 0) continue;
+                if (std::strstr(path, target)) { pid = p; break; }
+            }
+        }
+    }
+    if (pid <= 0) { std::fprintf(out, "対象が見つかりません: %s\n", target); return 1; }
+
+    bool trusted = AXIsProcessTrusted();
+    if (!trusted) {
+        const void *keys[] = { kAXTrustedCheckOptionPrompt };
+        const void *vals[] = { kCFBooleanTrue };
+        CFDictionaryRef opt = CFDictionaryCreate(NULL, keys, vals, 1,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        trusted = AXIsProcessTrustedWithOptions(opt);
+        CFRelease(opt);
+    }
+    std::fprintf(out, "pid=%d  AX_trusted=%d\n", (int)pid, (int)trusted);
+    if (!trusted) {
+        std::fprintf(out, "Accessibility の許可が必要 (一度だけ)。許可後に再実行。\n");
+        return 1;
+    }
+
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    if (!app) { std::fprintf(out, "AXUIElementCreateApplication 失敗\n"); return 1; }
+    // AE のような独自 UI は AXManualAccessibility を立てないと AX を出さない。
+    AXUIElementSetAttributeValue(app, CFSTR("AXManualAccessibility"), kCFBooleanTrue);
+    CFTypeRef wins = NULL;
+    for (int tries = 0; tries < 10; tries++) {
+        wins = NULL;
+        if (AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, &wins) == kAXErrorSuccess && wins)
+            break;
+        if (wins) { CFRelease(wins); wins = NULL; }
+        usleep(500000);
+    }
+    if (!wins) {
+        std::fprintf(out, "windows を取得できません (AX を出さないアプリの可能性)\n");
+        CFRelease(app);
+        return 1;
+    }
+    CFArrayRef arr = (CFArrayRef)wins;
+    CFIndex cnt = CFArrayGetCount(arr);
+    for (CFIndex i = 0; i < cnt; i++) {
+        AXUIElementRef w = (AXUIElementRef)CFArrayGetValueAtIndex(arr, i);
+        std::fprintf(out, "  [%ld] ----\n", (long)i);
+        nx_ax_dump(w, 2, out);
+    }
+    std::fprintf(out, "AX windows=%ld\n", (long)cnt);
+    CFRelease(wins);
+    CFRelease(app);
+    return 0;
+}
+
 // ---------------------------------------------------------------- stasis
 // プロセスが「生きているが進んでいない」状態 (stasis) を測る。
 // CPU 時間の増分で判定する。終了したか、動いているか、止まっているか。
@@ -3636,6 +4257,629 @@ extern "C" int nx_watch_proc(const char *needle, int grace_ms, int total_ms, FIL
     return 0;
 }
 
+// ---------------------------------------------------------------- load commands
+static const char *nx_lc_name(uint32_t cmd) {
+    switch (cmd) {
+        case LC_SEGMENT_64: return "LC_SEGMENT_64";
+        case LC_SYMTAB: return "LC_SYMTAB";
+        case LC_DYLD_INFO: return "LC_DYLD_INFO";
+        case LC_DYLD_INFO_ONLY: return "LC_DYLD_INFO_ONLY";
+        case LC_DYLD_CHAINED_FIXUPS: return "LC_DYLD_CHAINED_FIXUPS";
+        case LC_FUNCTION_STARTS: return "LC_FUNCTION_STARTS";
+        case LC_MAIN: return "LC_MAIN";
+        case LC_LOAD_DYLIB: return "LC_LOAD_DYLIB";
+        case LC_LOAD_WEAK_DYLIB: return "LC_LOAD_WEAK_DYLIB";
+        case LC_REEXPORT_DYLIB: return "LC_REEXPORT_DYLIB";
+        case LC_LOAD_UPWARD_DYLIB: return "LC_LOAD_UPWARD_DYLIB";
+        case LC_LAZY_LOAD_DYLIB: return "LC_LAZY_LOAD_DYLIB";
+        case LC_ID_DYLIB: return "LC_ID_DYLIB";
+        case LC_RPATH: return "LC_RPATH";
+        case LC_CODE_SIGNATURE: return "LC_CODE_SIGNATURE";
+        case LC_UUID: return "LC_UUID";
+        case LC_BUILD_VERSION: return "LC_BUILD_VERSION";
+        case LC_VERSION_MIN_MACOSX: return "LC_VERSION_MIN_MACOSX";
+        case LC_DATA_IN_CODE: return "LC_DATA_IN_CODE";
+        default: return "LC_?";
+    }
+}
+
+extern "C" int nx_load_commands(const char *path, FILE *out) {
+    if (!out) out = stdout;
+    if (!path) return 2;
+    FILE *f = std::fopen(path, "rb");
+    if (!f) { std::fprintf(out, "開けません: %s\n", path); return 1; }
+    std::fseek(f, 0, SEEK_END); long n = std::ftell(f); std::fseek(f, 0, SEEK_SET);
+    if (n <= 0) { std::fclose(f); return 1; }
+    std::vector<unsigned char> d((size_t)n);
+    if (std::fread(d.data(), 1, (size_t)n, f) != (size_t)n) { std::fclose(f); return 1; }
+    std::fclose(f);
+    uint64_t base = 0;
+    if (d.size() >= 8) {
+        uint32_t be = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) | ((uint32_t)d[2] << 8) | d[3];
+        if (be == FAT_MAGIC || be == FAT_MAGIC_64) {
+            bool is64 = (be == FAT_MAGIC_64);
+            uint32_t nfat = ((uint32_t)d[4] << 24) | ((uint32_t)d[5] << 16) | ((uint32_t)d[6] << 8) | d[7];
+            for (uint32_t i = 0; i < nfat; i++) {
+                size_t eo = 8 + (size_t)i * (is64 ? 32 : 20);
+                uint32_t cpu = ((uint32_t)d[eo] << 24) | ((uint32_t)d[eo+1] << 16) | ((uint32_t)d[eo+2] << 8) | d[eo+3];
+                uint64_t off;
+                if (is64) { off = 0; for (int k = 0; k < 8; k++) off = (off << 8) | d[eo + 8 + k]; }
+                else off = ((uint32_t)d[eo+8] << 24) | ((uint32_t)d[eo+9] << 16) | ((uint32_t)d[eo+10] << 8) | d[eo+11];
+                if (cpu == CPU_TYPE_ARM64) { base = off; break; }
+                if (i == nfat - 1) base = off;
+            }
+        }
+    }
+    if (base + sizeof(mach_header_64) > d.size()) { std::fprintf(out, "Mach-O ではありません\n"); return 1; }
+    const mach_header_64 *mh = (const mach_header_64 *)(d.data() + base);
+    if (mh->magic != MH_MAGIC_64) { std::fprintf(out, "MH_MAGIC_64 ではありません\n"); return 1; }
+    std::fprintf(out, "ncmds=%u sizeofcmds=%u\n", mh->ncmds, mh->sizeofcmds);
+    size_t off = (size_t)base + sizeof(mach_header_64);
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        if (off + sizeof(load_command) > d.size()) break;
+        const load_command *lc = (const load_command *)(d.data() + off);
+        if (lc->cmdsize < sizeof(load_command) || off + lc->cmdsize > d.size()) break;
+        std::fprintf(out, "  %-22s cmdsize=%u", nx_lc_name(lc->cmd), lc->cmdsize);
+        if (lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB ||
+            lc->cmd == LC_REEXPORT_DYLIB || lc->cmd == LC_LOAD_UPWARD_DYLIB ||
+            lc->cmd == LC_LAZY_LOAD_DYLIB || lc->cmd == LC_ID_DYLIB) {
+            const dylib_command *dc = (const dylib_command *)lc;
+            if (dc->dylib.name.offset < lc->cmdsize)
+                std::fprintf(out, "  %s", (const char *)lc + dc->dylib.name.offset);
+        } else if (lc->cmd == LC_RPATH) {
+            const rpath_command *rc = (const rpath_command *)lc;
+            if (rc->path.offset < lc->cmdsize)
+                std::fprintf(out, "  %s", (const char *)lc + rc->path.offset);
+        } else if (lc->cmd == LC_MAIN) {
+            const entry_point_command *e = (const entry_point_command *)lc;
+            std::fprintf(out, "  entryoff=0x%llx", (unsigned long long)e->entryoff);
+        } else if (lc->cmd == LC_UUID) {
+            const uuid_command *u = (const uuid_command *)lc;
+            std::fprintf(out, "  ");
+            for (int k = 0; k < 16; k++) std::fprintf(out, "%02x", u->uuid[k]);
+        } else if (lc->cmd == LC_SEGMENT_64) {
+            const segment_command_64 *sg = (const segment_command_64 *)lc;
+            std::fprintf(out, "  %s vm=0x%llx size=0x%llx file=0x%llx/%llu",
+                         sg->segname, (unsigned long long)sg->vmaddr,
+                         (unsigned long long)sg->vmsize, (unsigned long long)sg->fileoff,
+                         (unsigned long long)sg->filesize);
+        } else if (lc->cmd == LC_CODE_SIGNATURE) {
+            const linkedit_data_command *ld = (const linkedit_data_command *)lc;
+            std::fprintf(out, "  dataoff=0x%x size=%u", ld->dataoff, ld->datasize);
+        } else if (lc->cmd == LC_BUILD_VERSION) {
+            const build_version_command *bv = (const build_version_command *)lc;
+            std::fprintf(out, "  platform=%u minos=0x%x sdk=0x%x", bv->platform, bv->minos, bv->sdk);
+        }
+        std::fprintf(out, "\n");
+        off += lc->cmdsize;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- class graph
+// 実際のグラフ (関数 + 呼び出し辺) から、クラス視点のグラフを「導出」する。
+// 視覚化は任意 (--save で SVG)。真実は関数グラフ側にあり、これは射影。
+static std::string nx_demangle_sym(const std::string &sym);
+static void nx_split_owner(const std::string &d, std::string &owner, std::string &member) {
+    int depth = 0; size_t split = std::string::npos;
+    for (size_t i = 0; i + 1 < d.size(); i++) {
+        char c = d[i];
+        if (c == '<') { depth++; continue; }
+        if (c == '>') { if (depth > 0) depth--; continue; }
+        if (c == '(') break;
+        if (c == ':' && d[i + 1] == ':' && depth == 0) split = i;
+    }
+    if (split == std::string::npos) { owner.clear(); member = d; return; }
+    owner = d.substr(0, split);
+    member = d.substr(split + 2);
+}
+
+extern "C" int nx_class_graph(const char *path, const char *needle, const char *svg, FILE *out) {
+    if (!out) out = stdout;
+    if (!path) return 2;
+    auto img = nx::MachOImage::open(path);
+    if (!img) { std::fprintf(out, "[skip] not a 64-bit Mach-O: %s\n", path); return 1; }
+    nx::ImportResolver imports; imports.parse(*img);
+    nx::XRefIndex xr; xr.build(*img, imports);
+    nx::BackTracker bt(*img, xr);
+
+    std::map<uint64_t, std::string> addr_owner;
+    std::map<std::string, std::set<std::string>> classes;
+    for (const auto &kv : img->defined_symbols()) {
+        const std::string &sym = kv.first;
+        if (sym.rfind("__Z", 0) != 0) continue;
+        std::string d = nx_demangle_sym(sym);
+        if (d == sym) continue;
+        if (d.rfind("vtable for ", 0) == 0 || d.rfind("typeinfo for ", 0) == 0 ||
+            d.rfind("guard variable for ", 0) == 0 || d.rfind("VTT for ", 0) == 0) continue;
+        std::string owner, member;
+        nx_split_owner(d, owner, member);
+        if (owner.empty()) continue;
+        classes[owner].insert(member);
+        addr_owner[kv.second] = owner;
+    }
+
+    struct ce { int count = 0; int back = 0; };
+    std::map<std::pair<std::string, std::string>, ce> edges;
+    for (const auto &s : xr.sites()) {
+        if (!s.is_call) continue;
+        uint64_t from = bt.function_containing(s.addr);
+        uint64_t to = bt.function_containing(s.target_vm);
+        auto fo = addr_owner.find(from);
+        auto to_ = addr_owner.find(to);
+        if (fo == addr_owner.end() || to_ == addr_owner.end()) continue;
+        edges[{fo->second, to_->second}].count++;
+    }
+    for (auto &e : edges) {
+        if (e.first.first == e.first.second) e.second.back = 1;
+        auto rev = edges.find({e.first.second, e.first.first});
+        if (rev != edges.end()) e.second.back = 1;
+    }
+
+    int nc = 0;
+    for (const auto &c : classes) {
+        if (needle && *needle && c.first.find(needle) == std::string::npos) continue;
+        std::fprintf(out, "class %s {\n public:\n", c.first.c_str());
+        int m = 0;
+        for (const auto &mem : c.second) {
+            if (m++ >= 40) { std::fprintf(out, "  ...\n"); break; }
+            std::fprintf(out, "  %s;\n", mem.c_str());
+        }
+        std::fprintf(out, "};\n\n");
+        nc++;
+    }
+    std::fprintf(out, "--- derived class graph ---\n");
+    int ne = 0;
+    for (const auto &e : edges) {
+        if (needle && *needle &&
+            e.first.first.find(needle) == std::string::npos &&
+            e.first.second.find(needle) == std::string::npos) continue;
+        std::fprintf(out, "  %s -> %s  x%d%s\n", e.first.first.c_str(), e.first.second.c_str(),
+                     e.second.count, e.second.back ? "  [annulus]" : "");
+        ne++;
+    }
+    std::fprintf(out, "classes=%d edges=%d\n", nc, ne);
+
+    if (svg && *svg) {
+        std::vector<std::string> names;
+        for (const auto &c : classes)
+            if (!needle || !*needle || c.first.find(needle) != std::string::npos)
+                names.push_back(c.first);
+        int cols = 4, bw = 260, bh = 70, gap = 40, margin = 20;
+        int rows = (int)((names.size() + cols - 1) / cols);
+        int W = margin * 2 + cols * (bw + gap);
+        int H = margin * 2 + rows * (bh + gap);
+        std::ofstream f(svg);
+        if (f) {
+            std::map<std::string, int> idx;
+            f << "<svg xmlns='http://www.w3.org/2000/svg' width='" << W << "' height='" << H << "'>\n";
+            f << "<style>text{font-family:monospace;font-size:11px;fill:#222}"
+                 ".box{fill:#eef;stroke:#335;stroke-width:1.5}"
+                 ".ann{stroke:#d22;stroke-width:2.5;fill:none}"
+                 ".nec{stroke:#557;stroke-width:1.2;fill:none}</style>\n";
+            for (size_t i = 0; i < names.size(); i++) {
+                int r = (int)i / cols, cc = (int)i % cols;
+                int x = margin + cc * (bw + gap), y = margin + r * (bh + gap);
+                idx[names[i]] = (int)i;
+                f << "<rect class='box' x='" << x << "' y='" << y << "' width='" << bw
+                  << "' height='" << bh << "' rx='8'/>\n";
+                f << "<text x='" << (x + 8) << "' y='" << (y + 18) << "'>" << names[i] << "</text>\n";
+            }
+            auto cx = [&](int i) { return margin + (i % cols) * (bw + gap) + bw / 2; };
+            auto cy = [&](int i) { return margin + (i / cols) * (bh + gap) + bh / 2; };
+            for (const auto &e : edges) {
+                auto a = idx.find(e.first.first), b = idx.find(e.first.second);
+                if (a == idx.end() || b == idx.end()) continue;
+                f << "<line class='" << (e.second.back ? "ann" : "nec") << "' x1='" << cx(a->second)
+                  << "' y1='" << cy(a->second) << "' x2='" << cx(b->second)
+                  << "' y2='" << cy(b->second) << "'/>\n";
+            }
+            f << "</svg>\n";
+            std::fprintf(out, "SVG: %s\n", svg);
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- display graph
+// 実際の画面のノード木 (AX) を中立モデル DVNode に復号し、
+// 同じモデルから C++ または SVG を多態的に出力する。
+static std::string nx_ax_str(AXUIElementRef el, CFStringRef attr);
+
+struct DVNode {
+    std::string role, sub, title, desc;
+    double x = 0, y = 0, w = 0, h = 0;
+    std::vector<DVNode> kids;
+};
+
+static void nx_ax_frame(AXUIElementRef el, double *x, double *y, double *w, double *h) {
+    *x = *y = *w = *h = 0;
+    CFTypeRef p = NULL, s = NULL;
+    if (AXUIElementCopyAttributeValue(el, kAXPositionAttribute, &p) == kAXErrorSuccess && p) {
+        CGPoint pt; std::memset(&pt, 0, sizeof pt);
+        AXValueType ty = AXValueGetType((AXValueRef)p);
+        if (ty == kAXValueCGPointType)
+            AXValueGetValue((AXValueRef)p, ty, (void *)&pt);
+        *x = pt.x; *y = pt.y; CFRelease(p);
+    }
+    if (AXUIElementCopyAttributeValue(el, kAXSizeAttribute, &s) == kAXErrorSuccess && s) {
+        CGSize sz; std::memset(&sz, 0, sizeof sz);
+        AXValueType ty2 = AXValueGetType((AXValueRef)s);
+        if (ty2 == kAXValueCGSizeType)
+            AXValueGetValue((AXValueRef)s, ty2, (void *)&sz);
+        *w = sz.width; *h = sz.height; CFRelease(s);
+    }
+}
+
+static void dv_from_ax(AXUIElementRef el, DVNode &n, int depth, int &budget) {
+    if (budget <= 0) return;
+    budget--;
+    n.role = nx_ax_str(el, kAXRoleAttribute);
+    n.sub = nx_ax_str(el, kAXSubroleAttribute);
+    n.title = nx_ax_str(el, kAXTitleAttribute);
+    n.desc = nx_ax_str(el, kAXDescriptionAttribute);
+    nx_ax_frame(el, &n.x, &n.y, &n.w, &n.h);
+    if (depth >= 6) return;
+    CFTypeRef kids = NULL;
+    if (AXUIElementCopyAttributeValue(el, kAXChildrenAttribute, &kids) == kAXErrorSuccess && kids) {
+        CFArrayRef a = (CFArrayRef)kids;
+        CFIndex kc = CFArrayGetCount(a);
+        for (CFIndex i = 0; i < kc && budget > 0; i++) {
+            DVNode c;
+            dv_from_ax((AXUIElementRef)CFArrayGetValueAtIndex(a, i), c, depth + 1, budget);
+            n.kids.push_back(c);
+        }
+        CFRelease(kids);
+    }
+}
+
+static void nx_cpp_esc(std::string &s) {
+    std::string o;
+    for (char c : s) {
+        if (c == '"' || c == '\\') { o += '\\'; o += c; }
+        else if (c == '\n') o += "\\n";
+        else o += c;
+    }
+    s = o;
+}
+
+static void dv_cpp(const DVNode &n, int ind, FILE *out) {
+    std::string r = n.role, t = n.title, d = n.desc, su = n.sub;
+    nx_cpp_esc(r); nx_cpp_esc(t); nx_cpp_esc(d); nx_cpp_esc(su);
+    std::fprintf(out, "%*sDVNode{\"%s\",\"%s\",\"%s\",\"%s\",%.1f,%.1f,%.1f,%.1f,{\n",
+                 ind, "", r.c_str(), su.c_str(), t.c_str(), d.c_str(), n.x, n.y, n.w, n.h);
+    for (const auto &k : n.kids) dv_cpp(k, ind + 2, out);
+    std::fprintf(out, "%*s}},\n", ind, "");
+}
+
+static std::string dv_xml_esc(const std::string &s) {
+    std::string o;
+    o.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '&': o += "&amp;"; break;
+            case '<': o += "&lt;"; break;
+            case '>': o += "&gt;"; break;
+            case '"': o += "&quot;"; break;
+            case '\'': o += "&apos;"; break;
+            default: o += c;
+        }
+    }
+    return o;
+}
+
+static bool dv_dialog(const DVNode &n) {
+    return n.sub.find("Dialog") != std::string::npos ||
+           n.role.find("Dialog") != std::string::npos;
+}
+
+static bool dv_chrome(const DVNode &n) {
+    return n.role.find("AXWindow") != std::string::npos ||
+           n.sub == "AXFloatingWindow" ||
+           (!n.title.empty() && n.role == "AXLayoutArea");
+}
+
+static std::string dv_clip(const std::string &s, double w) {
+    int n = (int)((w - 6) / 6.2);
+    if (n < 3) return "";
+    if ((int)s.size() <= n) return s;
+    return s.substr(0, (size_t)n) + "…";
+}
+
+static int dv_count(const DVNode &n) {
+    int c = 1;
+    for (const auto &k : n.kids) c += dv_count(k);
+    return c;
+}
+
+static double dv_svg(const DVNode &n, double *maxy, FILE *out) {
+    // スクロールバー等は描かない (子だけ通す)。
+    if (n.role.find("ScrollBar") != std::string::npos ||
+        n.role.find("ValueIndicator") != std::string::npos) {
+        for (const auto &k : n.kids) dv_svg(k, maxy, out);
+        return 0;
+    }
+    const bool dialog = dv_dialog(n);
+    const bool chrome = dv_chrome(n);
+    const bool web = n.role.find("AXWebArea") != std::string::npos;
+    const bool structural = !dialog && !chrome && !web && n.title.empty() && n.desc.empty() &&
+        (n.role == "AXGroup" || n.role == "AXScrollArea" || n.role == "AXPage" ||
+         n.role == "AXSplitter");
+
+    const double x = n.x, y = n.y;
+    const double w = n.w > 4 ? n.w : 40, h = n.h > 4 ? n.h : 16;
+    if (w >= 6 && h >= 6) {
+        if (dialog) {
+            std::fprintf(out, "<g><rect x='%.1f' y='%.1f' width='%.1f' height='%.1f' rx='10' "
+                              "fill='#11151c' stroke='#f87171' stroke-width='2'/>\n", x, y, w, h);
+            std::fprintf(out, "<rect x='%.1f' y='%.1f' width='%.1f' height='28' rx='10' fill='#3a1f24'/>\n",
+                         x, y, w);
+            std::fprintf(out, "<rect x='%.1f' y='%.1f' width='12' height='12' fill='none' stroke='#f87171'/>\n",
+                         x + 10, y + 8);
+            std::fprintf(out, "<text x='%.1f' y='%.1f' fill='#ffb4b4' font-size='12' font-weight='bold'>"
+                              "AXDialog — web surface</text>\n", x + 32, y + 19);
+        } else if (chrome) {
+            std::fprintf(out, "<g><rect x='%.1f' y='%.1f' width='%.1f' height='%.1f' "
+                              "fill='#1b2230' stroke='#3a4a63'/>\n", x, y, w, h);
+            std::fprintf(out, "<rect x='%.1f' y='%.1f' width='%.1f' height='26' fill='#232c3d'/>\n", x, y, w);
+            if (!n.title.empty())
+                std::fprintf(out, "<text x='%.1f' y='%.1f' fill='#dbe5f1' font-size='12' font-weight='bold'>%s</text>\n",
+                             x + 8, y + 18, dv_xml_esc(dv_clip(n.title, w - 16)).c_str());
+        } else if (web) {
+            std::fprintf(out, "<rect x='%.1f' y='%.1f' width='%.1f' height='%.1f' "
+                              "fill='#0e1622' stroke='#2f3a4d'/>\n", x, y, w, h);
+            std::fprintf(out, "<text x='%.1f' y='%.1f' fill='#7d8da3' font-size='10'>"
+                              "AXWebArea — web content (AX text not exposed)</text>\n", x + 8, y + 16);
+        } else if (structural) {
+            std::fprintf(out, "<rect x='%.1f' y='%.1f' width='%.1f' height='%.1f' "
+                              "fill='none' stroke='#2a3444' stroke-width='0.8' opacity='0.35'/>\n",
+                         x, y, w, h);
+        } else {
+            std::fprintf(out, "<rect x='%.1f' y='%.1f' width='%.1f' height='%.1f' rx='3' "
+                              "fill='#202836' stroke='#2f3a4d'/>\n", x, y, w, h);
+            std::string lbl = !n.title.empty() ? n.title : !n.desc.empty() ? n.desc : "";
+            if (lbl.empty() && (n.role.find("Button") != std::string::npos ||
+                                n.role.find("StaticText") != std::string::npos ||
+                                n.role.find("Radio") != std::string::npos ||
+                                n.role.find("Check") != std::string::npos ||
+                                n.role.find("TextField") != std::string::npos))
+                lbl = n.role;
+            std::string t = w >= 56 ? dv_clip(lbl, w - 8) : "";
+            if (!t.empty())
+                std::fprintf(out, "<text x='%.1f' y='%.1f' fill='#c9d4e3' font-size='10'>%s</text>\n",
+                             x + 4, y + 12, dv_xml_esc(t).c_str());
+        }
+    }
+    if (*maxy < y + h) *maxy = y + h;
+    for (const auto &k : n.kids) dv_svg(k, maxy, out);
+    if (dialog || chrome) std::fprintf(out, "</g>\n");
+    return *maxy - y;
+}
+
+// 保存済みの DVNode モデル (--display-graph --save の C++ 出力) を読み直し、
+// アプリを起動せずに SVG へ描く。AX を読まないので静的な表示イメージになる。
+static void dv_skip_ws(const std::string &s, size_t &i) {
+    while (i < s.size() && std::isspace((unsigned char)s[i])) i++;
+}
+
+static bool dv_lit(const std::string &s, size_t &i, const char *lit) {
+    size_t n = std::strlen(lit);
+    if (s.compare(i, n, lit) != 0) return false;
+    i += n;
+    return true;
+}
+
+static bool dv_quoted(const std::string &s, size_t &i, std::string &v) {
+    if (i >= s.size() || s[i] != '"') return false;
+    i++;
+    v.clear();
+    while (i < s.size()) {
+        char c = s[i++];
+        if (c == '"') return true;
+        if (c == '\\' && i < s.size()) {
+            char e = s[i++];
+            if (e == 'n') v += '\n';
+            else if (e == 't') v += '\t';
+            else v += e;
+        } else {
+            v += c;
+        }
+    }
+    return false;
+}
+
+static bool dv_number(const std::string &s, size_t &i, double &v) {
+    dv_skip_ws(s, i);
+    const char *p = s.c_str() + i;
+    char *end = NULL;
+    v = std::strtod(p, &end);
+    if (!end || end == p) return false;
+    i = (size_t)(end - s.c_str());
+    return true;
+}
+
+static bool dv_parse_node(const std::string &s, size_t &i, DVNode &n) {
+    dv_skip_ws(s, i);
+    if (!dv_lit(s, i, "DVNode{")) return false;
+    if (!dv_quoted(s, i, n.role)) return false;
+    if (!dv_lit(s, i, ",")) return false;
+    if (!dv_quoted(s, i, n.sub)) return false;
+    if (!dv_lit(s, i, ",")) return false;
+    if (!dv_quoted(s, i, n.title)) return false;
+    if (!dv_lit(s, i, ",")) return false;
+    if (!dv_quoted(s, i, n.desc)) return false;
+    if (!dv_lit(s, i, ",")) return false;
+    if (!dv_number(s, i, n.x)) return false;
+    if (!dv_lit(s, i, ",")) return false;
+    if (!dv_number(s, i, n.y)) return false;
+    if (!dv_lit(s, i, ",")) return false;
+    if (!dv_number(s, i, n.w)) return false;
+    if (!dv_lit(s, i, ",")) return false;
+    if (!dv_number(s, i, n.h)) return false;
+    dv_skip_ws(s, i);
+    if (!dv_lit(s, i, ",{")) return false;
+    for (;;) {
+        dv_skip_ws(s, i);
+        if (s.compare(i, 2, "}}") == 0) { i += 2; break; }
+        DVNode c;
+        if (!dv_parse_node(s, i, c)) return false;
+        n.kids.push_back(c);
+        dv_skip_ws(s, i);
+        if (i < s.size() && s[i] == ',') i++;
+    }
+    dv_skip_ws(s, i);
+    if (i < s.size() && s[i] == ',') i++;
+    return true;
+}
+
+static bool dv_load_model(const char *path, std::vector<DVNode> &roots) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    size_t i = s.find("std::vector<DVNode>");
+    if (i == std::string::npos) i = 0;
+    size_t br = s.find('{', i);
+    if (br == std::string::npos) return false;
+    i = br + 1;
+    for (;;) {
+        dv_skip_ws(s, i);
+        if (i >= s.size() || s.compare(i, 2, "};") == 0) break;
+        DVNode n;
+        if (!dv_parse_node(s, i, n)) return false;
+        roots.push_back(n);
+    }
+    return !roots.empty();
+}
+
+static bool dv_match_self(const DVNode &n, const std::string &f) {
+    return n.role.find(f) != std::string::npos || n.sub.find(f) != std::string::npos ||
+           n.title.find(f) != std::string::npos || n.desc.find(f) != std::string::npos;
+}
+
+static bool dv_match(const DVNode &n, const std::string &f) {
+    if (dv_match_self(n, f)) return true;
+    for (const auto &k : n.kids)
+        if (dv_match(k, f)) return true;
+    return false;
+}
+
+// focus がノード自身に一致したら部分木ごと残す。子だけ一致なら祖先を残す。
+static void dv_prune(DVNode &n, const std::string &f) {
+    if (dv_match_self(n, f)) return;
+    std::vector<DVNode> keep;
+    for (const auto &k : n.kids) {
+        if (!dv_match(k, f)) continue;
+        DVNode c = k;
+        dv_prune(c, f);
+        keep.push_back(c);
+    }
+    n.kids = keep;
+}
+
+static std::string g_dv_focus;
+
+extern "C" void nx_display_set_focus(const char *f) {
+    g_dv_focus = f ? f : "";
+}
+
+static int dv_write_model(const std::vector<DVNode> &roots, const char *save, FILE *out) {
+    std::vector<DVNode> view;
+    if (g_dv_focus.empty()) {
+        view = roots;
+    } else {
+        for (const auto &r : roots) {
+            if (!dv_match(r, g_dv_focus)) continue;
+            DVNode c = r;
+            dv_prune(c, g_dv_focus);
+            view.push_back(c);
+        }
+    }
+    bool svg = save && std::strlen(save) >= 4 &&
+               (!std::strcmp(save + std::strlen(save) - 4, ".svg"));
+    FILE *f = out;
+    if (save && *save) {
+        f = std::fopen(save, "w");
+        if (!f) { std::fprintf(out, "書けません: %s\n", save); return 1; }
+    }
+    if (svg) {
+        int nodes = 0;
+        bool has_dialog = false;
+        for (const auto &r : view) {
+            nodes += dv_count(r);
+            if (dv_dialog(r)) has_dialog = true;
+        }
+        std::fprintf(f, "<svg xmlns='http://www.w3.org/2000/svg' width='1710' height='1112' "
+                        "viewBox='0 0 1710 1112'>\n");
+        std::fprintf(f, "<style>text{font-family:Menlo,monospace;fill:#c9d4e3}</style>\n");
+        std::fprintf(f, "<rect width='100%%' height='100%%' fill='#0b0e13'/>\n");
+
+        double y = 0;
+        // 通常ウィンドウを先、ダイアログを最後に描く (重なり順)。
+        for (const auto &r : view)
+            if (!dv_dialog(r)) dv_svg(r, &y, f);
+        if (has_dialog) {
+            std::fprintf(f, "<rect x='0' y='0' width='1710' height='1112' fill='#000' opacity='0.35'/>\n");
+            for (const auto &r : view)
+                if (dv_dialog(r)) dv_svg(r, &y, f);
+        }
+        std::fprintf(f, "<rect x='10' y='1076' width='760' height='26' rx='4' fill='#0b0e13' opacity='0.9'/>\n");
+        std::fprintf(f, "<text x='18' y='1093' font-size='10' fill='#93a4bb'>"
+                        "blue = window · red = dialog · gray = structural · filled = control · "
+                        "windows=%zu · nodes=%d</text>\n", view.size(), nodes);
+        std::fprintf(f, "</svg>\n");
+    } else {
+        std::fprintf(f, "// display graph decoded (C++), %zu windows\n", view.size());
+        std::fprintf(f, "struct DVNode { const char*role; const char*sub; const char*title; "
+                        "const char*desc; double x,y,w,h; std::vector<DVNode> kids; };\n");
+        std::fprintf(f, "std::vector<DVNode> display = {\n");
+        for (const auto &r : view) dv_cpp(r, 2, f);
+        std::fprintf(f, "};\n");
+    }
+    if (f != out) std::fclose(f);
+    std::fprintf(out, "display graph: windows=%zu -> %s\n", view.size(),
+                 (save && *save) ? save : "(stdout)");
+    return 0;
+}
+
+extern "C" int nx_display_graph(const char *target, const char *save, FILE *out) {
+    if (!out) out = stdout;
+    if (!target || !*target) { std::fprintf(out, "使い方: neodax --display-graph <pid|S|model.cpp> [--save out.cpp|out.svg]\n"); return 2; }
+    // 保存済みモデルなら AX を読まずに描く (アプリを起動しない静的表示)。
+    struct stat tst;
+    if (stat(target, &tst) == 0 && S_ISREG(tst.st_mode)) {
+        std::vector<DVNode> roots;
+        if (!dv_load_model(target, roots)) {
+            std::fprintf(out, "DVNode モデルを読めません: %s\n", target);
+            return 2;
+        }
+        return dv_write_model(roots, save, out);
+    }
+    pid_t pid = nx_resolve_pid(target);
+    if (pid <= 0) { std::fprintf(out, "対象が見つかりません: %s\n", target); return 1; }
+    bool trusted = AXIsProcessTrusted();
+    if (!trusted) { std::fprintf(out, "Accessibility の許可が必要\n"); return 1; }
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    if (!app) return 1;
+    AXUIElementSetAttributeValue(app, CFSTR("AXManualAccessibility"), kCFBooleanTrue);
+    CFTypeRef wins = NULL;
+    for (int i = 0; i < 12; i++) {
+        wins = NULL;
+        if (AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, &wins) == kAXErrorSuccess && wins) break;
+        if (wins) { CFRelease(wins); wins = NULL; }
+        usleep(500000);
+    }
+    if (!wins) { std::fprintf(out, "windows を取得できません\n"); CFRelease(app); return 1; }
+    std::vector<DVNode> roots;
+    int budget = 400;
+    CFArrayRef a = (CFArrayRef)wins;
+    for (CFIndex i = 0; i < CFArrayGetCount(a) && budget > 0; i++) {
+        DVNode r; dv_from_ax((AXUIElementRef)CFArrayGetValueAtIndex(a, i), r, 0, budget);
+        roots.push_back(r);
+    }
+    CFRelease(wins); CFRelease(app);
+    return dv_write_model(roots, save, out);
+}
+
 // ---------------------------------------------------------------- imports
 // 取り込んでいる外部シンボルと GOT スロットを一覧する。
 // 「どのライセンスAPI / exit を呼んでいるか」を静的に見るための入口。
@@ -3667,6 +4911,277 @@ extern "C" int nx_list_imports(const char *path, const char *needle, FILE *out) 
     }
     std::fprintf(out, "%s の import は %d 個です。\n", (needle && *needle) ? needle : "(all)", n);
     return n ? 0 : 1;
+}
+
+// ---------------------------------------------------------------- prune svg
+// 重要 (necessary) と 状態依存 (wait/spawn) だけを描き、irrelevant は捨てる。
+extern "C" int nx_prune_svg(const char *path, const char *outpath, FILE *out) {
+    if (!out) out = stdout;
+    if (!path || !outpath) { std::fprintf(out, "使い方: neodax --prune-svg OUT.svg <binary>\n"); return 2; }
+    auto img = nx::MachOImage::open(path);
+    if (!img) { std::fprintf(out, "[skip] %s\n", path); return 1; }
+    nx::ImportResolver imports; imports.parse(*img);
+    nx::XRefIndex xr; xr.build(*img, imports);
+    nx::AnnulusAnalyzer ra; ra.build(*img, xr); ra.find_annuli();
+    nx::EdgeClassifier ec;
+    uint64_t entry = img->entry();
+    if (!entry && !ra.nodes().empty()) entry = ra.nodes()[0].addr;
+    ec.run(ra, entry);
+
+    std::vector<std::pair<std::string, std::string>> edges;
+    std::set<std::string> wait_edges;
+    std::set<std::string> nodes;
+    for (const auto &e : ec.edges()) {
+        bool keep = (e.cls == nx::EdgeClassifier::Cls::Necessary) || e.wait || e.spawn;
+        if (!keep) continue;
+        edges.push_back({ e.from, e.to });
+        nodes.insert(e.from);
+        nodes.insert(e.to);
+        if (e.wait || e.spawn) wait_edges.insert(e.from + "\x1f" + e.to);
+    }
+    std::vector<std::string> names(nodes.begin(), nodes.end());
+    std::sort(names.begin(), names.end());
+    std::map<std::string, int> idx;
+    for (size_t i = 0; i < names.size(); i++) idx[names[i]] = (int)i;
+
+    const int W = 1200, BOXW = 420, BH = 26, GAP = 10;
+    int H = std::max(200, (int)names.size() * (BH + GAP) + 60);
+    std::vector<int> y(names.size());
+    for (size_t i = 0; i < names.size(); i++) y[i] = 30 + (int)i * (BH + GAP);
+
+    FILE *f = std::fopen(outpath, "w");
+    if (!f) { std::fprintf(out, "書けません: %s\n", outpath); return 1; }
+    std::fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    std::fprintf(f, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\">\n", W, H, W, H);
+    std::fprintf(f, "<rect width=\"100%%\" height=\"100%%\" fill=\"#11151c\"/>\n");
+    std::fprintf(f, "<style>text{font-family:Menlo,monospace;fill:#c8d3e0;font-size:12px}.need{stroke:#4c8bf5;stroke-width:1.6;fill:none}.wait{stroke:#ff5f56;stroke-width:2.4;fill:none;stroke-dasharray:6 4}</style>\n");
+    for (size_t i = 0; i < names.size(); i++) {
+        std::fprintf(f, "<rect x=\"30\" y=\"%d\" width=\"%d\" height=\"%d\" rx=\"6\" fill=\"#1b2230\" stroke=\"#2f3a4d\"/>\n", y[i], BOXW, BH);
+        std::fprintf(f, "<text x=\"40\" y=\"%d\">%s</text>\n", y[i] + 17, names[i].c_str());
+    }
+    for (const auto &e : edges) {
+        auto ia = idx.find(e.first), ib = idx.find(e.second);
+        if (ia == idx.end() || ib == idx.end()) continue;
+        int x1 = 30 + BOXW, y1 = y[ia->second] + BH / 2;
+        int x2 = x1, y2 = y[ib->second] + BH / 2;
+        int mx = x1 + 80;
+        const char *cls = wait_edges.count(e.first + "\x1f" + e.second) ? "wait" : "need";
+        std::fprintf(f, "<path class=\"%s\" d=\"M%d %d C%d %d %d %d %d %d\"/>\n",
+                     cls, x1, y1, mx, y1, mx, y2, x2, y2);
+    }
+    std::fprintf(f, "<text x=\"30\" y=\"%d\" fill=\"#5d6b7d\">necessary+state-dependent only: nodes=%zu edges=%zu (wait=%zu). irrelevant pruned.</text>\n",
+                 H - 12, names.size(), edges.size(), wait_edges.size());
+    std::fprintf(f, "</svg>\n");
+    std::fclose(f);
+    std::fprintf(out, "SVG: %s  nodes=%zu edges=%zu wait=%zu\n", outpath, names.size(), edges.size(), wait_edges.size());
+    return 0;
+}
+
+// ---------------------------------------------------------------- class svg
+// mangled 名から class と method を切り出す (テンプレート引数 I..E を読み飛ばす)。
+static bool nx_class_of(const std::string &sym, std::string &cls, std::string &meth) {
+    size_t z = sym.find("_Z");
+    if (z == std::string::npos) return false;
+    size_t i = z + 2;
+    if (i >= sym.size() || sym[i] != 'N') return false;
+    i++;
+    std::vector<std::string> parts;
+    while (i < sym.size()) {
+        char c = sym[i];
+        if (c == 'E') break;
+        if (c == 'I') {
+            int d = 1; i++;
+            while (i < sym.size() && d > 0) { if (sym[i] == 'I') d++; else if (sym[i] == 'E') d--; i++; }
+            continue;
+        }
+        if (std::isdigit((unsigned char)c)) {
+            size_t len = 0;
+            while (i < sym.size() && std::isdigit((unsigned char)sym[i])) { len = len * 10 + (sym[i] - '0'); i++; }
+            if (i + len > sym.size()) return false;
+            parts.push_back(sym.substr(i, len)); i += len;
+            continue;
+        }
+        if (c == 'S') { while (i < sym.size() && sym[i] != '_') i++; if (i < sym.size()) i++; parts.push_back("?"); continue; }
+        if (c == 'K' || c == 'V' || c == 'r') { i++; continue; }
+        break;
+    }
+    if (parts.size() < 2) return false;
+    meth = parts.back();
+    cls = parts[0];
+    for (size_t k = 1; k + 1 < parts.size(); k++) { cls += "::"; cls += parts[k]; }
+    return true;
+}
+
+extern "C" int nx_class_svg(const char *path, uint64_t start, const char *outpath, int maxsteps, FILE *out) {
+    if (!out) out = stdout;
+    if (!path || !outpath) { std::fprintf(out, "使い方: neodax --class-svg ADDR OUT.svg\n"); return 2; }
+    auto img = nx::MachOImage::open(path);
+    if (!img) { std::fprintf(out, "[skip] %s\n", path); return 1; }
+    if (maxsteps <= 0) maxsteps = 400;
+    using Op = nx::Arm64::Op;
+    std::set<uint64_t> visited;
+    std::vector<uint64_t> work{ start };
+    std::map<std::string, std::set<std::string>> classes;   // class -> methods
+    std::set<std::pair<std::string, std::string>> edges;     // caller -> callee class
+    std::string scls, smeth;
+    const std::string *sn = img->name_at(start);
+    if (sn) nx_class_of(*sn, scls, smeth);
+    int steps = 0;
+    while (!work.empty() && steps < maxsteps) {
+        uint64_t pc = work.back(); work.pop_back();
+        while (steps < maxsteps) {
+            if (!visited.insert(pc).second) break;
+            const uint8_t *q = img->at(pc, 4);
+            if (!q) break;
+            nx::Arm64::Insn in;
+            steps++;
+            if (!nx::Arm64::decode(pc, *(const uint32_t *)q, &in) ||
+                in.op == Op::Invalid || in.op == Op::Unknown) { pc += 4; continue; }
+            if (in.op == Op::Bl) {
+                const std::string *fn = img->name_at(in.target);
+                if (fn) {
+                    std::string cc, cm;
+                    if (nx_class_of(*fn, cc, cm)) {
+                        classes[cc].insert(cm);
+                        if (!scls.empty()) edges.insert({ scls, cc });
+                    }
+                }
+                pc += 4; continue;
+            }
+            if (in.op == Op::B) { pc = in.target; continue; }
+            if (in.op == Op::BCond || in.op == Op::Cbz || in.op == Op::Cbnz ||
+                in.op == Op::Tbz || in.op == Op::Tbnz) { work.push_back(in.target); pc += 4; continue; }
+            if (in.op == Op::Ret) break;
+            pc += 4;
+        }
+    }
+    if (!scls.empty()) { classes[scls]; if (!smeth.empty()) classes[scls].insert(smeth); }
+
+    std::vector<std::string> names;
+    for (const auto &kv : classes) names.push_back(kv.first);
+    std::sort(names.begin(), names.end());
+    std::map<std::string, int> idx;
+    for (size_t i = 0; i < names.size(); i++) idx[names[i]] = (int)i;
+
+    const int W = 1100, BOXW = 340, LH = 20, PAD = 14;
+    std::vector<int> h(names.size());
+    int totalH = 0;
+    for (size_t i = 0; i < names.size(); i++) {
+        h[i] = PAD * 2 + LH + (int)classes[names[i]].size() * LH;
+        totalH += h[i] + 24;
+    }
+    if (totalH < 200) totalH = 200;
+    int H = totalH + 40;
+    std::vector<int> y(names.size());
+    int cy = 20;
+    for (size_t i = 0; i < names.size(); i++) { y[i] = cy; cy += h[i] + 24; }
+
+    FILE *f = std::fopen(outpath, "w");
+    if (!f) { std::fprintf(out, "書けません: %s\n", outpath); return 1; }
+    std::fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    std::fprintf(f, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\">\n", W, H, W, H);
+    std::fprintf(f, "<rect width=\"100%%\" height=\"100%%\" fill=\"#11151c\"/>\n");
+    std::fprintf(f, "<style>text{font-family:Menlo,monospace;fill:#e6edf3}.cls{fill:#c9a227;font-weight:bold}.m{fill:#9fb3c8}.e{stroke:#4c8bf5;stroke-width:1.6;fill:none}.ann{stroke:#ff5f56;stroke-width:2.6;fill:none;stroke-dasharray:6 4}</style>\n");
+    for (size_t i = 0; i < names.size(); i++) {
+        int x = 40, yy = y[i];
+        std::fprintf(f, "<rect x=\"%d\" y=\"%d\" width=\"%d\" height=\"%d\" rx=\"8\" fill=\"#1b2230\" stroke=\"#2f3a4d\"/>\n", x, yy, BOXW, h[i]);
+        std::fprintf(f, "<text class=\"cls\" x=\"%d\" y=\"%d\">%s</text>\n", x + PAD, yy + PAD + 14, names[i].c_str());
+        int ty = yy + PAD + LH + 14;
+        for (const auto &m : classes[names[i]]) {
+            std::fprintf(f, "<text class=\"m\" x=\"%d\" y=\"%d\">&#8226; %s</text>\n", x + PAD + 10, ty, m.c_str());
+            ty += LH;
+        }
+    }
+    // edges: same-class = annulus-ish loop; cross-class = line
+    int ri = 0;
+    for (const auto &e : edges) {
+        int a = idx[e.first], b = idx[e.second];
+        if (a == b) continue;
+        int x1 = 40 + BOXW, y1 = y[a] + h[a] / 2;
+        int x2 = x1, y2 = y[b] + h[b] / 2;
+        int mx = x1 + 70;
+        std::fprintf(f, "<path class=\"e\" d=\"M%d %d C%d %d %d %d %d %d\" marker-end=\"url(#ar)\"/>\n",
+                     x1, y1, mx, y1, mx, y2, x2, y2);
+        ri++;
+    }
+    std::fprintf(f, "<defs><marker id=\"ar\" markerWidth=\"8\" markerHeight=\"8\" refX=\"6\" refY=\"4\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\" fill=\"#4c8bf5\"/></marker></defs>\n");
+    std::fprintf(f, "<text x=\"40\" y=\"%d\" fill=\"#5d6b7d\">classes=%zu edges=%d  (vector, no pixels)</text>\n", H - 12, names.size(), ri);
+    std::fprintf(f, "</svg>\n");
+    std::fclose(f);
+    std::fprintf(out, "SVG: %s  classes=%zu edges=%d  steps=%d\n", outpath, names.size(), ri, steps);
+    return 0;
+}
+
+// ---------------------------------------------------------------- motion
+// 指定関数から制御流れを仮想実行する (注入なし)。落ちる側・無条件分岐を辿り、
+// BL 呼び出しと条件分岐を「動き」として出す。レジスタ値は扱わない (構造の運動)。
+extern "C" int nx_motion(const char *path, uint64_t start, int maxsteps, FILE *out) {
+    if (!out) out = stdout;
+    if (!path) return 2;
+    auto img = nx::MachOImage::open(path);
+    if (!img) { std::fprintf(out, "[skip] not a 64-bit Mach-O: %s\n", path); return 1; }
+    nx::ImportResolver mimp; mimp.parse(*img);
+    if (maxsteps <= 0) maxsteps = 400;
+    std::set<uint64_t> visited;
+    std::vector<std::pair<uint64_t, int>> work;
+    work.push_back({ start, 0 });
+    int steps = 0, calls = 0, branches = 0;
+    using Op = nx::Arm64::Op;
+    while (!work.empty() && steps < maxsteps) {
+        uint64_t pc = work.back().first;
+        int depth = work.back().second;
+        work.pop_back();
+        while (steps < maxsteps) {
+            if (!visited.insert(pc).second) break;
+            const uint8_t *p = img->at(pc, 4);
+            if (!p) break;
+            uint32_t w = *(const uint32_t *)p;
+            nx::Arm64::Insn in;
+            steps++;
+            if (!nx::Arm64::decode(pc, w, &in) || in.op == Op::Invalid ||
+                in.op == Op::Unknown) {
+                pc += 4;      // 未対応命令は飛ばして運動を続ける
+                continue;
+            }
+            if (in.op == Op::Bl) {
+                const std::string *fn = img->name_at(in.target);
+                std::string nm = fn ? *fn : std::string();
+                if (nm.empty()) {
+                    const uint8_t *sp = img->at(in.target, 12);
+                    if (sp) {
+                        nx::Arm64::Insn a, b, c;
+                        nx::Arm64::decode(in.target, *(const uint32_t *)sp, &a);
+                        nx::Arm64::decode(in.target + 4, *(const uint32_t *)(sp + 4), &b);
+                        nx::Arm64::decode(in.target + 8, *(const uint32_t *)(sp + 8), &c);
+                        if (a.op == Op::Adrp && b.op == Op::Ldr && c.op == Op::Br) {
+                            const std::string *sym = mimp.symbol_at_slot(a.target + b.imm);
+                            if (sym) nm = *sym;
+                        }
+                    }
+                }
+                std::fprintf(out, "%*sBL   0x%llx  %s\n", depth * 2, "",
+                             (unsigned long long)in.target, nm.empty() ? "(local)" : nm.c_str());
+                calls++;
+                pc += 4;
+                continue;
+            }
+            if (in.op == Op::B) { pc = in.target; continue; }
+            if (in.op == Op::BCond || in.op == Op::Cbz || in.op == Op::Cbnz ||
+                in.op == Op::Tbz || in.op == Op::Tbnz) {
+                std::fprintf(out, "%*s%s -> 0x%llx  (alt)\n", depth * 2, "",
+                             nx::Arm64::op_name(in.op), (unsigned long long)in.target);
+                branches++;
+                work.push_back({ in.target, depth + 1 });
+                pc += 4;
+                continue;
+            }
+            if (in.op == Op::Ret) break;
+            pc += 4;
+        }
+    }
+    std::fprintf(out, "movement: steps=%d calls=%d branches=%d visited=%zu\n",
+                 steps, calls, branches, visited.size());
+    return 0;
 }
 
 // ---------------------------------------------------------------- C++ classes

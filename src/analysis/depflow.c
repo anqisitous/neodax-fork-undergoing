@@ -719,7 +719,7 @@ static void depflow_scan_insns(macho_binary_t *bin, depflow_graph_t *graph,
             pend_reg = -1;
         }
 
-        /* memory stores = state changes; calls = ring edges (guards below) */
+        /* memory stores = state changes; calls = annulus edges (guards below) */
         if (!strncmp(m, "st", 2) && nstores < 16) stores[nstores++] = in->address;
         if (in->is_call && ncalls < 16) calls[ncalls++] = in->address;
 
@@ -752,7 +752,7 @@ static void depflow_scan_insns(macho_binary_t *bin, depflow_graph_t *graph,
     }
     if (nstores > 0 && bin->nblocks > 0)
         depflow_dominator_guards(bin, graph, s, stores, nstores);
-    /* then/now guard on conditional calls (ring edges) */
+    /* then/now guard on conditional calls (annulus edges) */
     if (ncalls > 0 && bin->nblocks > 0)
         depflow_dominator_guards(bin, graph, s, calls, ncalls);
 
@@ -1259,18 +1259,18 @@ int depflow_summaries_fixpoint(macho_binary_t *bin, depflow_graph_t *graph) {
     if (!q || !inq) { free(q); free(inq); return -1; }
 
     int qh = 0, qt = 0, qlen = 0;
-    /* Seed in ring order: callee rings (higher Kosaraju id) before callers, so
-     * each ring is solved on inputs that are already stable. The monotone
+    /* Seed in annulus order: callee annuli (higher Kosaraju id) before callers, so
+     * each annulus is solved on inputs that are already stable. The monotone
      * worklist then converges to the same unique fixpoint. */
-    if (graph->ring_count > 0) {
-        for (int r = graph->ring_count - 1; r >= 0; r--)
+    if (graph->annulus_count > 0) {
+        for (int r = graph->annulus_count - 1; r >= 0; r--)
             for (int i = 0; i < n; i++)
-                if (graph->summaries[i].ring_id == r) {
+                if (graph->summaries[i].annulus_id == r) {
                     q[qt] = i; qt = (qt + 1) % cap; qlen++;
                     inq[i] = 1; graph->summaries[i].dirty = 1;
                 }
         for (int i = 0; i < n; i++)
-            if (graph->summaries[i].ring_id < 0) {
+            if (graph->summaries[i].annulus_id < 0) {
                 q[qt] = i; qt = (qt + 1) % cap; qlen++;
                 inq[i] = 1; graph->summaries[i].dirty = 1;
             }
@@ -1358,14 +1358,14 @@ int depflow_cache_first_calls(macho_binary_t *bin, depflow_graph_t *graph) {
     return 0;
 }
 
-/* Strongly-connected components of the call graph ("rings"). Functions in a
- * ring are mutually recursive, so their summaries are solved together; once
- * the ring member set is fixed the interprocedural analysis is determined.
+/* Strongly-connected components of the call graph ("annuli"). Functions in a
+ * annulus are mutually recursive, so their summaries are solved together; once
+ * the annulus member set is fixed the interprocedural analysis is determined.
  * Kosaraju, iterative (no recursion-depth risk). */
-int depflow_build_rings(macho_binary_t *bin, depflow_graph_t *graph) {
+int depflow_build_annuli(macho_binary_t *bin, depflow_graph_t *graph) {
     int nf = bin->nfunctions;
     if (nf <= 0 || !graph->summaries) return -1;
-    for (int i = 0; i < nf; i++) graph->summaries[i].ring_id = -1;
+    for (int i = 0; i < nf; i++) graph->summaries[i].annulus_id = -1;
 
     int ne = 0;
     for (int i = 0; i < nf; i++) {
@@ -1375,7 +1375,7 @@ int depflow_build_rings(macho_binary_t *bin, depflow_graph_t *graph) {
                 s->outs[o].origin == DEPFLOW_ORIGIN_CALLEE_RET &&
                 depflow_find_func_idx(bin, graph, s->outs[o].address) >= 0) ne++;
     }
-    graph->ring_count = 0;
+    graph->annulus_count = 0;
     if (ne == 0) return 0;
 
     int *ecu = malloc(sizeof(int) * (size_t)ne);
@@ -1435,11 +1435,11 @@ int depflow_build_rings(macho_binary_t *bin, depflow_graph_t *graph) {
     for (int idx = no - 1; idx >= 0; idx--) {
         int s0 = order[idx];
         if (vis[s0]) continue;
-        int ring = graph->ring_count, sp = 0, size = 0;
+        int annulus = graph->annulus_count, sp = 0, size = 0;
         stack[sp++] = s0; vis[s0] = 1;
         while (sp > 0) {
             int v = stack[--sp];
-            graph->summaries[v].ring_id = ring;
+            graph->summaries[v].annulus_id = annulus;
             size++;
             for (int e = rc[v]; e < rc[v + 1]; e++) {
                 int w = rev[e];
@@ -1448,8 +1448,8 @@ int depflow_build_rings(macho_binary_t *bin, depflow_graph_t *graph) {
         }
         if (size > 1)
             for (int v = 0; v < nf; v++)
-                if (graph->summaries[v].ring_id == ring) graph->summaries[v].is_recursive = 1;
-        graph->ring_count++;
+                if (graph->summaries[v].annulus_id == annulus) graph->summaries[v].is_recursive = 1;
+        graph->annulus_count++;
     }
 
     free(ecu); free(ecv); free(fc); free(rc); free(fwd); free(rev);
@@ -1547,17 +1547,17 @@ void depflow_export_workflow(macho_binary_t *bin, depflow_graph_t *graph,
     /* ---- recover a good name + class for every function ---- */
     char (*cls)[64] = (char (*)[64])calloc((size_t)nf, 64);
     char (*mth)[64] = (char (*)[64])calloc((size_t)nf, 64);
-    int  *ringsz = (int *)calloc((size_t)(graph->ring_count > 0 ? graph->ring_count : 1), sizeof(int));
-    if (!cls || !mth || !ringsz) { free(cls); free(mth); free(ringsz); fclose(f); return; }
+    int  *annuli_size = (int *)calloc((size_t)(graph->annulus_count > 0 ? graph->annulus_count : 1), sizeof(int));
+    if (!cls || !mth || !annuli_size) { free(cls); free(mth); free(annuli_size); fclose(f); return; }
 
     for (int i = 0; i < nf; i++) depflow_cpp_name(bin->functions[i].name, mth[i], 64);
     for (int i = 0; i < nf; i++) {
-        int r = (graph->summaries && i < graph->summary_count) ? graph->summaries[i].ring_id : -1;
-        if (r >= 0 && r < graph->ring_count) ringsz[r]++;
+        int r = (graph->summaries && i < graph->summary_count) ? graph->summaries[i].annulus_id : -1;
+        if (r >= 0 && r < graph->annulus_count) annuli_size[r]++;
     }
 
     for (int i = 0; i < nf; i++) {
-        int r = (graph->summaries && i < graph->summary_count) ? graph->summaries[i].ring_id : -1;
+        int r = (graph->summaries && i < graph->summary_count) ? graph->summaries[i].annulus_id : -1;
         char p[64];
         depflow_cpp_prefix(mth[i], p, 64);
         int cnt = 0;
@@ -1567,8 +1567,8 @@ void depflow_export_workflow(macho_binary_t *bin, depflow_graph_t *graph,
             if (p[0] && !strcmp(p, pj)) cnt++;
         }
         char role[64];
-        if (r >= 0 && r < graph->ring_count && ringsz[r] > 1) {
-            snprintf(cls[i], 64, "ring_%d", r);          /* mutually recursive */
+        if (r >= 0 && r < graph->annulus_count && annuli_size[r] > 1) {
+            snprintf(cls[i], 64, "annulus_%d", r);          /* mutually recursive */
         } else if (depflow_function_role(bin, graph, i, role, sizeof(role))) {
             snprintf(cls[i], 64, "%s", role);            /* behaviour-based */
         } else if (p[0] && cnt >= 2) {
@@ -1581,8 +1581,8 @@ void depflow_export_workflow(macho_binary_t *bin, depflow_graph_t *graph,
     }
 
     fprintf(f, "// neodax workflow (auto-generated)\n");
-    fprintf(f, "// source: %s\n// functions: %d  rings: %d\n\n",
-            bin->filepath, nf, graph->ring_count);
+    fprintf(f, "// source: %s\n// functions: %d  annuli: %d\n\n",
+            bin->filepath, nf, graph->annulus_count);
     fprintf(f, "#include <cstdint>\n#include <string>\n"
                "#include <functional>\n#include <initializer_list>\n\n");
     fprintf(f, "namespace nxd_workflow {\n\n");
@@ -1619,9 +1619,9 @@ void depflow_export_workflow(macho_binary_t *bin, depflow_graph_t *graph,
         if (na < 1) na = 1;
         if (na > DEPFLOW_MAX_VARGS) na = DEPFLOW_MAX_VARGS;
 
-        fprintf(f, "// [0x%llx] ring=%d%s  '%s'\n",
+        fprintf(f, "// [0x%llx] annulus=%d%s  '%s'\n",
                 (unsigned long long)bin->functions[i].start,
-                s ? s->ring_id : -1,
+                s ? s->annulus_id : -1,
                 (s && s->is_recursive) ? " recursive" : "", bin->functions[i].name);
         fprintf(f, "Value %s::%s(", cls[i], mth[i]);
         for (int a = 0; a < na; a++) fprintf(f, "%suint64_t a%d", a ? ", " : "", a);
@@ -1676,7 +1676,7 @@ void depflow_export_workflow(macho_binary_t *bin, depflow_graph_t *graph,
 
     fprintf(f, "} // namespace nxd_workflow\n");
     fclose(f);
-    free(cls); free(mth); free(ringsz);
+    free(cls); free(mth); free(annuli_size);
 }
 
 int depflow_build_dependency_graph(macho_binary_t *bin, depflow_graph_t *graph) {
@@ -1797,7 +1797,7 @@ int depflow_build_dependency_graph(macho_binary_t *bin, depflow_graph_t *graph) 
     }
 
     depflow_build_summaries(bin, graph);
-    depflow_build_rings(bin, graph);
+    depflow_build_annuli(bin, graph);
     depflow_summaries_fixpoint(bin, graph);
     return 0;
 }

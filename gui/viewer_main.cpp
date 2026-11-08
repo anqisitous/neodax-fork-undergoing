@@ -66,7 +66,7 @@ int main(int argc, char **argv) {
     if (!path) {
         std::fprintf(stderr,
             "usage: %s <mach-o> [-o out.svg] [--ascii]\n"
-            "  role(1) -> ring(2) -> function(3) の 3 階層を描く。\n"
+            "  role(1) -> annulus(2) -> function(3) の 3 階層を描く。\n"
             "  状態依存の環が同じ role に複数あるときは仮想ノードを 2 階層目に出す。\n",
             argv[0]);
         return 2;
@@ -104,11 +104,11 @@ int main(int argc, char **argv) {
         char role[64];
         if (!depflow_function_role(bin, dg, i, role, sizeof(role)))
             std::snprintf(role, sizeof(role), "misc");
-        const int ring = (dg->summaries && i < dg->summary_count)
-                             ? dg->summaries[i].ring_id : -1;
+        const int annulus = (dg->summaries && i < dg->summary_count)
+                             ? dg->summaries[i].annulus_id : -1;
         g.add_function(bin->functions[i].start,
                        bin->functions[i].name,
-                       rolePal(role), ring);
+                       rolePal(role), annulus);
     }
     g.build_hierarchy();
     g.layout();

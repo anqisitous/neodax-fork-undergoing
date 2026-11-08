@@ -56,7 +56,7 @@ void SvgRenderer::render(const Graph &g, std::ostream &out) const {
         miny = std::min(miny, y); maxy = std::max(maxy, y);
     };
     for (const auto *f : g.functions()) grow(f->pos.x, f->pos.y);
-    for (const auto *r : g.rings()) {
+    for (const auto *r : g.annuli()) {
         grow(r->box.x, r->box.y);
         grow(r->box.x + r->box.w, r->box.y + r->box.h);
     }
@@ -88,8 +88,8 @@ void SvgRenderer::render(const Graph &g, std::ostream &out) const {
             << "\" stroke-opacity=\"0.35\" stroke-width=\"1.5\"/>\n";
     }
 
-    // ---- 2 階層目: ring (仮想環は破線で区別) ----
-    for (const auto *r : g.rings()) {
+    // ---- 2 階層目: annulus (仮想環は破線で区別) ----
+    for (const auto *r : g.annuli()) {
         const bool virt = r->is_virtual();
         out << "<circle cx=\"" << X(r->box.x + r->box.w / 2)
             << "\" cy=\"" << Y(r->box.y + r->box.h / 2)
@@ -119,20 +119,20 @@ void SvgRenderer::render(const Graph &g, std::ostream &out) const {
 
     // 凡例 (role の色)
     out << "<text x=\"12\" y=\"16\" fill=\"#8b949e\" font-size=\"11\">"
-        << "nx graph — roles(1) / rings(2, dashed=virtual) / functions(3) — "
-        << g.functions().size() << " functions, " << g.rings().size() << " rings, "
+        << "nx graph — roles(1) / annuli(2, dashed=virtual) / functions(3) — "
+        << g.functions().size() << " functions, " << g.annuli().size() << " annuli, "
         << g.roles().size() << " roles</text>\n";
     out << "</svg>\n";
 }
 
 void AsciiRenderer::render(const Graph &g, std::ostream &out) const {
-    out << "roles=" << g.roles().size() << "  rings=" << g.rings().size()
+    out << "roles=" << g.roles().size() << "  annuli=" << g.annuli().size()
         << "  functions=" << g.functions().size() << "\n";
     for (const auto *rg : g.roles()) {
         out << "role " << rg->role << "  box=(" << rg->box.x << "," << rg->box.y << ","
             << rg->box.w << "," << rg->box.h << ")\n";
-        for (const auto *r : rg->rings) {
-            out << "  " << (r->is_virtual() ? "[virtual] " : "[ring]    ")
+        for (const auto *r : rg->annuli) {
+            out << "  " << (r->is_virtual() ? "[virtual] " : "[annulus]    ")
                 << r->label() << "  members=" << r->members.size() << "\n";
         }
     }

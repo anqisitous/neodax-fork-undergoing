@@ -399,10 +399,10 @@ typedef struct {
     int      show_classification;   /* 変数分類を表示 */
 
     /* ── Advanced static analysis (engine static_analysis.c) ────────
-     * One Regression Ring: laps survey→classify→trace→predict→parallel→
+     * One Regression Annulus: laps survey→classify→trace→predict→parallel→
      * verify; enabled by -w / --advanced-analysis. */
     int      advanced_analysis;
-    char     ring_svg[512];
+    char     annulus_svg[512];
     int      flow_depth;
     char     flow_var[DAX_SYM_NAME_LEN];
     char     flow_func[DAX_SYM_NAME_LEN];

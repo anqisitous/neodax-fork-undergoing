@@ -3,12 +3,12 @@
 // 設計方針:
 //   以前は GNode 構造体 1 個と switch の寄せ集めで、
 //     - ノード種別 (実関数 / 仮想ノード)
-//     - 所属 (role / ring)
+//     - 所属 (role / annulus)
 //     - 配置方法 (円周 / 単体)
 //   がすべて「フラグと分岐」で表現されていた。ここを多相に直す。
 //
 //   ・Node        … 描画対象となる要素。実体は FunctionNode / VirtualGroupNode
-//   ・Group       … ノードのまとまり。RoleGroup / RingGroup / VirtualRingGroup
+//   ・Group       … ノードのまとまり。RoleGroup / AnnulusGroup / VirtualAnnulusGroup
 //   ・Layout      … 配置戦略。RadialLayout / SingleLayout
 //   ・Graph       … 上記を組み立て、階層を構築し、配置する門番
 //
@@ -39,7 +39,7 @@ public:
 
     uint64_t    addr = 0;
     int         role = -1;
-    int         ring = -1;
+    int         annulus = -1;
     Point       pos;
     std::string name;
 };
@@ -58,9 +58,9 @@ class VirtualGroupNode : public Node {
 public:
     const char *kind() const override { return "virtual"; }
     bool is_virtual() const override { return true; }
-    std::vector<int> grouped_rings;
+    std::vector<int> grouped_annuli;
     std::string label() const override {
-        return "state-dependent x" + std::to_string(grouped_rings.size());
+        return "state-dependent x" + std::to_string(grouped_annuli.size());
     }
 };
 
@@ -105,21 +105,21 @@ public:
     int  role = -1;
 };
 
-class RingGroup : public Group {
+class AnnulusGroup : public Group {
 public:
-    const char *kind() const override { return "ring"; }
-    int ring = -1;
+    const char *kind() const override { return "annulus"; }
+    int annulus = -1;
     std::string label() const override {
-        if (ring < 0) return "seq";
-        return "ring " + std::to_string(ring) + (members.size() > 1 ? " *" : "");
+        if (annulus < 0) return "seq";
+        return "annulus " + std::to_string(annulus) + (members.size() > 1 ? " *" : "");
     }
 };
 
 // 状態依存の環を束ねた仮想の環。仮想ノードを 1 つだけ抱える。
-class VirtualRingGroup : public RingGroup {
+class VirtualAnnulusGroup : public AnnulusGroup {
 public:
-    VirtualRingGroup() { ring = -1000; }
-    const char *kind() const override { return "virtual-ring"; }
+    VirtualAnnulusGroup() { annulus = -1000; }
+    const char *kind() const override { return "virtual-annulus"; }
     bool is_virtual() const override { return true; }
     std::string label() const override {
         std::string vn = "state-dependent";
@@ -132,7 +132,7 @@ public:
 class RoleGroup : public Group {
 public:
     const char *kind() const override { return "role"; }
-    std::vector<RingGroup *> rings;
+    std::vector<AnnulusGroup *> annuli;
     std::string label() const override { return "role " + std::to_string(role); }
 };
 
@@ -144,16 +144,16 @@ public:
     ~Graph();
 
     // 実関数を追加 (呼び出し順がそのまま関数インデックスになる)
-    FunctionNode *add_function(uint64_t addr, const std::string &name, int role, int ring);
+    FunctionNode *add_function(uint64_t addr, const std::string &name, int role, int annulus);
 
-    // role -> ring -> node を組み立て、状態依存の環が同 role に複数あれば仮想環を作る
+    // role -> annulus -> node を組み立て、状態依存の環が同 role に複数あれば仮想環を作る
     void build_hierarchy();
 
     // 配置。wrap は role を折り返す幅。
     void layout(float wrap = 34.0f);
 
     const std::vector<FunctionNode *> &functions() const { return funcs_; }
-    const std::vector<RingGroup *>    &rings()     const { return ring_ptrs_; }
+    const std::vector<AnnulusGroup *>    &annuli()     const { return annulus_ptrs_; }
     const std::vector<RoleGroup *>    &roles()     const { return role_ptrs_; }
     // 仮想ノードだけ (描画用に実関数の後ろへ足す)
     std::vector<Node *> virtual_nodes() const;
@@ -164,7 +164,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> p_;
     std::vector<FunctionNode *> funcs_;
-    std::vector<RingGroup *>    ring_ptrs_;   // build_hierarchy 後に確定
+    std::vector<AnnulusGroup *>    annulus_ptrs_;   // build_hierarchy 後に確定
     std::vector<RoleGroup *>    role_ptrs_;
 };
 

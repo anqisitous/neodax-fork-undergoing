@@ -5,10 +5,10 @@
  * decompiler, emulator, obfuscation scanner — plus the advanced static
  * analysis pipeline (`-w` / `--advanced-analysis`).
  *
- * The advanced analysis is a single Regression Ring: the pipeline laps over
+ * The advanced analysis is a single Regression Annulus: the pipeline laps over
  * its phases (survey → classify → trace → predict → parallel → verify), each
  * lap gathers more evidence and the frontier moves outward (progression).
- * Groups sit on the ring, functions are the leaves inside a group.
+ * Groups sit on the annulus, functions are the leaves inside a group.
  */
 
 #include <stdio.h>
@@ -72,8 +72,8 @@ static void print_usage(const char *p) {
     printf("    -X              everything\n");
 
     printf("\n  Advanced static analysis\n");
-    printf("    -w, --advanced-analysis   full static flow analysis (regression ring)\n");
-    printf("    --ring-svg <file>         write the ring visualization as SVG\n");
+    printf("    -w, --advanced-analysis   full static flow analysis (regression annulus)\n");
+    printf("    --annulus-svg <file>         write the annulus visualization as SVG\n");
     printf("    --flow-depth <n>          caller-chain trace depth (default 32)\n");
     printf("    --flow-var <name>         trace one variable's caller chain\n");
     printf("    --flow-func <name>        focus the flow report on one function\n");
@@ -87,7 +87,7 @@ static void print_usage(const char *p) {
     printf("    -h              this help\n");
     printf("\n  Examples\n");
     printf("    %s -x ./binary\n", p);
-    printf("    %s -w --ring-svg flow.svg ./binary\n", p);
+    printf("    %s -w --annulus-svg flow.svg ./binary\n", p);
     printf("    %s -w --flow-var best_score ./binary\n", p);
     printf("\n");
 }
@@ -221,7 +221,7 @@ static void run_advanced(dax_binary_t *bin, dax_opts_t *opts, FILE *out) {
     DAX_RUN_PASS("advanced", opts->color, nd_static_analyze(&ctx));
 
     /* Report */
-    nd_ring_print(&ctx.ring, out);
+    nd_annulus_print(&ctx.annulus, out);
     nd_static_print_order(&ctx, out);
     nd_static_print_parallel(&ctx, out);
     nd_static_print_flow(&ctx, out);
@@ -292,9 +292,9 @@ static void run_advanced(dax_binary_t *bin, dax_opts_t *opts, FILE *out) {
     }
 
     /* SVG output. */
-    if (opts->ring_svg[0]) {
-        if (nd_static_write_svg(&ctx, opts->ring_svg) == 0) {
-            fprintf(out, "\n  Ring SVG written: %s\n", opts->ring_svg);
+    if (opts->annulus_svg[0]) {
+        if (nd_static_write_svg(&ctx, opts->annulus_svg) == 0) {
+            fprintf(out, "\n  Annulus SVG written: %s\n", opts->annulus_svg);
         }
     }
 
@@ -402,9 +402,9 @@ int main(int argc, char **argv) {
                  !strcmp(a, "--advanced")) {
             opts.advanced_analysis = 1;
         }
-        else if (!strcmp(a, "--ring-svg")) {
+        else if (!strcmp(a, "--annulus-svg")) {
             if (i + 1 < argc) {
-                snprintf(opts.ring_svg, sizeof(opts.ring_svg), "%s", argv[++i]);
+                snprintf(opts.annulus_svg, sizeof(opts.annulus_svg), "%s", argv[++i]);
                 opts.advanced_analysis = 1;
             }
         }
@@ -481,7 +481,7 @@ int main(int argc, char **argv) {
     }
 
     if (opts.advanced_analysis) {
-        /* The ring analysis runs its own passes; it needs the CFG blocks
+        /* The annulus analysis runs its own passes; it needs the CFG blocks
          * only for loop detection, which it derives itself. */
         run_advanced(&bin, &opts, stdout);
     }

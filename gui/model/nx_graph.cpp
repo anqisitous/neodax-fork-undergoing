@@ -64,23 +64,23 @@ struct Graph::Impl {
     // 所有
     std::vector<std::unique_ptr<FunctionNode>> func_own;
     std::vector<std::unique_ptr<VirtualGroupNode>> virt_nodes_own;
-    std::vector<std::unique_ptr<RingGroup>> ring_own;
+    std::vector<std::unique_ptr<AnnulusGroup>> annulus_own;
     std::vector<std::unique_ptr<RoleGroup>> role_own;
 
-    // 仮想環 (RoleGroup::rings には含めず、描画用に別に持つ)
-    std::vector<RingGroup *> virtual_rings;
+    // 仮想環 (RoleGroup::annuli には含めず、描画用に別に持つ)
+    std::vector<AnnulusGroup *> virtual_annuli;
 };
 
 Graph::Graph() : p_(new Impl) {}
 Graph::~Graph() = default;
 
 FunctionNode *Graph::add_function(uint64_t addr, const std::string &name,
-                                  int role, int ring) {
+                                  int role, int annulus) {
     auto fn = std::make_unique<FunctionNode>();
     fn->addr = addr;
     fn->name = name;
     fn->role = role;
-    fn->ring = ring;
+    fn->annulus = annulus;
     FunctionNode *raw = fn.get();
     p_->func_own.push_back(std::move(fn));
     funcs_.push_back(raw);
@@ -88,63 +88,63 @@ FunctionNode *Graph::add_function(uint64_t addr, const std::string &name,
 }
 
 void Graph::build_hierarchy() {
-    p_->ring_own.clear();
+    p_->annulus_own.clear();
     p_->role_own.clear();
     p_->virt_nodes_own.clear();
-    p_->virtual_rings.clear();
-    ring_ptrs_.clear();
+    p_->virtual_annuli.clear();
+    annulus_ptrs_.clear();
     role_ptrs_.clear();
 
-    // role -> ring -> members (生成順を保つため map + vector を併用)
+    // role -> annulus -> members (生成順を保つため map + vector を併用)
     std::vector<int> role_order;
-    std::map<int, std::vector<int>> role_rings;               // role -> ring ids (出現順)
-    std::map<std::pair<int, int>, std::vector<Node *>> cells; // (role,ring) -> members
+    std::map<int, std::vector<int>> role_annuli;               // role -> annulus ids (出現順)
+    std::map<std::pair<int, int>, std::vector<Node *>> cells; // (role,annulus) -> members
 
     for (FunctionNode *f : funcs_) {
-        if (role_rings.find(f->role) == role_rings.end())
+        if (role_annuli.find(f->role) == role_annuli.end())
             role_order.push_back(f->role);
-        auto &rr = role_rings[f->role];
-        if (std::find(rr.begin(), rr.end(), f->ring) == rr.end())
-            rr.push_back(f->ring);
-        cells[{f->role, f->ring}].push_back(f);
+        auto &rr = role_annuli[f->role];
+        if (std::find(rr.begin(), rr.end(), f->annulus) == rr.end())
+            rr.push_back(f->annulus);
+        cells[{f->role, f->annulus}].push_back(f);
     }
 
     // 状態依存の環を数える
-    std::map<int, std::vector<int>> state_rings;   // role -> 状態依存な ring id
+    std::map<int, std::vector<int>> state_annuli;   // role -> 状態依存な annulus id
     for (auto &kv : cells) {
         bool dep = false;
         for (Node *n : kv.second)
             if (is_state_dependent_name(n->name)) { dep = true; break; }
-        if (dep) state_rings[kv.first.first].push_back(kv.first.second);
+        if (dep) state_annuli[kv.first.first].push_back(kv.first.second);
     }
 
     for (int role : role_order) {
         auto rg = std::make_unique<RoleGroup>();
         rg->role = role;
 
-        for (int ring : role_rings[role]) {
-            auto r = std::make_unique<RingGroup>();
+        for (int annulus : role_annuli[role]) {
+            auto r = std::make_unique<AnnulusGroup>();
             r->role = role;
-            r->ring = ring;
-            r->members = cells[{role, ring}];
-            rg->rings.push_back(r.get());
-            p_->ring_own.push_back(std::move(r));
+            r->annulus = annulus;
+            r->members = cells[{role, annulus}];
+            rg->annuli.push_back(r.get());
+            p_->annulus_own.push_back(std::move(r));
         }
 
         // 同じ role に状態依存の環が 2 つ以上 → 仮想ノードで束ねる (階層2)
-        auto sit = state_rings.find(role);
-        if (sit != state_rings.end() && sit->second.size() >= 2) {
+        auto sit = state_annuli.find(role);
+        if (sit != state_annuli.end() && sit->second.size() >= 2) {
             auto vn = std::make_unique<VirtualGroupNode>();
             vn->role = role;
-            for (int r : sit->second) vn->grouped_rings.push_back(r);
+            for (int r : sit->second) vn->grouped_annuli.push_back(r);
             VirtualGroupNode *vnraw = vn.get();
             p_->virt_nodes_own.push_back(std::move(vn));
 
-            auto vr = std::make_unique<VirtualRingGroup>();
+            auto vr = std::make_unique<VirtualAnnulusGroup>();
             vr->role = role;
             vr->members.push_back(vnraw);      // 仮想ノードを 1 つ抱える
-            p_->virtual_rings.push_back(vr.get());
-            p_->ring_own.push_back(std::move(vr));
+            p_->virtual_annuli.push_back(vr.get());
+            p_->annulus_own.push_back(std::move(vr));
         }
 
         role_ptrs_.push_back(rg.get());
@@ -153,9 +153,9 @@ void Graph::build_hierarchy() {
 
     // 描画用に、実環 + 仮想環を role 順で並べる
     for (RoleGroup *rg : role_ptrs_) {
-        for (RingGroup *r : rg->rings) ring_ptrs_.push_back(r);
-        for (RingGroup *vr : p_->virtual_rings)
-            if (vr->role == rg->role) ring_ptrs_.push_back(vr);
+        for (AnnulusGroup *r : rg->annuli) annulus_ptrs_.push_back(r);
+        for (AnnulusGroup *vr : p_->virtual_annuli)
+            if (vr->role == rg->role) annulus_ptrs_.push_back(vr);
     }
 }
 
@@ -167,12 +167,12 @@ void Graph::layout(float wrap) {
         float packX = 0, packY = 0, packRowH = 0, localW = 0;
 
         // 実環 + 仮想環を role ごとに配置
-        std::vector<RingGroup *> ordered;
-        for (RingGroup *r : rg->rings) ordered.push_back(r);
-        for (RingGroup *vr : p_->virtual_rings)
+        std::vector<AnnulusGroup *> ordered;
+        for (AnnulusGroup *r : rg->annuli) ordered.push_back(r);
+        for (AnnulusGroup *vr : p_->virtual_annuli)
             if (vr->role == rg->role) ordered.push_back(vr);
 
-        for (RingGroup *r : ordered) {
+        for (AnnulusGroup *r : ordered) {
             const size_t n = r->members.size();
             const float w = (n > 1) ? 2 * std::max(1.1f, (float)n / 6.2831853f) : 1.4f;
             const float h = w;
@@ -200,7 +200,7 @@ void Graph::layout(float wrap) {
         }
 
         // ローカル座標をグローバルへ
-        for (RingGroup *r : ordered) {
+        for (AnnulusGroup *r : ordered) {
             for (Node *m : r->members) { m->pos.x += gx; m->pos.y += gy; }
             r->box.x += gx;
             r->box.y += gy;
@@ -225,7 +225,7 @@ void Graph::layout(float wrap) {
     for (FunctionNode *f : funcs_) { f->pos.x -= cx; f->pos.y -= cy; }
     for (auto &vn : p_->virt_nodes_own) { vn->pos.x -= cx; vn->pos.y -= cy; }
     for (RoleGroup *rg : role_ptrs_) { rg->box.x -= cx; rg->box.y -= cy; }
-    for (RingGroup *r : ring_ptrs_)  { r->box.x -= cx; r->box.y -= cy; }
+    for (AnnulusGroup *r : annulus_ptrs_)  { r->box.x -= cx; r->box.y -= cy; }
 }
 
 std::vector<Node *> Graph::virtual_nodes() const {
