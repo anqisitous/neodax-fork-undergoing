@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <map>
 #include <set>
@@ -690,7 +691,17 @@ extern "C" int nx_plan_analyze_store(const char *state_path, FILE *out) {
         nx::Signal b;
         b.id = "store.backup";
         b.source = state_path;
-        b.value = nx_state_key_is_live(state_path, "nx-backup") ? "live" : "none";
+        {
+            bool backup_live = nx_state_key_is_live(state_path, "nx-backup") != 0;
+            size_t rklen = 0;
+            char *rk = nx_state_find_key(state_path, "workspace-tabs", &rklen);
+            bool resolved_backup =
+                rk && rklen >= 10 && memcmp(rk + rklen - 10, ".nx-backup", 10) == 0;
+            free(rk);
+            /* 退避があっても解決が本体なら無害 (ignored)。live の時だけ問題。 */
+            if (!backup_live) b.value = "none";
+            else b.value = resolved_backup ? "live" : "ignored";
+        }
         b.observed = true;
         m.add_signal(b);
     }
@@ -877,7 +888,20 @@ extern "C" int nx_plan_repair(const char *state_path, FILE *out) {
         {
             nx::Signal s;
             s.id = "store.backup"; s.source = state_path;
-            s.value = nx_state_key_is_live(state_path, "nx-backup") ? "live" : "none";
+            /* 退避キー (.nx-backup) の存在自体は問題ではない。
+             * 問題なのは「読み書きの解決先が退避側へすり替わる」こと。
+             * 解決器は本体 (正準キー) を優先するので、すり替わっているか
+             * どうかを実際の解決結果で判定する。
+             *   none    退避なし
+             *   ignored 退避あり、だが解決は本体（無害）
+             *   live    退避あり、解決も退避（要修復） */
+            bool backup_live = nx_state_key_is_live(state_path, "nx-backup") != 0;
+            size_t rklen = 0;
+            char *rk = nx_state_find_key(state_path, "workspace-tabs", &rklen);
+            bool resolved_backup =
+                rk && rklen >= 10 && memcmp(rk + rklen - 10, ".nx-backup", 10) == 0;
+            free(rk);
+            s.value = !backup_live ? "none" : (resolved_backup ? "live" : "ignored");
             s.observed = true; m.add_signal(s);
         }
 
@@ -969,8 +993,11 @@ extern "C" int nx_plan_analyze_case(const char *kind, const char *path,
 
     std::vector<std::shared_ptr<nx::Case>> chosen;
     if (case_name && *case_name) {
-        auto c = nx::CaseRegistry::instance().by_name(case_name);
-        if (c) chosen.push_back(c);
+        // 案件は名前で管理しない。番号で選ぶ (tpl[N])。
+        int idx = -1;
+        if (sscanf(case_name, "tpl[%d]", &idx) == 1 && idx >= 0 &&
+            (size_t)idx < nx::CaseRegistry::instance().all().size())
+            chosen.push_back(nx::CaseRegistry::instance().all()[(size_t)idx]);
     } else {
         chosen = nx::CaseRegistry::instance().match(target);
     }
@@ -978,9 +1005,10 @@ extern "C" int nx_plan_analyze_case(const char *kind, const char *path,
     if (chosen.empty()) {
         std::fprintf(out, "  [case] no case applies to %s (%s)\n",
                      target.path.c_str(), target.kind.c_str());
-        std::fprintf(out, "  [case] known cases:");
-        for (const auto &c : nx::CaseRegistry::instance().all())
-            std::fprintf(out, " %s", c->name());
+        std::fprintf(out, "  [case] templates:");
+        const auto &all = nx::CaseRegistry::instance().all();
+        for (size_t i = 0; i < all.size(); i++)
+            std::fprintf(out, " tpl[%zu]", i);
         std::fprintf(out, "\n");
         return 2;
     }
@@ -997,7 +1025,8 @@ extern "C" int nx_plan_analyze_case(const char *kind, const char *path,
         m.verify();
 
         nx::Verdict v = m.evaluate();
-        std::fprintf(out, "=== case: %s ===\n", c->name());
+        std::fprintf(out, "=== case: tpl[%d] ===\n",
+                     nx::CaseRegistry::instance().index_of(c));
         std::fprintf(out, "observed_at=%s\n", nx_now_iso().c_str());
         std::fprintf(out, "signals (%zu):\n", m.signals().size());
         for (const auto &s : m.signals())

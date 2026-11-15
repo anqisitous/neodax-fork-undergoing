@@ -39,6 +39,11 @@ struct SeekOptions {
     int  time_ms = 15000;        // 走査時間の上限
     int  max_file_mb = 64;       // 1 ファイルの上限
     int  max_depth = 16;         // 再帰の深さ
+
+    /* A: 停止条件を先に固定する */
+    long long max_total_bytes = 512LL * 1024 * 1024;  // 全体の読み取り上限
+    int  max_line_bytes = 65536; // 1 行の評価上限 (regex の入力を有界に)
+    int  regex_deadline_ms = 2000; // regex 1 回の目安 (超過は行長で抑制)
 };
 
 // 1 件の一致
@@ -63,6 +68,8 @@ public:
 private:
     bool literal_ = true;
     std::string needle_;         // literal: 比較用に大小を揃えた語
+    std::string lit_frag_;       // regex でも使える literal 断片 (prefilter 用)
+    bool has_lit_ = false;
     std::string error_;
     bool ignore_case_ = false;
     bool word_ = false;
@@ -112,8 +119,12 @@ private:
     long        matched_ = 0;
     long        hits_ = 0;
     long        skipped_binary_ = 0;
+    long        skipped_stat_ = 0;      // 権限/消失などで読めなかった B の可視化
+    long        line_truncated_ = 0;    // 行長上限で評価を切った行数
+    long long   bytes_read_ = 0;        // A: 全体の読み取り量
     bool        truncated_ = false;
     bool        time_up_ = false;
+    bool        bytes_up_ = false;
 };
 
 } // namespace nx

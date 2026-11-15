@@ -1,5 +1,22 @@
 # AGENTS.md — neodax で作業するエージェントへの規約
 
+## 最優先: 解析・判定・修正は neodax のコマンドだけで行う
+
+- **`python3` を使わない。`grep` / `rg` / `sed` / `awk` によるテキスト走査もしない。**
+  状態の一覧・判定・計画・修復・検証は、すべて `./bin/neodax-ui` の
+  サブコマンドで行う。理由: 状態は LevelDB のバイナリで、行指向の grep では
+  正しく読めない。間違った読み取りが「直したのに直っていない」を生む。
+- 状態を見る: `./bin/neodax-ui tabs` / `advise` / `check` / `plan`
+  （`--state` 省略可。既知の場所を自動で探す）
+- 状態を直す: `./bin/neodax-ui repair`（観測→計画→実行→再観測を健全まで）
+- 永続層へ書く: `./bin/neodax-ui apply --live`
+- 検証も neodax で: 直した後に `./bin/neodax-ui tabs` と `plan` を再実行し、
+  `VERDICT=HEALTHY` / `stuck surface tabs: 0` を確認する。
+- ソースを読むときは `read` ツール（行番号付き）を使う。シェルの grep で
+  探さない。
+- どうしても一覧が要るときは、neodax の該当サブコマンドを足して C 側で出す。
+  ad-hoc なシェル走査で代用しない。
+
 ## 絶対禁止
 
 - 対象アプリ（DeepAI Code 等）を **reload / 再起動しない**。

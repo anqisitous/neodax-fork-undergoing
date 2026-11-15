@@ -36,7 +36,7 @@ class Case {
 public:
     virtual ~Case() = default;
 
-    // この案件の名前 (表示・選択に使う)。例 "tabs", "ae-license"
+    // この案件の名前は持たない。位置 (リストの何番目か) で引く。
     virtual const char *name() const = 0;
 
     // この対象を扱えるか。扱えないなら false を返し、Model は次を試す。
@@ -65,10 +65,14 @@ public:
     // 対象を扱える案件をすべて返す (逐次に試すため、登録順を保つ)。
     std::vector<std::shared_ptr<Case>> match(const CaseTarget &t) const;
 
-    // 名前で取り出す。
-    std::shared_ptr<Case> by_name(const std::string &n) const;
+    // リスト内の位置。見つからなければ -1。
+    int index_of(const std::shared_ptr<Case> &c) const;
 
+    // 登録順の全部 (テンプレートのリストそのもの)。
     const std::vector<std::shared_ptr<Case>> &all() const { return cases_; }
+
+    CaseRegistry();
+    ~CaseRegistry();
 
 private:
     std::vector<std::shared_ptr<Case>> cases_;

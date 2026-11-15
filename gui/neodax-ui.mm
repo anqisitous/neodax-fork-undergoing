@@ -42,6 +42,14 @@
 #include "integration/spec/nx_pe.h"
 #include "integration/spec/nx_pe_disasm.h"
 #include "integration/spec/nx_pipeline.h"
+#include "integration/plan/nx_recipe.hpp"
+#include "integration/plan/nx_strategy.hpp"
+#include "integration/plan/nx_template.hpp"
+#include "integration/plan/nx_appstore.hpp"
+#include "integration/plan/nx_bestfix.hpp"
+
+/* neodax の検索 (ABD 安全化済み) */
+extern "C" int nx_seek(const char *, const char *, const char *, int, int, int, int, FILE *);
 
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
@@ -288,12 +296,119 @@ static void cmd_windows(void) {
 /* 状態系コマンド                                                      */
 /* ------------------------------------------------------------------ */
 
+/* 状態の場所を自動で見つける。
+ *
+ * 以前は --state "$HOME/Library/Application Support/.../Local Storage/leveldb"
+ * を毎回打つ必要があり、綴りを間違えると「直せていない」ように見えた。
+ * 既知のアプリ状態ディレクトリを順に確かめ、CURRENT を持つ leveldb を返す。
+ * 見つからなければ NULL (呼び出し側がエラーを出す)。
+ */
+static const char *resolve_state_path(void) {
+    static char found[PATH_MAX];
+    static int tried = 0;
+    if (tried) return found[0] ? found : NULL;
+    tried = 1;
+
+    const char *home = getenv("HOME");
+    if (!home) return NULL;
+
+    /* 優先順: DeepAI Code の現行 → 旧名 → VS Code 系。
+       CURRENT があるものだけを「実在するストア」とみなす。 */
+    static const char *suffixes[] = {
+        "Library/Application Support/deepai-code-v2/Local Storage/leveldb",
+        "Library/Application Support/DeepAI Code/Local Storage/leveldb",
+        "Library/Application Support/deepai-code/Local Storage/leveldb",
+        NULL,
+    };
+    for (int i = 0; suffixes[i]; i++) {
+        char cand[PATH_MAX];
+        snprintf(cand, sizeof(cand), "%s/%s", home, suffixes[i]);
+        char cur[PATH_MAX];
+        snprintf(cur, sizeof(cur), "%s/CURRENT", cand);
+        if (access(cur, R_OK) == 0) {
+            snprintf(found, sizeof(found), "%s", cand);
+            return found;
+        }
+    }
+    return NULL;
+}
+
+/* --state が無ければ自動解決する。解決できなければ NULL。 */
+static const char *state_or_default(const char *given, const char *cmd) {
+    if (given) return given;
+    const char *auto_path = resolve_state_path();
+    if (auto_path) {
+        fprintf(stderr, "  [%s] --state 未指定: %s を使用\n", cmd, auto_path);
+        return auto_path;
+    }
+    fprintf(stderr, "%s: --state required (既定の状態ディレクトリも見つからない)\n", cmd);
+    return NULL;
+}
+
 static void dump_tabs_path(const char *path) {
     char *state = nx_deepai_load_state(path);
     if (!state) { printf("ERROR: no state at %s\n", path); return; }
     printf("STATE_SOURCE\t%s\n", path);
     nx_deepai_dump_state(state, stdout);
     free(state);
+}
+
+static int key_has_suffix(const char *key, size_t len, const char *suffix) {
+    size_t sl = strlen(suffix);
+    return (len >= sl) && (memcmp(key + len - sl, suffix, sl) == 0);
+}
+
+/* キーを表示用にエスケープする (非表示文字は \xNN)。 */
+static void escape_key(const char *key, size_t len, char *dst, size_t cap) {
+    size_t w = 0;
+    for (size_t k = 0; k < len && w + 5 < cap; k++) {
+        unsigned char c = (unsigned char)key[k];
+        if (c >= 0x20 && c < 0x7f) dst[w++] = (char)c;
+        else w += (size_t)snprintf(dst + w, cap - w, "\\x%02x", c);
+    }
+    dst[w] = 0;
+}
+
+/* KV ストアのキーを一覧する (診断用)。
+ *
+ * キーは NUL を含むバイナリ (例: "_deepai-code://app\x00\x01deepai-code:...")。
+ * そのまま printf すると切れるので、非表示文字を \xNN で出す。
+ * seq と生存 (削除レコード尊重) も併記し、「どのキーが値を握っているか」を
+ * シェルの grep ではなく C 側で確定できるようにする。 */
+static void cmd_keys(const char *path) {
+    char **keys = NULL;
+    size_t *lens = NULL;
+    int n = nx_state_list_keys(path, NULL, &keys, &lens, 256);
+    printf("STATE_SOURCE\t%s\n", path);
+    printf("MAX_SEQ\t%llu\n", nx_state_max_seq(path, NULL));
+    printf("COUNT\t%d\n", n);
+    for (int i = 0; i < n; i++) {
+        char shown[512];
+        escape_key(keys[i], lens[i], shown, sizeof(shown));
+        printf("KEY\t%zu\t%s\n", lens[i], shown);
+        free(keys[i]);
+    }
+    free(keys);
+    free(lens);
+    printf("LIVE\tworkspace-tabs=%d\tnx-backup=%d\n",
+           nx_state_key_is_live(path, "workspace-tabs"),
+           nx_state_key_is_live(path, "nx-backup"));
+
+    /* 実際に読み書きに使われるキー。ここが .nx-backup を指すと、
+     * 修復結果が本体ではなく退避側に書かれ、本体は孤児のまま残る。
+     * これが「直しても復活する」の原因なので、常に見えるようにする。 */
+    size_t rklen = 0;
+    char *rk = nx_state_find_key(path, "workspace-tabs", &rklen);
+    if (rk) {
+        char shown[512];
+        escape_key(rk, rklen, shown, sizeof(shown));
+        printf("RESOLVED_KEY\t%s\n", shown);
+        printf("RESOLVED_IS_BACKUP\t%d\n",
+               (rklen > 0 && (key_has_suffix(rk, rklen, ".nx-backup"))) ? 1 : 0);
+        free(rk);
+    } else {
+        printf("RESOLVED_KEY\t(none)\n");
+    }
 }
 
 static void do_simulate(const char *path, const char *asar) {
@@ -912,6 +1027,938 @@ static void cmd_serve(void) {
     free(line);
 }
 
+/* ------------------------------------------------------------------ */
+/* GUI — すべての CLI コマンドを 1 つのウィンドウから実行する            */
+/* ------------------------------------------------------------------ */
+/*
+ * CLI と同じ処理をそのまま呼ぶ。別実装は持たない。
+ * 実行は stdout を一時ファイルへ切り替えて行い、終わったら戻すだけ。
+ * これにより、C 側の出力を加工せず GUI に出せる (JS での parse をしない)。
+ */
+
+/* CLI の実体 (下で定義)。GUI はこれをそのまま呼ぶ。 */
+static int nx_cli_dispatch(int argc, char **argv);
+
+/* 1 つのコマンド定義。argv テンプレート + 説明。 */
+typedef struct {
+    const char *title;      /* ボタンに出る名前 */
+    const char *group;      /* セクション見出し */
+    const char *argc_argv;  /* "tabs|--state" など。| 区切り、引数なし可 */
+    const char *desc;
+} nx_cmd_t;
+
+/* 全 CLI コマンド。serve 以外はすべてここから呼べる。 */
+static const nx_cmd_t kNxCmds[] = {
+    /* --- 観測 (変更しない) --- */
+    {"タブ一覧",       "観測", "tabs",                  "永続層のタブを TSV で出す"},
+    {"キー一覧",       "観測", "keys",                  "KV のキー・seq・生存を C 側で列挙 (grep 代替)"},
+    {"判定 (advise)",  "観測", "advise",                "壊れているかだけ判定。変更しない"},
+    {"検出 (check)",   "観測", "check",                 "閉じられない surface を検出"},
+    {"計画 (plan)",    "観測", "plan",                  "事実→問題→計画を出す。変更しない"},
+    {"画面再現",       "観測", "replay",                "state からレイアウトを再現"},
+    {"レイアウト署名", "観測", "layout",                "復元有無の判定用署名"},
+    {"ウィンドウ一覧", "観測", "windows",               "画面上のウィンドウ一覧"},
+    {"状態を再現",     "観測", "simulate",              "アプリのロード結果を再現"},
+
+    /* --- 修復 (永続層へ書く) --- */
+    {"修復 (repair)",  "修復", "repair",                "観測→計画→実行→再観測を健全になるまで回す"},
+    {"適用 (apply)",   "修復", "apply|--live",          "修復結果を稼働中ストアにも反映 (reload しない)"},
+    {"fix のみ",       "修復", "fix",                   ".fixed.json を作るだけ (書き戻さない)"},
+    {"heal",           "修復", "heal",                  "検出→書き戻し→稼働中ストア再水和"},
+    {"baseline",       "修復", "baseline",              "復元先を空の妥当な状態にする"},
+    {"stop",           "修復", "stop",                  "起動時の状態復元を止める"},
+    {"attach",         "修復", "attach",                "renderer を再水和 (SIGUSR1)"},
+    {"対象に合わせる", "修復", "case|--path",           "--path に案件毎の自発解析"},
+    {"手順を保存 (recipe)", "AE手順", "recipe|--path",      "書き換え手順を保存する (アプリは変更しない)"},
+    {"手順を見る",     "AE手順", "recipe-show|--file",     "保存した手順を表示"},
+    {"手順を検証 (dry)","AE手順", "recipe-run|--file",     "1段ずつ検証。既定は変更なし (dry-run)"},
+    {"戦略を探す",     "AE手順", "search|--path|--symbol", "観測→テンプレで介入を選ぶ (既定 dry-run)"},
+
+    /* --- キャプチャ --- */
+    {"画面キャプチャ", "画面", "capture|-o|/tmp/neodax-gui.png", "対象アプリを PNG に"},
+    {"表示 (display)", "画面", "display",                "最も情報量の多いフレームを選んで出力"},
+
+    /* --- 解析 --- */
+    {"構造認識 (spec)", "解析", "spec|--file",           "--file の構造を認識"},
+    {"クラス生成 (gen)","解析", "gen|--spec|all",         "spec から C++ クラスを生成"},
+    {"検索 (seek)",    "解析", "seek|--include|*.md",   "安全化した再帰検索 (停止条件・非破壊・regex安全)"},
+    {"残存を強制終了", "AE手順", "kill|--match|.neodax-work", "作業コピーの残存プロセスを SIGKILL"},
+    {"入口を外す (cut)", "AE手順", "cut|--step|--path", "解析→テンプレ保存→1段ずつ clone/patch/検証"},
+    {"cut の途中状態", "AE手順", "cut-status", "チェックポイントの stage を表示"},
+    {"直前に起動したapp", "AE手順", "app|app-analyze|apps", "直前の app を分析し、app ごとのフォルダに保存"},
+    {"app一覧",       "AE手順", "apps", "保存済み app フォルダを表示"},
+    {"1個特定して最善", "AE手順", "best|--path|--apply", "動かない問題を1個に絞り、その問題だけ確度順に尽くす"},
+    {"PE 解析",        "解析", "pe|--file|--disasm",     "Windows PE の解析/逆アセンブル"},
+    {"pipeline",       "解析", "pipeline|--file",        "decode+encode 戦略選択"},
+};
+static const int kNxCmdCount = (int)(sizeof(kNxCmds) / sizeof(kNxCmds[0]));
+
+/* 実行を stdout 経由で受け取る。cmd を argv に割って main と同じ関数を呼ぶ。
+ * 戻り値は終了コード。out に出力を入れる。 */
+static int nx_gui_exec(const char *line, char **out) {
+    *out = NULL;
+
+    /* argv へ分割 (| 区切り)。空引数は捨てる。 */
+    char buf[2048];
+    snprintf(buf, sizeof(buf), "%s", line ? line : "");
+    char *argv[32];
+    int argc = 0;
+    argv[argc++] = (char *)"neodax-ui";
+    char *p = buf;
+    while (p && *p && argc < 31) {
+        char *bar = strchr(p, '|');
+        if (bar) *bar = '\0';
+        if (*p) argv[argc++] = p;
+        p = bar ? bar + 1 : NULL;
+    }
+    argv[argc] = NULL;
+    if (argc < 2) return 1;
+
+    /* --state が無い状態系コマンドは自動解決したパスを補う */
+    const char *cmd = argv[1];
+    static const char *needs_state[] = {
+        "tabs", "keys", "advise", "check", "plan", "replay", "simulate", "repair",
+        "apply", "fix", "heal", "attach", "case", NULL,
+    };
+    int has_state = 0;
+    for (int i = 2; i < argc; i++)
+        if (strcmp(argv[i], "--state") == 0) has_state = 1;
+    for (int i = 0; needs_state[i]; i++) {
+        if (strcmp(cmd, needs_state[i]) != 0 && !(strcmp(cmd, "case") == 0))
+            continue;
+        if (!has_state && strcmp(cmd, "case") != 0) {
+            const char *sp = resolve_state_path();
+            if (sp && argc < 29) {
+                argv[argc++] = (char *)"--state";
+                argv[argc++] = (char *)sp;
+                argv[argc] = NULL;
+            }
+        }
+        break;
+    }
+
+    /* stdout を一時ファイルへ。C 側の出力をそのまま読む。 */
+    fflush(stdout);
+    char tmp[] = "/tmp/neodax-gui-out-XXXXXX";
+    int fd = mkstemp(tmp);
+    if (fd < 0) return 1;
+    int saved = dup(fileno(stdout));
+    dup2(fd, fileno(stdout));
+    close(fd);
+
+    int rc = nx_cli_dispatch(argc, argv);
+
+    fflush(stdout);
+    dup2(saved, fileno(stdout));
+    close(saved);
+
+    /* 出力を読み出す */
+    FILE *fp = fopen(tmp, "rb");
+    if (fp) {
+        fseek(fp, 0, SEEK_END);
+        long n = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+        if (n < 0) n = 0;
+        char *b = (char *)malloc((size_t)n + 1);
+        if (b) {
+            size_t got = fread(b, 1, (size_t)n, fp);
+            b[got] = '\0';
+            *out = b;
+        }
+        fclose(fp);
+    }
+    unlink(tmp);
+    return rc;
+}
+
+@interface NxGuiController : NSObject <NSApplicationDelegate, NSTableViewDataSource,
+                                      NSTableViewDelegate>
+@property (nonatomic, strong) NSWindow *window;
+@property (nonatomic, strong) NSTableView *table;
+@property (nonatomic, strong) NSTextView *output;
+@property (nonatomic, strong) NSScrollView *tableScroll;
+@property (nonatomic, strong) NSScrollView *outputScroll;
+@property (nonatomic, strong) NSTextField *status;
+@property (nonatomic, strong) NSTextField *argField;
+@property (nonatomic, strong) NSButton *runButton;
+@property (nonatomic, strong) NSMutableArray<NSString *> *rows;
+@property (nonatomic, strong) NSMutableArray<NSNumber *> *rowIndex;
+@property (nonatomic, strong) id emulator;   /* 別フレーム。混ぜない */
+@property (nonatomic, strong) id appPanel;
+@end
+
+@implementation NxGuiController
+
+- (void)buildWindow {
+    NSRect frame = NSMakeRect(0, 0, 1040, 680);
+    self.window = [[NSWindow alloc]
+        initWithContentRect:frame
+                  styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                             NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    self.window.title = @"NeoDAX";
+    [self.window center];
+
+    NSView *cv = self.window.contentView;
+
+    /* --- 左: コマンド一覧 --- */
+    self.table = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 300, 600)];
+    self.table.dataSource = self;
+    self.table.delegate = self;
+    self.table.rowHeight = 38.0;
+    self.table.headerView = nil;
+    NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:@"cmd"];
+    col.width = 300;
+    [self.table addTableColumn:col];
+
+    self.tableScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(12, 92, 300, 576)];
+    self.tableScroll.hasVerticalScroller = YES;
+    self.tableScroll.documentView = self.table;
+    [cv addSubview:self.tableScroll];
+
+    /* --- 引数欄: 各コマンドの argv をここで編集してから実行できる。
+     *     これで --id / --app / パスなど、任意の引数付き実行も GUI から行える。 --- */
+    self.argField = [[NSTextField alloc] initWithFrame:NSMakeRect(12, 56, 300, 28)];
+    self.argField.editable = YES;
+    self.argField.bezeled = YES;
+    self.argField.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+    self.argField.placeholderString = @"引数 (選ぶと入ります。編集可)";
+    [cv addSubview:self.argField];
+
+    /* --- 実行ボタン --- */
+    self.runButton = [[NSButton alloc] initWithFrame:NSMakeRect(12, 12, 300, 34)];
+    self.runButton.title = @"実行";
+    self.runButton.bezelStyle = NSBezelStyleRounded;
+    self.runButton.keyEquivalent = @"\r";
+    self.runButton.target = self;
+    self.runButton.action = @selector(runSelected:);
+    [cv addSubview:self.runButton];
+
+    /* --- 右: 出力 --- */
+    self.output = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 700, 600)];
+    self.output.editable = NO;
+    self.output.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
+    self.output.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    self.output.string = @"左の一覧からコマンドを選んで実行してください。\n"
+                          "すべての CLI コマンドは GUI から実行できます。";
+
+    self.outputScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(324, 56, 704, 612)];
+    self.outputScroll.hasVerticalScroller = YES;
+    self.outputScroll.hasHorizontalScroller = YES;
+    self.outputScroll.documentView = self.output;
+    self.outputScroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [cv addSubview:self.outputScroll];
+
+    /* --- 状態表示 --- */
+    self.status = [[NSTextField alloc] initWithFrame:NSMakeRect(324, 14, 704, 30)];
+    self.status.editable = NO;
+    self.status.bordered = NO;
+    self.status.drawsBackground = NO;
+    self.status.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
+    const char *sp = resolve_state_path();
+    self.status.stringValue = sp ? [NSString stringWithFormat:@"状態: %s", sp]
+                                 : @"状態: 見つからない";
+    self.status.font = [NSFont systemFontOfSize:11];
+    self.status.textColor = [NSColor secondaryLabelColor];
+    [cv addSubview:self.status];
+
+    [self.window makeKeyAndOrderFront:nil];
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tv { return (NSInteger)kNxCmdCount; }
+
+- (NSView *)tableView:(NSTableView *)tv
+    viewForTableColumn:(NSTableColumn *)c
+                   row:(NSInteger)row {
+    NSTableCellView *cell = [tv makeViewWithIdentifier:@"cell" owner:self];
+    if (!cell) {
+        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 300, 38)];
+        cell.identifier = @"cell";
+        NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(6, 2, 288, 34)];
+        tf.editable = NO;
+        tf.bordered = NO;
+        tf.drawsBackground = NO;
+        tf.tag = 1;
+        [cell addSubview:tf];
+        cell.textField = tf;
+    }
+    if (row < 0 || row >= kNxCmdCount) return cell;
+    const nx_cmd_t *e = &kNxCmds[row];
+    /* C 文字列は UTF-8。%s は環境の文字コードで解釈され文字化けするため、
+     * 明示的に UTF-8 として NSString にする。 */
+    NSString *title = [NSString stringWithUTF8String:e->title];
+    NSString *group = [NSString stringWithUTF8String:e->group];
+    cell.textField.stringValue =
+        [NSString stringWithFormat:@"%@  /  %@", title, group];
+    cell.textField.font = [NSFont systemFontOfSize:12];
+    cell.toolTip = [NSString stringWithUTF8String:e->desc];
+    return cell;
+}
+
+/* 選択が変わったら、そのコマンドの argv を引数欄に入れる。 */
+- (void)tableViewSelectionDidChange:(NSNotification *)n {
+    NSInteger row = self.table.selectedRow;
+    if (row < 0 || row >= kNxCmdCount) return;
+    self.argField.stringValue =
+        [NSString stringWithUTF8String:kNxCmds[row].argc_argv];
+}
+
+- (void)runSelected:(id)sender {
+    NSInteger row = self.table.selectedRow;
+    if (row < 0 || row >= kNxCmdCount) {
+        self.output.string = @"コマンドが選ばれていません。";
+        return;
+    }
+    const nx_cmd_t *e = &kNxCmds[row];
+    /* 引数欄があればそちらを優先 (編集された argv で実行する)。 */
+    NSString *argv = self.argField.stringValue.length
+        ? self.argField.stringValue
+        : [NSString stringWithUTF8String:e->argc_argv];
+    const char *line = argv.UTF8String;
+    self.output.string = [NSString stringWithFormat:@"$ neodax-ui %@\n\n", argv];
+    self.output.needsDisplay = YES;
+    [[NSRunLoop mainRunLoop] runUntilDate:[NSDate date]];
+
+    char *out = NULL;
+    int rc = nx_gui_exec(line, &out);
+    NSString *body = out ? [NSString stringWithUTF8String:out]
+                         : @"(出力なし)";
+    if (out) free(out);
+    self.output.string = [NSString stringWithFormat:@"$ neodax-ui %@\n\n%@\n[exit %d]\n",
+                          argv, body, rc];
+    [self.output scrollRangeToVisible:NSMakeRange([self.output.string length], 0)];
+}
+
+- (void)applicationDidFinishLaunching:(NSNotification *)n {
+    [self buildWindow];
+
+    /* AE エミュレータは neodax パネルとは別フレームに置く。混ぜない。 */
+    Class emu = NSClassFromString(@"NxEmulatorController");
+    if (emu) {
+        self.emulator = [[emu alloc] init];
+        [self.emulator performSelector:@selector(build)];
+    }
+
+    Class appc = NSClassFromString(@"NxAppController");
+    if (appc) {
+        self.appPanel = [[appc alloc] init];
+        [self.appPanel performSelector:@selector(build)];
+    }
+
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)a { return YES; }
+
+@end
+
+/* ================================================================
+ * AE エミュレータ (neodax パネルとは別フレーム)
+ *
+ * 方針:
+ *   - neodax のコード/プロパティ表示とはウィンドウを分ける (混ぜない)。
+ *   - エミュレータはクリックで操作できる。
+ *   - 操作しないときは範囲選択に切り替え、選んだ範囲のウィジェットを解析する。
+ *   - 切替は小さなボタン 1 つ。トグル/ドロップダウンは作らない。
+ * ================================================================ */
+
+typedef struct {
+    NSRect rect;
+    const char *name;
+    const char *cmd;   /* クリック時に実行する neodax コマンド */
+} NxWidget;
+
+static NxWidget kNxWidgets[] = {
+    {{40, 300, 520, 28},  "menu",     "templates"},
+    {{40, 250, 90, 44},   "tool",     "cut-status"},
+    {{140, 250, 160, 44}, "timeline", "strategy-memory"},
+    {{310, 250, 250, 44}, "composition", "templates"},
+    {{40, 120, 250, 110},"panel",    "cut-status"},
+    {{300, 120, 260, 110},"effects", "strategy-memory"},
+};
+static const int kNxWidgetCount = (int)(sizeof(kNxWidgets) / sizeof(kNxWidgets[0]));
+
+/* annulus / line / point の共有データ。ノード選択と描画で同じものを使う。 */
+static const double kNxRings[3] = {46, 78, 110};
+typedef struct { double ang; int ring; } NxNodeDef;
+static const NxNodeDef kNxNodes[] = {
+    {0.2, 0}, {1.3, 0}, {2.1, 0}, {2.9, 1}, {3.8, 1},
+    {4.7, 2}, {5.5, 2}, {0.9, 2}, {5.9, 1},
+};
+static const int kNxNodeCount = (int)(sizeof(kNxNodes) / sizeof(NxNodeDef));
+static const int kNxEdges[][2] = {
+    {0,1},{1,2},{2,3},{3,4},{4,5},{5,6},{6,7},{7,8},{8,0},{1,5},{2,6}
+};
+
+/* ノードが関わるウィジェット (最大 3 個, -1 終端)。 */
+static const int kNxRelated[][3] = {
+    {0,1,-1}, {2,-1,-1}, {3,4,-1}, {4,5,-1}, {2,5,-1},
+    {0,3,-1}, {1,4,-1}, {2,3,-1}, {0,5,-1},
+};
+static bool nx_related(int node, int w) {
+    if (node < 0 || node >= kNxNodeCount) return false;
+    for (int k = 0; k < 3; k++) if (kNxRelated[node][k] == w) return true;
+    return false;
+}
+static NSPoint nx_node_pos(int i, NSRect b) {
+    NSPoint c = NSMakePoint(NSMidX(b), NSMidY(b));
+    double rad = kNxRings[kNxNodes[i].ring] * 0.62;
+    return NSMakePoint(c.x + cos(kNxNodes[i].ang) * rad,
+                       c.y + sin(kNxNodes[i].ang) * rad);
+}
+
+@interface NxEmulatorView : NSView
+@property (nonatomic) int mode;                 /* 0=操作, 1=範囲選択, 2=整形 */
+@property (nonatomic) int relatedNode;          /* 選択中ノード (-1 なし) */
+@property (nonatomic) BOOL showRelated;         /* 関連ウィジェット表示/やめる */
+@property (nonatomic, weak) NSTextField *report;
+@property (nonatomic, weak) NSTextView *log;
+@property (nonatomic) int hot;
+- (void)setRelatedNode:(int)n;
+@end
+
+@implementation NxEmulatorView {
+    NSPoint _start, _cur;
+    BOOL _dragging;
+    int _formatIndex;
+    NSPoint _formatStart;
+    NSPoint _dragStart;
+}
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) { _formatIndex = -1; _formatStart = NSZeroPoint; }
+    return self;
+}
+
+- (void)setRelatedNode:(int)n {
+    _relatedNode = n;
+    if (self.showRelated && self.report) {
+        NSMutableString *s = [NSMutableString stringWithFormat:@"選択ノード %d の関連:\n", n];
+        for (int k = 0; k < 3; k++) {
+            int w = (n >= 0 && n < kNxNodeCount) ? kNxRelated[n][k] : -1;
+            if (w < 0) break;
+            [s appendFormat:@"  %s\n", kNxWidgets[w].name];
+        }
+        self.report.stringValue = s;
+    }
+    [self setNeedsDisplay:YES];
+}
+
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)isFlipped { return NO; }
+
+- (void)drawRect:(NSRect)dirty {
+    [[NSColor colorWithCalibratedWhite:0.10 alpha:1] setFill];
+    NSRectFill(self.bounds);
+
+    /* グリッド */
+    [[NSColor colorWithCalibratedWhite:0.18 alpha:1] setStroke];
+    NSBezierPath *g = [NSBezierPath bezierPath];
+    g.lineWidth = 1;
+    for (int x = 0; x < (int)NSWidth(self.bounds); x += 20) {
+        [g moveToPoint:NSMakePoint(x, 0)];
+        [g lineToPoint:NSMakePoint(x, NSHeight(self.bounds))];
+    }
+    for (int y = 0; y < (int)NSHeight(self.bounds); y += 20) {
+        [g moveToPoint:NSMakePoint(0, y)];
+        [g lineToPoint:NSMakePoint(NSWidth(self.bounds), y)];
+    }
+    [g stroke];
+
+    /* ウィジェット */
+    for (int i = 0; i < kNxWidgetCount; i++) {
+        NSRect r = kNxWidgets[i].rect;
+        NSBezierPath *p = [NSBezierPath bezierPathWithRoundedRect:r xRadius:5 yRadius:5];
+        bool rel = self.showRelated && self.relatedNode >= 0 && nx_related(self.relatedNode, i);
+        bool dim = self.showRelated && self.relatedNode >= 0 && !rel;
+        if (rel)
+            [[NSColor colorWithCalibratedRed:0.95 green:0.65 blue:0.15 alpha:0.95] setFill];
+        else if (i == self.hot)
+            [[NSColor colorWithCalibratedRed:0.20 green:0.45 blue:0.75 alpha:0.9] setFill];
+        else if (dim)
+            [[NSColor colorWithCalibratedWhite:0.22 alpha:0.25] setFill];
+        else
+            [[NSColor colorWithCalibratedWhite:0.22 alpha:0.9] setFill];
+        [p fill];
+        [[NSColor colorWithCalibratedWhite:0.45 alpha:1] setStroke];
+        [p stroke];
+        NSString *label = [NSString stringWithUTF8String:kNxWidgets[i].name];
+        [label drawAtPoint:NSMakePoint(r.origin.x + 8, r.origin.y + 8)
+            withAttributes:@{NSForegroundColorAttributeName:
+                                 dim ? [NSColor colorWithCalibratedWhite:0.6 alpha:0.5]
+                                     : [NSColor whiteColor],
+                             NSFontAttributeName: [NSFont systemFontOfSize:11]}];
+    }
+
+    /* 範囲選択の矩形 */
+    if (_dragging) {
+        NSRect sel = NSMakeRect(MIN(_start.x, _cur.x), MIN(_start.y, _cur.y),
+                                fabs(_cur.x - _start.x), fabs(_cur.y - _start.y));
+        [[NSColor colorWithCalibratedRed:1 green:0.85 blue:0.2 alpha:0.18] setFill];
+        NSRectFill(sel);
+        [[NSColor colorWithCalibratedRed:1 green:0.85 blue:0.2 alpha:1] setStroke];
+        NSBezierPath *b = [NSBezierPath bezierPathWithRect:sel];
+        CGFloat dash[2] = {4, 3};
+        [b setLineDash:dash count:2 phase:0];
+        [b stroke];
+    }
+}
+
+/* 範囲内のウィジェットを解析する (neodax へ渡さず、その場で構造を報告)。 */
+- (NSString *)analyzeRect:(NSRect)sel {
+    NSMutableString *s = [NSMutableString string];
+    int n = 0, inside = 0;
+    double area = 0;
+    for (int i = 0; i < kNxWidgetCount; i++) {
+        NSRect r = kNxWidgets[i].rect;
+        if (!NSIntersectsRect(sel, r)) continue;
+        n++;
+        area += NSWidth(r) * NSHeight(r);
+        if (NSContainsRect(sel, r)) inside++;
+        [s appendFormat:@"  %-12s  %.0fx%.0f @%.0f,%.0f%s\n",
+            kNxWidgets[i].name, NSWidth(r), NSHeight(r), r.origin.x, r.origin.y,
+            NSContainsRect(sel, r) ? "  (全部)" : ""];
+    }
+    double cover = NSWidth(sel) * NSHeight(sel) > 0
+        ? area / (NSWidth(sel) * NSHeight(sel)) : 0;
+    [s insertString:[NSString stringWithFormat:
+        @"選択 %.0fx%.0f / 交差 %d (完全 %d) / 被覆 %.2f\n",
+        NSWidth(sel), NSHeight(sel), n, inside, cover] atIndex:0];
+    if (!n) [s appendString:@"  (ウィジェットなし)\n"];
+    return s;
+}
+
+- (void)mouseDown:(NSEvent *)e {
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    _start = _cur = p;
+    _dragging = (self.mode == 1);
+
+    int hit = -1;
+    for (int i = 0; i < kNxWidgetCount; i++)
+        if (NSPointInRect(p, kNxWidgets[i].rect)) { hit = i; break; }
+
+    if (self.mode == 2) {
+        /* 整形: クリックしたウィンドウをドラッグで動かし、10px にスナップする。 */
+        _formatIndex = hit;
+        if (hit >= 0) {
+            _formatStart = kNxWidgets[hit].rect.origin;
+            _dragStart = p;
+            self.hot = hit;
+            if (self.report)
+                self.report.stringValue = [NSString stringWithFormat:
+                    @"整形: %s をドラッグ (離すと 10px にスナップ)", kNxWidgets[hit].name];
+        }
+        [self setNeedsDisplay:YES];
+        return;
+    }
+
+    if (self.mode == 0) {
+        self.hot = hit;
+        if (self.hot >= 0 && self.report) {
+            NSRect r = kNxWidgets[self.hot].rect;
+            self.report.stringValue = [NSString stringWithFormat:
+                @"操作: %s  (%.0fx%.0f @%.0f,%.0f) → %s",
+                kNxWidgets[self.hot].name, NSWidth(r), NSHeight(r),
+                r.origin.x, r.origin.y, kNxWidgets[self.hot].cmd];
+            if (self.log) {
+                char *out = NULL;
+                int rc = nx_gui_exec(kNxWidgets[self.hot].cmd, &out);
+                NSString *body = out ? [NSString stringWithUTF8String:out] : @"(出力なし)";
+                if (out) free(out);
+                NSMutableString *m = [NSMutableString stringWithString:self.log.string];
+                [m appendFormat:@"\n$ neodax-ui %s\n%@[exit %d]\n",
+                    kNxWidgets[self.hot].cmd, body, rc];
+                self.log.string = m;
+            }
+        }
+        [self setNeedsDisplay:YES];
+        return;
+    }
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseDragged:(NSEvent *)e {
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    if (self.mode == 2) {
+        if (_formatIndex >= 0) {
+            kNxWidgets[_formatIndex].rect.origin.x = _formatStart.x + (p.x - _dragStart.x);
+            kNxWidgets[_formatIndex].rect.origin.y = _formatStart.y + (p.y - _dragStart.y);
+        }
+        [self setNeedsDisplay:YES];
+        return;
+    }
+    if (self.mode != 1) return;
+    _cur = p;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseUp:(NSEvent *)e {
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    if (self.mode == 2) {
+        if (_formatIndex >= 0) {
+            NSRect r = kNxWidgets[_formatIndex].rect;
+            r.origin.x = round(r.origin.x / 10.0) * 10.0;
+            r.origin.y = round(r.origin.y / 10.0) * 10.0;
+            kNxWidgets[_formatIndex].rect = r;
+            if (self.report)
+                self.report.stringValue = [NSString stringWithFormat:
+                    @"整形: %s → %.0fx%.0f @%.0f,%.0f", kNxWidgets[_formatIndex].name,
+                    NSWidth(r), NSHeight(r), r.origin.x, r.origin.y];
+            _formatIndex = -1;
+        }
+        [self setNeedsDisplay:YES];
+        return;
+    }
+    if (self.mode != 1) return;
+    _cur = p;
+    _dragging = NO;
+    NSRect sel = NSMakeRect(MIN(_start.x, _cur.x), MIN(_start.y, _cur.y),
+                            fabs(_cur.x - _start.x), fabs(_cur.y - _start.y));
+    if (NSWidth(sel) >= 2 && NSHeight(sel) >= 2 && self.report)
+        self.report.stringValue = [self analyzeRect:sel];
+    [self setNeedsDisplay:YES];
+}
+
+@end
+
+/* annulus / line / point のノード表示。点=node、線=edge、環=SCC。 */
+@interface NxNodeView : NSView
+@property (nonatomic) int selected;
+@property (nonatomic, weak) NxEmulatorView *emu;
+@end
+
+@implementation NxNodeView
+- (BOOL)isFlipped { return NO; }
+- (void)drawRect:(NSRect)dirty {
+    [[NSColor colorWithCalibratedWhite:0.10 alpha:1] setFill];
+    NSRectFill(self.bounds);
+    NSPoint c = NSMakePoint(NSMidX(self.bounds), NSMidY(self.bounds));
+
+    /* annulus: 環 (SCC) を同心円で表す */
+    for (int i = 0; i < 3; i++) {
+        double r0 = kNxRings[i];
+        NSRect r = NSMakeRect(c.x - r0, c.y - r0, r0 * 2, r0 * 2);
+        NSBezierPath *p = [NSBezierPath bezierPathWithOvalInRect:r];
+        [[NSColor colorWithCalibratedWhite:0.25 + 0.08 * i alpha:1] setStroke];
+        p.lineWidth = 1;
+        [p stroke];
+    }
+
+    NSPoint pts[16];
+    for (int i = 0; i < kNxNodeCount; i++) pts[i] = nx_node_pos(i, self.bounds);
+
+    /* line: 辺 */
+    [[NSColor colorWithCalibratedWhite:0.45 alpha:0.8] setStroke];
+    for (auto &e : kNxEdges) {
+        NSBezierPath *p = [NSBezierPath bezierPath];
+        p.lineWidth = 1;
+        [p moveToPoint:pts[e[0]]];
+        [p lineToPoint:pts[e[1]]];
+        [p stroke];
+    }
+
+    /* point 本体 (選択中は大きく/色を変える) */
+    for (int i = 0; i < kNxNodeCount; i++) {
+        bool sel = (i == self.selected);
+        double rad = sel ? 6.5 : 4.0;
+        NSRect r = NSMakeRect(pts[i].x - rad, pts[i].y - rad, rad * 2, rad * 2);
+        if (sel)
+            [[NSColor colorWithCalibratedRed:0.95 green:0.45 blue:0.15 alpha:1] setFill];
+        else
+            [[NSColor colorWithCalibratedRed:0.95 green:0.85 blue:0.35 alpha:1] setFill];
+        [[NSBezierPath bezierPathWithOvalInRect:r] fill];
+    }
+
+    [@"annulus / line / point  (点をクリック)" drawAtPoint:NSMakePoint(8, 8)
+        withAttributes:@{NSForegroundColorAttributeName: [NSColor lightGrayColor],
+                         NSFontAttributeName: [NSFont systemFontOfSize:10]}];
+}
+
+- (void)mouseDown:(NSEvent *)e {
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    int best = -1;
+    double bestd = 14 * 14;
+    for (int i = 0; i < kNxNodeCount; i++) {
+        NSPoint q = nx_node_pos(i, self.bounds);
+        double d = (q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y);
+        if (d < bestd) { bestd = d; best = i; }
+    }
+    if (best >= 0) {
+        self.selected = best;
+        [self.emu setRelatedNode:best];
+        [self setNeedsDisplay:YES];
+    }
+}
+@end
+
+@interface NxEmulatorController : NSObject
+@property (nonatomic, strong) NSWindow *window;
+@property (nonatomic, strong) NxEmulatorView *emu;
+@property (nonatomic, strong) NxNodeView *nodes;
+@property (nonatomic, strong) NSTextField *report;
+@property (nonatomic, strong) NSTextView *log;
+@property (nonatomic, strong) NSButton *modeButton;
+@property (nonatomic, strong) NSButton *relatedButton;
+@end
+
+@implementation NxEmulatorController
+
+- (void)build {
+    /* 小さめの別フレーム。neodax パネルとは独立。 */
+    NSRect frame = NSMakeRect(0, 0, 660, 580);
+    self.window = [[NSWindow alloc]
+        initWithContentRect:frame
+                  styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                             NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    self.window.title = @"AE エミュレータ (neodax とは別フレーム)";
+    [self.window setFrameOrigin:NSMakePoint(1080, 120)];
+    NSView *cv = self.window.contentView;
+
+    self.emu = [[NxEmulatorView alloc] initWithFrame:NSMakeRect(12, 170, 410, 386)];
+    self.emu.mode = 0;
+    self.emu.hot = -1;
+    self.emu.relatedNode = -1;
+    self.emu.showRelated = NO;
+    [cv addSubview:self.emu];
+
+    self.nodes = [[NxNodeView alloc] initWithFrame:NSMakeRect(434, 170, 214, 386)];
+    self.nodes.selected = -1;
+    self.nodes.emu = self.emu;
+    [cv addSubview:self.nodes];
+
+    self.report = [[NSTextField alloc] initWithFrame:NSMakeRect(12, 120, 636, 40)];
+    self.report.editable = NO;
+    self.report.bordered = NO;
+    self.report.drawsBackground = NO;
+    self.report.font = [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular];
+    self.report.stringValue = @"操作モード: ウィジェットをクリック / 範囲選択ボタンで解析モード";
+    [cv addSubview:self.report];
+
+    self.log = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 540, 70)];
+    self.log.editable = NO;
+    self.log.font = [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular];
+    self.log.string = @"";
+    NSScrollView *ls = [[NSScrollView alloc] initWithFrame:NSMakeRect(12, 40, 540, 72)];
+    ls.hasVerticalScroller = YES;
+    ls.documentView = self.log;
+    [cv addSubview:ls];
+
+    /* 小さなボタンだけ。トグル/ドロップダウンは使わない。 */
+    self.modeButton = [[NSButton alloc] initWithFrame:NSMakeRect(562, 40, 86, 30)];
+    self.modeButton.title = @"範囲選択";
+    self.modeButton.bezelStyle = NSBezelStyleRounded;
+    self.modeButton.target = self;
+    self.modeButton.action = @selector(toggleMode:);
+    [cv addSubview:self.modeButton];
+
+    self.relatedButton = [[NSButton alloc] initWithFrame:NSMakeRect(562, 76, 86, 30)];
+    self.relatedButton.title = @"関連表示";
+    self.relatedButton.bezelStyle = NSBezelStyleRounded;
+    self.relatedButton.target = self;
+    self.relatedButton.action = @selector(toggleRelated:);
+    [cv addSubview:self.relatedButton];
+
+    self.emu.report = self.report;
+    self.emu.log = self.log;
+
+    [self.window makeKeyAndOrderFront:nil];
+}
+
+- (void)toggleMode:(id)sender {
+    /* 0=操作 → 1=範囲選択 → 2=整形 → 0 */
+    self.emu.mode = (self.emu.mode + 1) % 3;
+    if (self.emu.mode == 0) {
+        self.modeButton.title = @"範囲選択";
+        self.report.stringValue = @"操作モード: ウィジェットをクリックして実際と同じように操作";
+    } else if (self.emu.mode == 1) {
+        self.modeButton.title = @"整形";
+        self.report.stringValue = @"範囲選択モード: ドラッグで範囲を選ぶとウィジェットを解析";
+    } else {
+        self.modeButton.title = @"操作";
+        self.report.stringValue = @"整形モード: クリックしたウィンドウをドラッグで動かす (10px スナップ)";
+    }
+    [self.emu setNeedsDisplay:YES];
+}
+
+- (void)toggleRelated:(id)sender {
+    self.emu.showRelated = !self.emu.showRelated;
+    self.relatedButton.title = self.emu.showRelated ? @"関連やめる" : @"関連表示";
+    if (self.emu.showRelated) {
+        if (self.emu.relatedNode < 0 && self.nodes.selected < 0)
+            [self.emu setRelatedNode:0];
+        else
+            [self.emu setRelatedNode:(int)self.nodes.selected];
+    } else {
+        self.report.stringValue = @"関連表示をやめました";
+        [self.emu setNeedsDisplay:YES];
+    }
+}
+
+@end
+
+/* ================================================================
+ * 最近の app から選んで分析するパネル (neodax 側)
+ * ================================================================ */
+@interface NxAppController : NSObject <NSTableViewDataSource, NSTableViewDelegate>
+@property (nonatomic, strong) NSWindow *window;
+@property (nonatomic, strong) NSTableView *table;
+@property (nonatomic, strong) NSTextView *output;
+@property (nonatomic, strong) NSMutableArray<NSString *> *paths;
+@end
+
+@implementation NxAppController
+
+- (void)build {
+    NSRect frame = NSMakeRect(0, 0, 620, 460);
+    self.window = [[NSWindow alloc]
+        initWithContentRect:frame
+                  styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                             NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    self.window.title = @"app 分析 (最近起動した app から選ぶ)";
+    [self.window setFrameOrigin:NSMakePoint(40, 140)];
+    NSView *cv = self.window.contentView;
+
+    self.paths = [NSMutableArray array];
+    self.table = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 596, 150)];
+    self.table.dataSource = self;
+    self.table.delegate = self;
+    self.table.rowHeight = 22;
+    self.table.headerView = nil;
+    NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:@"app"];
+    col.width = 590;
+    [self.table addTableColumn:col];
+    NSScrollView *ts = [[NSScrollView alloc] initWithFrame:NSMakeRect(12, 236, 596, 160)];
+    ts.hasVerticalScroller = YES;
+    ts.documentView = self.table;
+    [cv addSubview:ts];
+
+    /* 小さな普通のボタンだけ。トグル/ドロップダウンは作らない。 */
+    NSButton *reload = [[NSButton alloc] initWithFrame:NSMakeRect(12, 200, 90, 28)];
+    reload.title = @"更新";
+    reload.bezelStyle = NSBezelStyleRounded;
+    reload.target = self;
+    reload.action = @selector(reloadApps:);
+    [cv addSubview:reload];
+
+    NSButton *an = [[NSButton alloc] initWithFrame:NSMakeRect(108, 200, 90, 28)];
+    an.title = @"分析";
+    an.bezelStyle = NSBezelStyleRounded;
+    an.target = self;
+    an.action = @selector(analyzeOnly:);
+    [cv addSubview:an];
+
+    NSButton *fx = [[NSButton alloc] initWithFrame:NSMakeRect(204, 200, 120, 28)];
+    fx.title = @"分析して修正";
+    fx.bezelStyle = NSBezelStyleRounded;
+    fx.target = self;
+    fx.action = @selector(analyzeFix:);
+    [cv addSubview:fx];
+
+    /* 「動かない問題を 1 個特定して最善を尽くす」 */
+    NSButton *bs = [[NSButton alloc] initWithFrame:NSMakeRect(330, 200, 150, 28)];
+    bs.title = @"1個特定して最善";
+    bs.bezelStyle = NSBezelStyleRounded;
+    bs.target = self;
+    bs.action = @selector(bestFix:);
+    [cv addSubview:bs];
+
+    self.output = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 596, 180)];
+    self.output.editable = NO;
+    self.output.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+    NSScrollView *os = [[NSScrollView alloc] initWithFrame:NSMakeRect(12, 12, 596, 180)];
+    os.hasVerticalScroller = YES;
+    os.documentView = self.output;
+    [cv addSubview:os];
+
+    [self reloadApps:nil];
+    [self.window makeKeyAndOrderFront:nil];
+}
+
+- (void)reloadApps:(id)sender {
+    nx_app_recent_refresh();
+    [self.paths removeAllObjects];
+    int n = nx_app_recent_count();
+    for (int i = 0; i < n; i++) {
+        const char *p = nx_app_recent_path(i);
+        if (p && *p) [self.paths addObject:[NSString stringWithUTF8String:p]];
+    }
+    [self.table reloadData];
+    if (self.paths.count) [self.table selectRowIndexes:[NSIndexSet indexSetWithIndex:0]
+                                 byExtendingSelection:NO];
+    self.output.string = [NSString stringWithFormat:@"最近の app: %d 件\n", n];
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tv { return (NSInteger)self.paths.count; }
+
+- (NSView *)tableView:(NSTableView *)tv viewForTableColumn:(NSTableColumn *)c row:(NSInteger)row {
+    NSTableCellView *cell = [tv makeViewWithIdentifier:@"acell" owner:self];
+    if (!cell) {
+        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 590, 22)];
+        cell.identifier = @"acell";
+        NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(4, 1, 582, 20)];
+        tf.editable = NO; tf.bordered = NO; tf.drawsBackground = NO; tf.tag = 1;
+        [cell addSubview:tf];
+        cell.textField = tf;
+    }
+    if (row >= 0 && row < (NSInteger)self.paths.count)
+        cell.textField.stringValue = self.paths[(NSUInteger)row];
+    return cell;
+}
+
+- (void)run:(NSString *)line {
+    self.output.string = [NSString stringWithFormat:@"$ neodax-ui %@\n\n", line];
+    char *out = NULL;
+    int rc = nx_gui_exec(line.UTF8String, &out);
+    NSString *body = out ? [NSString stringWithUTF8String:out] : @"(出力なし)";
+    if (out) free(out);
+    self.output.string = [NSString stringWithFormat:@"$ neodax-ui %@\n\n%@\n[exit %d]\n",
+                          line, body, rc];
+}
+
+- (NSString *)selectedPath {
+    NSInteger r = self.table.selectedRow;
+    if (r < 0 || r >= (NSInteger)self.paths.count) return nil;
+    return self.paths[(NSUInteger)r];
+}
+
+- (void)analyzeOnly:(id)sender {
+    NSString *p = [self selectedPath];
+    if (!p) { self.output.string = @"app が選ばれていません"; return; }
+    [self run:[NSString stringWithFormat:@"app-analyze --path \"%@\"", p]];
+}
+
+- (void)analyzeFix:(id)sender {
+    NSString *p = [self selectedPath];
+    if (!p) { self.output.string = @"app が選ばれていません"; return; }
+    [self run:[NSString stringWithFormat:@"app-analyze --path \"%@\" --fix", p]];
+}
+
+- (void)bestFix:(id)sender {
+    NSString *p = [self selectedPath];
+    if (!p) { self.output.string = @"app が選ばれていません"; return; }
+    [self run:[NSString stringWithFormat:@"best --path \"%@\" --apply", p]];
+}
+
+@end
+
+/* GUI モードで起動する。 */
+static int run_gui(void) {
+    @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+        NxGuiController *ctl = [[NxGuiController alloc] init];
+        app.delegate = ctl;
+        [app run];
+    }
+    return 0;
+}
+
 static void usage(void) {
     printf(
         "neodax-ui — NeoDAX minimal CLI (GUI とは独立)\n"
@@ -919,11 +1966,37 @@ static void usage(void) {
         "  capture --app NAME -o FILE.png\n"
         "  display [--app NAME] [-o FILE] [--state PATH]\n"
         "  tabs     --state PATH\n"
+        "  keys     --state PATH                     KV のキー・seq・生存を列挙 (診断用)\n"
         "  close    --state PATH --id ID\n"
         "  case     --path PATH [--kind app|state|dir] [--case NAME]\n"
         "           案件ごとの自発解析。対象に合う案件を逐次に試し、問題と計画を出す\n"
         "  repair   --state PATH\n"
         "           1 つの永続手続き: 観測→計画→段順に実行→再観測 を健全になるまで繰り返す\n"
+        "  recipe   --path APP [-o FILE] [--target S]\n"
+        "           書き換え手順を先に作って保存する (アプリは変更しない)。\n"
+        "           シンボルを解決し、パッチ位置・範囲・stub・再観測・再署名を 1 枚に綴る。\n"
+        "  recipe-show --file R  保存した手順を表示\n"
+        "  recipe-run  --file R [--apply] [--upto N]\n"
+        "           手順を 1 段ずつ検証して実行。既定は dry-run。--apply で実行し、\n"
+        "           失敗時は作業コピーを破棄 (原版は未変更)。\n"
+        "  search   --path APP --symbol NAME [--apply] [--probe-ms N]\n"
+        "           観測 (呼び出し元・先頭命令) → テンプレ (data<edge<entry) の順で介入を選ぶ。\n"
+        "           既定は表示のみ。--apply で最安のテンプレを作業コピーに適用。\n"
+        "           --probe-ms N で適用後に N ms 起動し、生存を成功とする。\n"
+        "           失敗履歴は ~/.neodax/strategy-memory.tsv に有界保存され、\n"
+        "           容量超過 (作業>10 / 全体>200) かつミス時に分岐パス確率で枝刈りする。\n"
+        "  strategy-memory   失敗履歴と間違い指数を表示\n"
+        "  cut --path APP --symbol NAME [--apply]\n"
+        "       解析→テンプレ保存→clone/patch/検証。--step で 1 段ずつ介入可能。\n"
+        "  cut --step --path APP --symbol NAME   1 段だけ進める\n"
+        "  cut --abort --path APP --symbol NAME  途中状態を捨てる\n"
+        "  cut-status        途中状態の一覧 (~/.neodax/cut)\n"
+        "  templates         保存済みテンプレート (~/.neodax/templates.tsv)\n"
+        "  app              直前に起動した app と保存フォルダを表示\n"
+        "  app-analyze [--fix]  分析→app ごとのフォルダに保存。前回と違う時だけ --fix で修正\n"
+        "  apps             保存済み app フォルダの一覧\n"
+        "  best --path APP [--apply]  動かない問題を1個特定し、その1個に最善を尽くす\n"
+        "  kill [--match SUBSTR]   SUBSTR を含むプロセスを SIGKILL (既定 .neodax-work)\n"
         "  plan     --state PATH\n"
         "           自発解析。事実→問題→計画 (順序と並列/代替)→自信 を出す。変更しない。\n"
         "           特定のタブ名に依存せず、観測から「何を・どの順で直すか」を組み立てる\n"
@@ -951,11 +2024,17 @@ static void usage(void) {
         "  gen      --spec NAME|all [--class NAME] [-o FILE]        (C++ クラス生成)\n"
         "  pe       --file FILE.exe [--disasm] [--limit N]          (Windows PE 解析/逆アセンブル)\n"
         "  pipeline --file FILE.exe [--strategy auto|seq|sim] [-o out.cpp]  (decode+encode 戦略選択)\n"
+        "  seek PATTERN [ROOT] [--ignore-case] [--regex] [--word] [--binary] [--files]\n"
+        "       [--include G] [--context N] [--limit N] [--time MS]\n"
+        "       ABD 安全化: 全体バイト/行長/期限の上限、symlink 非追跡、\n"
+        "       危険な regex の拒否と literal 断片 prefilter\n"
         "  serve\n");
 }
 
-int main(int argc, char **argv) {
-    @autoreleasepool {
+/* CLI の実体。GUI からも CLI からも同じこれを呼ぶ (二重実装をしない)。
+ * 自作の @autoreleasepool は持たない — 呼び出し側が用意する。 */
+static int nx_cli_dispatch(int argc, char **argv) {
+    {
         if (argc < 2) { usage(); return 1; }
         const char *cmd = argv[1];
         if (strcmp(cmd, "windows") == 0) {
@@ -971,19 +2050,26 @@ int main(int argc, char **argv) {
                         flag(argc, argv, "-o"),
                         flag(argc, argv, "--state"));
         } else if (strcmp(cmd, "tabs") == 0) {
-            const char *st = flag(argc, argv, "--state");
-            if (!st) { fprintf(stderr, "tabs: --state required\n"); return 1; }
+            const char *st = state_or_default(flag(argc, argv, "--state"), "tabs");
+            if (!st) return 1;
             dump_tabs_path(st);
+        } else if (strcmp(cmd, "keys") == 0) {
+            const char *st = state_or_default(flag(argc, argv, "--state"), "keys");
+            if (!st) return 1;
+            cmd_keys(st);
         } else if (strcmp(cmd, "close") == 0) {
             const char *st = flag(argc, argv, "--state");
             const char *id = flag(argc, argv, "--id");
-            if (!st || !id) { fprintf(stderr, "close: --state --id required\n"); return 1; }
+            if (!id) { fprintf(stderr, "close: --id required\n"); return 1; }
+            st = state_or_default(st, "close");
+            if (!st) return 1;
             return nx_deepai_remove_tab_path(st, id, stdout);
         } else if (strcmp(cmd, "delete") == 0) {
             const char *st = flag(argc, argv, "--state");
             const char *id = flag(argc, argv, "--id");
-            if (!st) { fprintf(stderr, "delete: --state required\n"); return 1; }
             if (!id) { fprintf(stderr, "delete: --id required\n"); return 1; }
+            st = state_or_default(st, "delete");
+            if (!st) return 1;
             cmd_delete(st, id, flag(argc, argv, "--app"),
                        flag(argc, argv, "--store"), flag(argc, argv, "--key"),
                        has_flag(argc, argv, "--live"),
@@ -991,7 +2077,8 @@ int main(int argc, char **argv) {
                        has_flag(argc, argv, "--force"));
         } else if (strcmp(cmd, "plan") == 0) {
             const char *st = flag(argc, argv, "--state");
-            if (!st) { fprintf(stderr, "plan: --state required\n"); return 1; }
+            st = state_or_default(st, "plan");
+            if (!st) return 1;
             return nx_plan_analyze_store(st, stdout) == 0 ? 0 : 1;
         } else if (strcmp(cmd, "case") == 0) {
             const char *path = flag(argc, argv, "--path");
@@ -999,13 +2086,100 @@ int main(int argc, char **argv) {
             const char *nm = flag(argc, argv, "--case");
             if (!path) { fprintf(stderr, "case: --path required\n"); return 1; }
             return nx_plan_analyze_case(kind ? kind : "app", path, nm, stdout) == 0 ? 0 : 1;
+        } else if (strcmp(cmd, "recipe") == 0) {
+            const char *path = flag(argc, argv, "--path");
+            const char *o = flag(argc, argv, "-o");
+            if (!path) { fprintf(stderr, "recipe: --path required\n"); return 1; }
+            return nx_recipe_build(path, flag(argc, argv, "--target"), o, stdout);
+        } else if (strcmp(cmd, "recipe-show") == 0) {
+            const char *f = flag(argc, argv, "--file");
+            if (!f) { fprintf(stderr, "recipe-show: --file required\n"); return 1; }
+            return nx_recipe_show(f, stdout);
+        } else if (strcmp(cmd, "recipe-run") == 0) {
+            const char *f = flag(argc, argv, "--file");
+            if (!f) { fprintf(stderr, "recipe-run: --file required\n"); return 1; }
+            const char *u = flag(argc, argv, "--upto");
+            return nx_recipe_run(f, has_flag(argc, argv, "--apply"),
+                                 u ? atoi(u) : 0, stdout);
+        } else if (strcmp(cmd, "search") == 0) {
+            const char *path = flag(argc, argv, "--path");
+            const char *sym = flag(argc, argv, "--symbol");
+            if (!path || !sym) { fprintf(stderr, "search: --path --symbol required\n"); return 1; }
+            const char *pm = flag(argc, argv, "--probe-ms");
+            return nx_strategy_search(path, sym, has_flag(argc, argv, "--apply"),
+                                      pm ? atoi(pm) : 0, stdout);
+        } else if (strcmp(cmd, "strategy-memory") == 0) {
+            const char *ra = flag(argc, argv, "--record-app");
+            const char *rs = flag(argc, argv, "--record-symbol");
+            const char *rb = flag(argc, argv, "--record-branch");
+            const char *ro = flag(argc, argv, "--record-ok");
+            if (ra && rs && rb && ro) {
+                int pruned = nx_strategy_record(ra, rs, rb, atoi(ro) != 0);
+                printf("recorded %s ok=%s pruned=%d\n", rb, ro, pruned);
+                return 0;
+            }
+            return nx_strategy_stats_show(stdout);
+        } else if (strcmp(cmd, "cut") == 0) {
+            const char *app = flag(argc, argv, "--path");
+            const char *sym = flag(argc, argv, "--symbol");
+            if (!app || !sym) { fprintf(stderr, "cut: --path --symbol required\n"); return 1; }
+            if (has_flag(argc, argv, "--abort")) return nx_cut_abort(app, sym, stdout);
+            if (has_flag(argc, argv, "--step")) return nx_cut_step_cmd(app, sym, stdout);
+            return nx_cut(app, sym, has_flag(argc, argv, "--apply"), stdout);
+        } else if (strcmp(cmd, "cut-status") == 0) {
+            return nx_cut_status(stdout);
+        } else if (strcmp(cmd, "templates") == 0) {
+            return nx_template_list(stdout);
+        } else if (strcmp(cmd, "app") == 0) {
+            const char *p = flag(argc, argv, "--path");
+            return p ? nx_app_show_path(p, stdout) : nx_app_show(stdout);
+        } else if (strcmp(cmd, "app-analyze") == 0) {
+            const char *p = flag(argc, argv, "--path");
+            return p ? nx_app_analyze_path(p, has_flag(argc, argv, "--fix"), stdout)
+                     : nx_app_analyze(has_flag(argc, argv, "--fix"), stdout);
+        } else if (strcmp(cmd, "apps") == 0) {
+            return nx_app_list(stdout);
+        } else if (strcmp(cmd, "best") == 0) {
+            const char *p = flag(argc, argv, "--path");
+            if (!p) { fprintf(stderr, "best: --path required\n"); return 1; }
+            return nx_bestfix(p, flag(argc, argv, "--kind"),
+                              has_flag(argc, argv, "--apply"), stdout);
+        } else if (strcmp(cmd, "kill") == 0) {
+            /* 低レベルな強制終了。アプリに quit コマンドが無くても効く。 */
+            const char *m = flag(argc, argv, "--match");
+            if (!m || !*m) m = ".neodax-work";
+            char c[512];
+            snprintf(c, sizeof c, "pkill -KILL -f '%s' 2>/dev/null", m);
+            int rc = system(c);
+            printf("kill -9 -f '%s' rc=%d\n", m, rc);
+            return 0;
+        } else if (strcmp(cmd, "seek") == 0) {
+            if (argc < 3) { fprintf(stderr, "seek: PATTERN required\n"); return 1; }
+            const char *pattern = argv[2];
+            const char *root = ".";
+            for (int i = 3; i < argc; i++)
+                if (argv[i][0] != '-') { root = argv[i]; break; }
+            int flags = 0;
+            if (has_flag(argc, argv, "--ignore-case")) flags |= 1;
+            if (has_flag(argc, argv, "--regex")) flags |= 2;
+            if (has_flag(argc, argv, "--binary")) flags |= 4;
+            if (has_flag(argc, argv, "--files")) flags |= 8;
+            if (has_flag(argc, argv, "--word")) flags |= 16;
+            const char *inc = flag(argc, argv, "--include");
+            const char *c = flag(argc, argv, "--context");
+            const char *l = flag(argc, argv, "--limit");
+            const char *t = flag(argc, argv, "--time");
+            return nx_seek(pattern, root, inc, flags, c ? atoi(c) : 0,
+                           l ? atoi(l) : 1000, t ? atoi(t) : 15000, stdout);
         } else if (strcmp(cmd, "repair") == 0) {
             const char *st = flag(argc, argv, "--state");
-            if (!st) { fprintf(stderr, "repair: --state required\n"); return 1; }
+            st = state_or_default(st, "repair");
+            if (!st) return 1;
             return nx_plan_repair(st, stdout) == 0 ? 0 : 1;
         } else if (strcmp(cmd, "advise") == 0) {
             const char *st = flag(argc, argv, "--state");
-            if (!st) { fprintf(stderr, "advise: --state required\n"); return 1; }
+            st = state_or_default(st, "advise");
+            if (!st) return 1;
             char *js = nx_deepai_load_state(st);
             if (!js) { printf("ERROR: no state at %s\n", st); return 1; }
             int rc = nx_advise_tabs(st, js, flag(argc, argv, "--id"), stdout);
@@ -1013,24 +2187,29 @@ int main(int argc, char **argv) {
             return rc == 2 ? 1 : 0;
         } else if (strcmp(cmd, "fix") == 0) {
             const char *st = flag(argc, argv, "--state");
-            if (!st) { fprintf(stderr, "fix: --state or --app required\n"); return 1; }
+            st = state_or_default(st, "fix");
+            if (!st) return 1;
             return nx_deepai_fix_path(st, stdout);
         } else if (strcmp(cmd, "check") == 0) {
             const char *st = flag(argc, argv, "--state");
-            if (!st) { fprintf(stderr, "check: --state required\n"); return 1; }
+            st = state_or_default(st, "check");
+            if (!st) return 1;
             cmd_check(st);
         } else if (strcmp(cmd, "heal") == 0) {
             const char *st = flag(argc, argv, "--state");
-            if (!st) { fprintf(stderr, "heal: --state required\n"); return 1; }
+            st = state_or_default(st, "heal");
+            if (!st) return 1;
             cmd_heal(st, flag(argc, argv, "--app"), flag(argc, argv, "--store"),
                      flag(argc, argv, "--key"), has_flag(argc, argv, "--dry-run"));
         } else if (strcmp(cmd, "replay") == 0) {
             const char *st = flag(argc, argv, "--state");
-            if (!st) { fprintf(stderr, "replay: --state required\n"); return 1; }
+            st = state_or_default(st, "replay");
+            if (!st) return 1;
             cmd_replay(st, flag(argc, argv, "-o"));
         } else if (strcmp(cmd, "apply") == 0) {
             const char *st = flag(argc, argv, "--state");
-            if (!st) { fprintf(stderr, "apply: --state required\n"); return 1; }
+            st = state_or_default(st, "apply");
+            if (!st) return 1;
             if (has_flag(argc, argv, "--attach")) {
                 cmd_attach(st, flag(argc, argv, "--app"),
                            flag(argc, argv, "--store"),
@@ -1051,7 +2230,8 @@ int main(int argc, char **argv) {
                      flag(argc, argv, "--key"));
         } else if (strcmp(cmd, "simulate") == 0) {
             const char *st = flag(argc, argv, "--state");
-            if (!st) { fprintf(stderr, "simulate: --state required\n"); return 1; }
+            st = state_or_default(st, "simulate");
+            if (!st) return 1;
             do_simulate(st, flag(argc, argv, "--asar"));
         } else if (strcmp(cmd, "spec") == 0) {
             return run_spec(argc, argv);
@@ -1069,4 +2249,37 @@ int main(int argc, char **argv) {
         }
     }
     return 0;
+}
+
+int main(int argc, char **argv) {
+    @autoreleasepool {
+        /* 引数なしで起動されたら GUI。--gui でも GUI。 */
+        if (argc < 2 || strcmp(argv[1], "--gui") == 0 || strcmp(argv[1], "-g") == 0)
+            return run_gui();
+        /* GUI が使う経路 (stdout 差し替え + 自動 --state) を CLI からも点検できる。
+           GUI と同じ関数を通るので、ここが通れば GUI の実行も通る。 */
+        if (strcmp(argv[1], "--selftest") == 0) {
+            const char *lines[] = {"tabs", "advise", "check", "plan", "repair", NULL};
+            for (int i = 0; lines[i]; i++) {
+                char *out = NULL;
+                int rc = nx_gui_exec(lines[i], &out);
+                printf("== %s == rc=%d bytes=%ld\n", lines[i], rc,
+                       out ? (long)strlen(out) : 0L);
+                if (out) {
+                    /* 先頭 3 行だけ見せる (点検用) */
+                    int shown = 0;
+                    for (char *q = out; *q && shown < 3; ) {
+                        char *nl = strchr(q, '\n');
+                        size_t len = nl ? (size_t)(nl - q) : strlen(q);
+                        printf("   %.*s\n", (int)len, q);
+                        shown++;
+                        q = nl ? nl + 1 : q + len;
+                    }
+                    free(out);
+                }
+            }
+            return 0;
+        }
+        return nx_cli_dispatch(argc, argv);
+    }
 }

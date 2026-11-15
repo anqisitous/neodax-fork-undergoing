@@ -36,6 +36,12 @@ static int ends_with(const char *s, const char *suf) {
     return a >= b && strcmp(s + a - b, suf) == 0;
 }
 
+/* NUL を含む KV キー用の後方一致 (strlen はキーの途中で止まるため使えない)。 */
+static int key_ends_with_n(const char *key, size_t klen, const char *suf) {
+    size_t sl = strlen(suf);
+    return klen >= sl && memcmp(key + klen - sl, suf, sl) == 0;
+}
+
 static unsigned char *read_entire(const char *path, size_t *out_size) {
     FILE *fp = fopen(path, "rb");
     if (!fp) return NULL;
@@ -134,6 +140,15 @@ typedef struct {
 static void kv_cb(const char *key, size_t klen, const unsigned char *val, size_t vlen,
                   unsigned long long seq, void *ud) {
     kv_ud_t *u = (kv_ud_t *)ud;
+
+    /* `.nx-backup` は派生の退避キー。本体の解決には使わない。
+     *
+     * 退避キーの seq が本体より新しいだけで、読み書きの相手が退避側へ
+     * すり替わる。すると修復結果は退避側に書かれ、本体は孤児のまま残り、
+     * 次に本体が書かれた瞬間に孤児が「復活」する。ここで退避を除外し、
+     * 解決先を常に本体 (正準キー) に固定する。 */
+    if (key && klen && key_ends_with_n(key, klen, ".nx-backup")) return;
+
     if (u->want_key && key && klen) {
         if (!u->hint || memfind(key, klen, u->hint, strlen(u->hint))) {
             if (seq >= u->best_seq) {
@@ -370,6 +385,12 @@ static void live_cb(const char *key, size_t klen, const unsigned char *val,
     live_ud_t *u = (live_ud_t *)ud;
     if (!key || !klen) return;
     if (u->hint && !memfind(key, klen, u->hint, strlen(u->hint))) return;
+    /* 退避キー (.nx-backup) は、hint が「nx-backup」を名指した時だけ見る。
+     * "workspace-tabs" のような広い hint で退避の削除レコードを拾うと、
+     * 本体が生きていても「死んでいる」と誤判定するため。 */
+    if (u->hint && !memfind(u->hint, strlen(u->hint), "nx-backup", 9) &&
+        key_ends_with_n(key, klen, ".nx-backup"))
+        return;
     if (!u->seen || seq >= u->best_seq) {
         u->seen = 1;
         u->best_seq = seq;

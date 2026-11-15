@@ -56,11 +56,27 @@ clang++ -std=c++17 -O2 -c -I src -I include \
 clang++ -std=c++17 -O2 -c -I src -I include \
     src/integration/plan/nx_case.cpp -o src/integration/plan/nx_case.o
 clang++ -std=c++17 -O2 -c -I src -I include \
-    src/integration/plan/nx_case_ae.cpp -o src/integration/plan/nx_case_ae.o
-clang++ -std=c++17 -O2 -c -I src -I include \
     src/integration/nx_appfix_flow.cpp -o src/integration/nx_appfix_flow.o
+# nx_recipe: 書き換え手順の保存と段ごとの検証実行 (P4/P2/P3 の安全原則)
+clang++ -std=c++17 -O2 -c -I src -I include \
+    src/integration/plan/nx_recipe.cpp -o src/integration/plan/nx_recipe.o
+# nx_strategy: 観測→テンプレで介入戦略を一般探索する
+clang++ -std=c++17 -O2 -c -I src -I include \
+    src/integration/plan/nx_strategy.cpp -o src/integration/plan/nx_strategy.o
+# nx_template: 解析結果を保存し、段階的に除去する
+clang++ -std=c++17 -O2 -c -I src -I include \
+    src/integration/plan/nx_template.cpp -o src/integration/plan/nx_template.o
+# nx_appstore: 直前に起動した app の分析を app ごとに保存
+clang++ -std=c++17 -O2 -c -I src -I include \
+    src/integration/plan/nx_appstore.cpp -o src/integration/plan/nx_appstore.o
+# nx_bestfix: 動かない問題を 1 個に絞って最善を尽くす
+clang++ -std=c++17 -O2 -c -I src -I include \
+    src/integration/plan/nx_bestfix.cpp -o src/integration/plan/nx_bestfix.o
+# seek (ABD 安全化済み)
+clang++ -std=c++17 -O2 -c -I src -I include \
+    src/integration/track/search.cpp -o src/integration/track/search.o
 # nx_plan は事実を集めるのに nx_deepai / nx_state / nx_leveldb を使う。
-UI_OBJS="$UI_OBJS src/integration/track/advise.o src/integration/plan/nx_plan.o src/integration/plan/nx_case.o src/integration/plan/nx_case_ae.o"
+UI_OBJS="$UI_OBJS src/integration/track/advise.o src/integration/plan/nx_plan.o src/integration/plan/nx_case.o src/integration/plan/nx_recipe.o src/integration/plan/nx_strategy.o src/integration/plan/nx_template.o src/integration/plan/nx_appstore.o src/integration/plan/nx_bestfix.o src/integration/track/search.o"
 clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 \
     -I src -I include \
     -framework Cocoa -framework CoreGraphics -framework ImageIO -framework CoreFoundation \
@@ -78,6 +94,31 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/Analysis"
 for t in neodax neodax-ui neodax-viewer neodax-screen neodax-artifact; do
     [ -x "bin/$t" ] && cp -f "bin/$t" "$APP/Contents/MacOS/"
 done
+
+# --- アイコン (.icns) ---
+# CoreGraphics で 1024px を描き、sips で各サイズを、iconutil で .icns を作る。
+# python3 等に依存しない。
+ICON_SRC="bin/neodax-icon-1024.png"
+ICONSET="bin/AppIcon.iconset"
+cc -std=c11 -O2 -Wall \
+    -framework CoreGraphics -framework ImageIO -framework CoreFoundation \
+    gui/mkicon.c -o bin/neodax-mkicon
+./bin/neodax-mkicon "$ICON_SRC" 1024 >/dev/null 2>&1
+if [ -f "$ICON_SRC" ]; then
+    rm -rf "$ICONSET"; mkdir -p "$ICONSET"
+    for s in 16 32 128 256 512; do
+        sips -z $s $s "$ICON_SRC" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1
+        d=$((s * 2))
+        sips -z $d $d "$ICON_SRC" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null 2>&1
+    done
+    if iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns" 2>/dev/null; then
+        echo "built: $APP/Contents/Resources/AppIcon.icns"
+    else
+        echo "  [warn] iconutil failed; app will use the default icon"
+    fi
+    rm -rf "$ICONSET"   # 中間ファイルは残さない (icns だけあればよい)
+fi
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -87,6 +128,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>NeoDAX</string>
   <key>CFBundleIdentifier</key><string>org.neodax.tool</string>
   <key>CFBundleExecutable</key><string>neodax-ui</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1</string>

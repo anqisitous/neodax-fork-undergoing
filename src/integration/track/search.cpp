@@ -101,6 +101,64 @@ bool glob_match(const std::string &glob, const std::string &path) {
     return false;
 }
 
+// D: 破滅的な正規表現 (ReDoS) を保守的に拒否する。
+//   入れ子の量化 (例: (a+)+, (.*)*, (a|aa)+) と、隣接する量化子を見る。
+//   完全な判定ではないが、危険側に倒して止める。
+bool regex_is_risky(const std::string &p) {
+    for (size_t i = 0; i + 1 < p.size(); i++) {
+        char a = p[i], b = p[i + 1];
+        bool qa = (a == '*' || a == '+');
+        bool qb = (b == '*' || b == '+');
+        if (qa && qb) return true;                    /* ** ++ *+ +* */
+    }
+    // 量化されたグループの中に量化子があるか: ...( ... * ... )* ...
+    std::vector<char> has_q;   // 各グループが量化子を含むか
+    for (size_t i = 0; i < p.size(); i++) {
+        char c = p[i];
+        if (c == '\\') { i++; continue; }
+        if (c == '[') {                             /* 文字クラスは中身を飛ばす */
+            i++;
+            while (i < p.size() && p[i] != ']') { if (p[i] == '\\') i++; i++; }
+            continue;
+        }
+        if (c == '(') { has_q.push_back(0); continue; }
+        if (c == ')') {
+            char inner = has_q.empty() ? 0 : has_q.back();
+            if (!has_q.empty()) has_q.pop_back();
+            char next = (i + 1 < p.size()) ? p[i + 1] : 0;
+            if (inner && (next == '*' || next == '+' || next == '{')) return true;
+            if (!has_q.empty() && inner) has_q.back() = 1;
+            continue;
+        }
+        if (c == '*' || c == '+' || c == '{') {
+            if (!has_q.empty()) has_q.back() = 1;
+        }
+    }
+    return false;
+}
+
+// regex から安全な literal 断片を取り出す (prefilter 用)。
+// メタ文字を含まない [A-Za-z0-9_ ] の最長連続 (3 文字以上) を採る。
+std::string literal_fragment(const std::string &p) {
+    std::string best, cur;
+    auto is_lit = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '_' || c == ' ';
+    };
+    bool esc = false;
+    for (char c : p) {
+        if (esc) { esc = false; cur.clear(); continue; }
+        if (c == '\\') { esc = true; cur.clear(); continue; }
+        if (is_lit(c)) cur += c;
+        else {
+            if (cur.size() > best.size()) best = cur;
+            cur.clear();
+        }
+    }
+    if (cur.size() > best.size()) best = cur;
+    return best.size() >= 3 ? best : std::string();
+}
+
 } // namespace
 
 // ---------------------------------------------------------------- TextQuery
@@ -112,12 +170,23 @@ TextQuery::TextQuery(const SeekOptions &o)
         if (needle_.empty()) error_ = "検索語が空です";
         return;
     }
+    /* D: 危険な正規表現は先に拒否する (ReDoS 防止) */
+    if (regex_is_risky(o.pattern)) {
+        error_ = "危険な正規表現 (入れ子の量化) を拒否しました: " + o.pattern;
+        return;
+    }
     std::string pat = o.pattern;
     if (word_) pat = "\\b(?:" + pat + ")\\b";
     try {
         auto flags = std::regex::ECMAScript | std::regex::optimize;
         if (o.ignore_case) flags |= std::regex::icase;
         re_ = std::regex(pat, flags);
+        /* D: regex でも使える literal 断片を prefilter に持つ */
+        lit_frag_ = literal_fragment(o.pattern);
+        if (!lit_frag_.empty()) {
+            if (o.ignore_case) lit_frag_ = lower_copy(lit_frag_);
+            has_lit_ = true;
+        }
     } catch (const std::regex_error &e) {
         error_ = std::string("正規表現が不正です: ") + e.what();
     }
@@ -148,9 +217,19 @@ bool TextQuery::match(const std::string &line, size_t *col) const {
 
 bool TextQuery::prefilter(const std::string &data) const {
     if (!error_.empty()) return false;
-    if (!literal_ || needle_.empty()) return true;
-    if (ignore_case_) return lower_copy(data).find(needle_) != std::string::npos;
-    return data.find(needle_) != std::string::npos;
+    const std::string *needle = nullptr;
+    bool ign = ignore_case_;
+    if (literal_) {
+        if (needle_.empty()) return true;
+        needle = &needle_;
+    } else if (has_lit_) {
+        /* regex でも literal 断片が無ければ一致し得ない (必要条件で足切り) */
+        needle = &lit_frag_;
+    } else {
+        return true;
+    }
+    if (ign) return lower_copy(data).find(*needle) != std::string::npos;
+    return data.find(*needle) != std::string::npos;
 }
 
 // ---------------------------------------------------------------- FileFilter
@@ -226,13 +305,24 @@ void Searcher::emit(const SeekHit &hit) const {
 
 void Searcher::scan_file(const std::string &path, long long deadline_ms) {
     if (timed_out(deadline_ms)) { time_up_ = true; return; }
+    if (bytes_up_) return;                       /* A: 全体量の上限に達した */
     if (!filter_.accept_path(path)) return;
     struct stat st;
-    if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return;
+    if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+        /* B: 権限/消失で読めないものは数えるだけ。走査は続ける。 */
+        skipped_stat_++;
+        return;
+    }
     if (filter_.too_large((long)st.st_size)) return;
+    /* A: 読み始める前に全体量の予算を確認する。 */
+    if (bytes_read_ + (long long)st.st_size > opt_.max_total_bytes) {
+        bytes_up_ = true;
+        truncated_ = true;
+        return;
+    }
 
     std::ifstream in(path, std::ios::binary);
-    if (!in) return;
+    if (!in) { skipped_stat_++; return; }
     // 先頭だけ読んでバイナリを判定する。巨大な DB を丸ごと読まない。
     char headbuf[8000];
     in.read(headbuf, sizeof headbuf);
@@ -242,6 +332,7 @@ void Searcher::scan_file(const std::string &path, long long deadline_ms) {
     in.clear();
     in.seekg(0);
     std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    bytes_read_ += (long long)data.size();
     if (!query_.prefilter(data)) return;
 
     std::vector<std::string> lines = split_lines(data);
@@ -249,8 +340,14 @@ void Searcher::scan_file(const std::string &path, long long deadline_ms) {
     long last_ctx = -1;
     for (size_t i = 0; i < lines.size(); i++) {
         if ((i & 1023) == 0 && timed_out(deadline_ms)) { time_up_ = true; return; }
+        /* A/D: 行長の上限。regex の入力を有界にし、破滅的追跡を抑える。 */
+        std::string test = lines[i];
+        if (opt_.max_line_bytes > 0 && (long)test.size() > opt_.max_line_bytes) {
+            test.resize((size_t)opt_.max_line_bytes);
+            line_truncated_++;
+        }
         size_t col = 0;
-        if (!query_.match(lines[i], &col)) continue;
+        if (!query_.match(test, &col)) continue;
         hits_++;
         if (opt_.files_only) {
             if (!file_printed) { std::fprintf(out_, "%s\n", path.c_str()); file_printed = true; matched_++; }
@@ -296,9 +393,13 @@ int Searcher::run() {
     std::fprintf(out_, "seek: pattern=\"%s\" root=%s files=%ld matched=%ld hits=%ld",
                  opt_.pattern.c_str(), opt_.root.c_str(), files_, matched_, hits_);
     if (skipped_binary_) std::fprintf(out_, " binary_skipped=%ld", skipped_binary_);
+    if (skipped_stat_) std::fprintf(out_, " unreadable=%ld", skipped_stat_);
+    if (line_truncated_) std::fprintf(out_, " long_lines=%ld", line_truncated_);
+    std::fprintf(out_, " bytes=%lld", bytes_read_);
     std::fprintf(out_, " elapsed=%lldms", elapsed);
     if (truncated_) std::fprintf(out_, " [limit %d]", opt_.limit);
     if (time_up_) std::fprintf(out_, " [time %dms]", opt_.time_ms);
+    if (bytes_up_) std::fprintf(out_, " [bytes %lld]", opt_.max_total_bytes);
     std::fprintf(out_, "\n");
     return hits_ > 0 ? 0 : 1;
 }
