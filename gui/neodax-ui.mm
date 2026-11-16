@@ -31,22 +31,9 @@
 #include <math.h>
 #include <dlfcn.h>
 
-#include "integration/nx_deepai.h"
-#include "integration/nx_sim.h"
-#include "integration/nx_state.h"
-#include "integration/nx_leveldb.h"
-#include "integration/attach/nx_appfix.h"
-#include "integration/spec/nx_recog.h"
-#include "integration/spec/nx_specs_builtin.h"
-#include "integration/spec/nx_gen.h"
-#include "integration/spec/nx_pe.h"
-#include "integration/spec/nx_pe_disasm.h"
-#include "integration/spec/nx_pipeline.h"
-#include "integration/plan/nx_recipe.hpp"
-#include "integration/plan/nx_strategy.hpp"
-#include "integration/plan/nx_template.hpp"
-#include "integration/plan/nx_appstore.hpp"
-#include "integration/plan/nx_bestfix.hpp"
+/* neodax の分類をまとめて使う。個別ヘッダの列挙はビルドもコードも持たない:
+ * どの分類を使うかは、この 1 行の include で決まる。 */
+#include "integration/nx_all.h"
 
 /* neodax の検索 (ABD 安全化済み) */
 extern "C" int nx_seek(const char *, const char *, const char *, int, int, int, int, FILE *);
@@ -624,7 +611,7 @@ static void cmd_delete(const char *state_path, const char *tab_id,
 
     char *fixed = NULL;
     int nrem = 0;
-    if (nx_deepai_remove_tab_json(state, strlen(state), tab_id, &fixed, &nrem,
+    if (nx_deepai_remove_kindred_json(state, strlen(state), tab_id, &fixed, &nrem,
                                   stdout) != 0) {
         printf("ERROR: cannot build fixed state\n");
         free(state);
@@ -1052,6 +1039,13 @@ static const nx_cmd_t kNxCmds[] = {
     /* --- 観測 (変更しない) --- */
     {"タブ一覧",       "観測", "tabs",                  "永続層のタブを TSV で出す"},
     {"キー一覧",       "観測", "keys",                  "KV のキー・seq・生存を C 側で列挙 (grep 代替)"},
+    {"タブのキー",     "観測", "tab-keys",              "タブが持つキーを列挙 (作業先の所在を確かめる)"},
+    {"asar 一覧",      "観測", "asar|--file|--grep",    "asar のエントリ名を C 側で列挙 (アセット名の確認)"},
+    {"asar 検索",      "観測", "asar|--file|--find",    "asar の中身を検索 (修復/復元のリンクを探す)"},
+    {"レンダラ観測",    "観測", "probe",                  "renderer の origin/scripts/localStorage キーを観測"},
+    {"手順導出",        "観測", "advise-proc",             "状態から修復手順を導出 (--apply で clean)"},
+    {"チャット台帳",    "観測", "threads|--dups|--apply|--delete", "No project の重複チャットを検出・恒久削除"},
+    {"テンプレート",    "分析", "tpl-cpp|--dir|--svg|--record", "cpp テンプレートの構成 (逆順ヘッダ)・annulus・学習"},
     {"判定 (advise)",  "観測", "advise",                "壊れているかだけ判定。変更しない"},
     {"検出 (check)",   "観測", "check",                 "閉じられない surface を検出"},
     {"計画 (plan)",    "観測", "plan",                  "事実→問題→計画を出す。変更しない"},
@@ -1064,6 +1058,7 @@ static const nx_cmd_t kNxCmds[] = {
     {"修復 (repair)",  "修復", "repair",                "観測→計画→実行→再観測を健全になるまで回す"},
     {"適用 (apply)",   "修復", "apply|--live",          "修復結果を稼働中ストアにも反映 (reload しない)"},
     {"fix のみ",       "修復", "fix",                   ".fixed.json を作るだけ (書き戻さない)"},
+    {"残滓を消す (clean)", "修復", "clean|--dry-run",     "残滓を状態から判定し、呼ぶ手順を選んで消す"},
     {"heal",           "修復", "heal",                  "検出→書き戻し→稼働中ストア再水和"},
     {"baseline",       "修復", "baseline",              "復元先を空の妥当な状態にする"},
     {"stop",           "修復", "stop",                  "起動時の状態復元を止める"},
@@ -1118,7 +1113,8 @@ static int nx_gui_exec(const char *line, char **out) {
     const char *cmd = argv[1];
     static const char *needs_state[] = {
         "tabs", "keys", "advise", "check", "plan", "replay", "simulate", "repair",
-        "apply", "fix", "heal", "attach", "case", NULL,
+        "apply", "fix", "heal", "attach", "case", "clean", "tab-keys",
+        "advise-proc", NULL,
     };
     int has_state = 0;
     for (int i = 2; i < argc; i++)
@@ -2008,6 +2004,10 @@ static void usage(void) {
         "           live surface / chat は拒否する。--force でその限りでなく実行。\n"
         "           永続層へ書き込み、同時に稼働中ストアも同じ値にする (reload なし)\n"
         "  fix      --state PATH                      タブ状態を修復\n"
+        "  clean    --state PATH [--dry-run] [--no-live] [--app NAME] [--store SUBSTR] [--key HINT]\n"
+        "           残滓を状態の形に依存せず判定し、種類と安全度から呼ぶ手順を選んで消す。\n"
+        "           順序は seq の健全性→永続層→退避の掃除→稼働中ストア (reload しない)。\n"
+        "           --dry-run は何も変更しない。--no-live は永続層だけに書く。\n"
         "  check    --state PATH                    閉じられない surface タブを検出 (変更なし)\n"
         "  heal     --state PATH [--app NAME] [--store SUBSTR] [--key HINT] [--dry-run]\n"
         "           検出→永続層へ書き戻し→稼働中ストア再水和を自動実行\n"
@@ -2057,6 +2057,192 @@ static int nx_cli_dispatch(int argc, char **argv) {
             const char *st = state_or_default(flag(argc, argv, "--state"), "keys");
             if (!st) return 1;
             cmd_keys(st);
+        } else if (strcmp(cmd, "tab-keys") == 0) {
+            /* タブが持つキーの列挙 (診断用)。作業先がどのキーかを確かめる。 */
+            const char *st = state_or_default(flag(argc, argv, "--state"), "tab-keys");
+            if (!st) return 1;
+            char *js = nx_deepai_load_state(st);
+            if (!js) { printf("ERROR: no state at %s\n", st); return 1; }
+            nx_deepai_dump_keys(js, stdout);
+            free(js);
+        } else if (strcmp(cmd, "threads") == 0) {
+            /* サイドバー (No project) のチャット台帳。重複は event と projection の
+               両方から消す (片方だけだと再構築で戻る)。 */
+            const char *db = flag(argc, argv, "--db");
+            if (has_flag(argc, argv, "--list")) {
+                return nx_threads_list(db, stdout, has_flag(argc, argv, "--deleted")) == 0 ? 0 : 1;
+            }
+            const char *del = flag(argc, argv, "--delete");
+            if (del && *del) return nx_threads_delete(db, del, stdout) == 0 ? 0 : 1;
+            int within = 600;
+            const char *w = flag(argc, argv, "--within");
+            if (w) within = atoi(w);
+            int apply = has_flag(argc, argv, "--apply");
+            /* いまタブが参照している会話は消さない (protect)。
+               残す基準は updated_at ではなく「タブ参照 → 原本」の順。 */
+            char protect[8192] = {0};
+            char *st = nx_deepai_load_state(NULL);
+            if (st) {
+                nx_json_t *root = nx_json_parse(st, strlen(st));
+                if (root) {
+                    const nx_json_t *sn = nx_json_get(root, "state");
+                    const nx_json_t *tb = nx_json_get(sn ? sn : root, "tabs");
+                    if (tb && tb->type == NX_JSON_ARR) {
+                        size_t o = 0;
+                        for (size_t i = 0; i < tb->n; i++) {
+                            const nx_json_t *tg = nx_json_get(nx_json_at(tb, i), "target");
+                            const nx_json_t *ref = tg ? nx_json_get(tg, "threadRef") : NULL;
+                            const char *th = ref ? nx_json_str(nx_json_get(ref, "threadId")) : NULL;
+                            if (!th) continue;
+                            size_t n = strlen(th);
+                            if (o + n + 2 >= sizeof(protect)) break;
+                            if (o) protect[o++] = ',';
+                            memcpy(protect + o, th, n); o += n;
+                        }
+                    }
+                    nx_json_free(root);
+                }
+                free(st);
+            }
+            int rc = nx_threads_dups(db, stdout, within, apply, protect);
+            return rc == 0 ? 0 : 1;
+        } else if (strcmp(cmd, "advise-proc") == 0) {
+            /* 分析も fix も neodax の中で閉じる: 状態 → 手順 → (apply) clean → 再導出。 */
+            /* --state 省略時は nx_deepai_load_state が既知の場所を解決する。 */
+            const char *st = flag(argc, argv, "--state");
+            int apply = has_flag(argc, argv, "--apply");
+            if (!apply) return nx_advisor_derive(st, stdout) == 0 ? 0 : 1;
+            /* 導出した手順を実行する: 正規化 → 永続層 → 全ウィンドウの store。 */
+            nx_advisor_derive(st, stdout);
+            char *raw = nx_deepai_load_state(st);
+            if (!raw) { printf("advise-proc: 状態を読めない\n"); return 1; }
+            char *fixed = NULL;
+            int nfix = 0;
+            if (nx_deepai_normalize_ids_json(raw, strlen(raw), &fixed, &nfix, stdout) != 0 || !fixed) {
+                free(raw);
+                printf("advise-proc: 正規化できない\n");
+                return 1;
+            }
+            free(raw);
+            printf("STEP normalize: %d\n", nfix);
+            int rc = 0;
+            /* 次に duplicate (同じ thread+種別) を 1 枚に。 */
+            {
+                char *deduped = NULL;
+                int nd = 0;
+                if (nx_deepai_dedupe_kindred_json(fixed, strlen(fixed), &deduped, &nd, stdout) == 0 && deduped) {
+                    printf("STEP dedupe: %d\n", nd);
+                    free(fixed);
+                    fixed = deduped;
+                    nfix += nd;
+                }
+            }
+            if (nfix > 0) {
+                rc = write_fixed_to_leveldb(st, NULL, fixed, 1);
+                nx_appfix_profile_t prof = *nx_appfix_default_profile();
+                char dirbuf[4096];
+                snprintf(dirbuf, sizeof(dirbuf), "%s", st);
+                NSFileManager *dfm = [NSFileManager defaultManager];
+                BOOL isd = NO;
+                [dfm fileExistsAtPath:[NSString stringWithUTF8String:st] isDirectory:&isd];
+                if (!isd) { char *sl = strrchr(dirbuf, '/'); if (sl) *sl = 0; }
+                prof.key = NULL;
+                nx_appfix_apply(&prof, fixed, strlen(fixed), stdout);
+            }
+            free(fixed);
+            printf("RE-DERIVE\n");
+            nx_advisor_derive(st, stdout);
+            return rc == 0 ? 0 : 1;
+        } else if (strcmp(cmd, "tpl-cpp") == 0) {
+            /* 1 テンプレート = 1 .cpp。構成は cpp 内のヘッダに逆順で。
+               ここで app の表示を置き換えない (解析用の一覧/SVG のみ)。 */
+            nx_tpl_graph_t g;
+            const char *dir = flag(argc, argv, "--dir");
+            if (nx_tplcpp_scan(dir, &g) != 0) {
+                printf("no templates (dir: %s)\n", dir ? dir : nx_tplcpp_default_dir());
+                return 1;
+            }
+            nx_tplcpp_dump(&g, stdout);
+            const char *svg = flag(argc, argv, "--svg");
+            if (svg) nx_tplcpp_svg(&g, svg, stdout);
+            const char *rec = flag(argc, argv, "--record");
+            if (rec) nx_tplcpp_record(&g, rec, !has_flag(argc, argv, "--ng"), stdout);
+            nx_tplcpp_free(&g);
+            return 0;
+        } else if (strcmp(cmd, "probe") == 0) {
+            /* レンダラの環境を C 生成の固定 JS で観測する (何も変更しない)。 */
+            const char *app = flag(argc, argv, "--app");
+            const char *js =
+                "(function(){const r={href:location.href,origin:location.origin,"
+                "base:document.baseURI,scripts:[],res:[],ls:[]};"
+                "try{document.querySelectorAll('script[src]').forEach(s=>r.scripts.push(s.src));}catch(e){}"
+                "try{performance.getEntriesByType('resource').forEach(e=>r.res.push(e.name));}catch(e){}"
+                "try{for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(k)r.ls.push(k);}}catch(e){}"
+                "return JSON.stringify(r)})()";
+            nx_renderer_opts_t ro;
+            memset(&ro, 0, sizeof(ro));
+            ro.inspect.app_name = app ? app : "DeepAI Code";
+            ro.inspect.port = 9229;
+            ro.window_index = 0;
+            return nx_renderer_eval_js(&ro, js, stdout) == 0 ? 0 : 1;
+        } else if (strcmp(cmd, "asar") == 0) {
+            /* asar の診断。
+               --grep SUBSTR : エントリ名で絞る
+               --find TEXT   : 中身 (JS) を検索し、どのモジュールが触っているかを見る
+               修復/復元の「リンの先」を探すために、キー名で中身を直接引く。 */
+            const char *f = flag(argc, argv, "--file");
+            const char *g = flag(argc, argv, "--grep");
+            const char *find = flag(argc, argv, "--find");
+            const char *ctxs = flag(argc, argv, "--context");
+            const char *lims = flag(argc, argv, "--limit");
+            int ctx = ctxs ? atoi(ctxs) : 1;
+            int lim = lims ? atoi(lims) : 40;
+            if (!f) { fprintf(stderr, "asar: --file required\n"); return 1; }
+            nx_asar_t *a = nx_asar_open(f);
+            if (!a) { printf("asar: not an archive: %s\n", f); return 1; }
+            if (!find || !*find) {
+                printf("ENTRIES\t%zu\n", a->n_entries);
+                for (size_t i = 0; i < a->n_entries; i++) {
+                    const char *p = a->entries[i].path;
+                    if (g && *g && !strstr(p, g)) continue;
+                    printf("%s\t%zu\n", p, a->entries[i].size);
+                }
+                nx_asar_free(a);
+            } else {
+                int hits = 0;
+                for (size_t i = 0; i < a->n_entries && hits < lim; i++) {
+                    const char *p = a->entries[i].path;
+                    if (g && *g && !strstr(p, g)) continue;
+                    if (!strstr(p, ".js") && !strstr(p, ".mjs") &&
+                        !strstr(p, ".cjs") && !strstr(p, ".json")) continue;
+                    char *txt = nx_asar_read_text(a, &a->entries[i]);
+                    if (!txt) continue;
+                    char *line = txt;
+                    int no = 1;
+                    while (line && *line && hits < lim) {
+                        char *nl = strchr(line, '\n');
+                        size_t len = nl ? (size_t)(nl - line) : strlen(line);
+                        char keep = line[len];
+                        line[len] = 0;
+                        if (strstr(line, find)) {
+                            const char *hit = strstr(line, find);
+                            int win = ctxs ? atoi(ctxs) : 120; /* --context を前後の文字数として使う */
+                            long left = (long)(hit - line);
+                            const char *s = line + (left > win ? left - win : 0);
+                            int room = win * 2 + (int)strlen(find) + 1;
+                            printf("%s:%d\t%.*s\n", p, no, room, s);
+                            hits++;
+                        }
+                        line[len] = keep;
+                        if (!nl) break;
+                        line = nl + 1;
+                        no++;
+                    }
+                    free(txt);
+                }
+                printf("HITS\t%d\n", hits);
+                nx_asar_free(a);
+            }
         } else if (strcmp(cmd, "close") == 0) {
             const char *st = flag(argc, argv, "--state");
             const char *id = flag(argc, argv, "--id");
@@ -2190,6 +2376,20 @@ static int nx_cli_dispatch(int argc, char **argv) {
             st = state_or_default(st, "fix");
             if (!st) return 1;
             return nx_deepai_fix_path(st, stdout);
+        } else if (strcmp(cmd, "clean") == 0) {
+            /* 残滓を状態から判定し、種類と安全度から呼ぶ手順を選んで消す。
+               --dry-run で変更なし。--no-live で永続層だけ。 */
+            const char *st = flag(argc, argv, "--state");
+            st = state_or_default(st, "clean");
+            if (!st) return 1;
+            nx_clean_opts_t o;
+            nx_clean_opts_default(&o);
+            o.live = !has_flag(argc, argv, "--no-live");
+            o.dry_run = has_flag(argc, argv, "--dry-run");
+            o.app = flag(argc, argv, "--app");
+            o.store = flag(argc, argv, "--store");
+            o.key = flag(argc, argv, "--key");
+            return nx_clean_state(st, &o, stdout);
         } else if (strcmp(cmd, "check") == 0) {
             const char *st = flag(argc, argv, "--state");
             st = state_or_default(st, "check");

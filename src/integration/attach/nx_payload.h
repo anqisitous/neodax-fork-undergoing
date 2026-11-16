@@ -38,6 +38,12 @@ char *nx_payload_build_remove_key(const char *store_substr, const char *key,
 /* 任意の localStorage キーを読む JS。 */
 char *nx_payload_build_read_key(const char *key);
 
+/* ストア定義を含む JS チャンクのファイル名 (ヒント) を設定する。
+   レンダラは 1 本のエントリ JS しか resource に出さないことがあり、
+   URL の列挙だけではストアのチャンクに届かない。C 側が asar から
+   キーを含むチャンク名を求めて、ここで渡す。NULL/空で無効。 */
+void nx_payload_set_module_hint(const char *name);
+
 /* 起動時の「状態復元」を止める JS。
    - key_prefix に前方一致する localStorage キーをすべて除去する
    - store_substr が与えられれば、その persist ストアの保存内容も消す

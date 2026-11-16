@@ -3,6 +3,7 @@ bin/
 *.o
 *.o.tmp
 *.dSYM/
+src/lib/
 neodax
 neodax.exe
 js/neodax.node

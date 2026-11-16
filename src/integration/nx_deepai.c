@@ -339,6 +339,257 @@ int nx_deepai_remove_tab_json(const char *json, size_t len, const char *tab_id,
     return rc;
 }
 
+/* タブ id を実体 (threadRef) に合わせて正規化する。
+   - ["draft",X] で threadRef がある → ["chat",env,threadId] に直す
+     (アプリは初回送信で id を書き換えるが、worktree 起動などで
+      取り残されると draft のまま残り、同じ会話が 2 つに見える)
+   - 正規化の結果すでに同じ id があれば、その重複は落とす
+   - threadRef も env も無い空 draft は落とす (実体が無い)
+   戻り値 0=成功。n_fixed に変更 (書換+除去) 件数。 */
+/* tab の raw から "id" の配列だけを差し替える。他のフィールドは保存。 */
+/* JSON 文字列をエスケープして追加する。id は「JSON 配列を中身に持つ
+   文字列」なので、書き戻すときは \" へ戻す必要がある。 */
+static void sb_add_jstr(sbuf_t *b, const char *s) {
+    sb_addc(b, '"');
+    for (const char *p = s; p && *p; p++) {
+        if (*p == '"' || *p == '\\') { sb_addc(b, '\\'); sb_addc(b, *p); }
+        else sb_addc(b, *p);
+    }
+    sb_addc(b, '"');
+}
+
+static int splice_id(const char *raw, size_t n, const char *newid, sbuf_t *b) {
+    const char *p = raw, *endp = raw + n;
+    while (p + 4 < endp && !(p[0] == '"' && p[1] == 'i' && p[2] == 'd' && p[3] == '"')) p++;
+    if (p + 4 >= endp) { sb_add(b, raw, n); return 0; }
+    const char *q = p + 4;
+    while (q < endp && *q != '[') q++;
+    if (q >= endp) { sb_add(b, raw, n); return 0; }
+    int depth = 0, instr = 0;
+    const char *r = q;
+    for (; r < endp; r++) {
+        if (*r == '"' && (r == q || r[-1] != '\\')) instr = !instr;
+        if (instr) continue;
+        if (*r == '[') depth++;
+        else if (*r == ']') { depth--; if (!depth) { r++; break; } }
+    }
+    if (r > endp) { sb_add(b, raw, n); return 0; }
+    sb_add(b, raw, (size_t)(q - raw));
+    /* q の直前が '"' なら id は文字列。中身の " をエスケープする。 */
+    int as_string = q > raw && q[-1] == '"';
+    if (as_string) {
+        for (const char *p = newid; *p; p++) {
+            if (*p == '"') { sb_addc(b, '\\'); }
+            sb_addc(b, *p);
+        }
+    } else {
+        sb_adds(b, newid);
+    }
+    sb_add(b, r, (size_t)(endp - r));
+    return 1;
+}
+
+int nx_deepai_normalize_ids_json(const char *json, size_t len,
+                                 char **out, int *n_fixed, FILE *log) {
+    if (out) *out = NULL;
+    if (n_fixed) *n_fixed = 0;
+    if (!json) return -1;
+    nx_json_t *root = nx_json_parse(json, len);
+    if (!root) return -1;
+    const nx_json_t *state = wx_state_node(root);
+    const nx_json_t *tabs = state ? nx_json_get(state, "tabs") : NULL;
+    if (!tabs || tabs->type != NX_JSON_ARR) { nx_json_free(root); return -1; }
+
+    char **oldids = (char **)calloc(tabs->n + 1, sizeof(char *));
+    char **newids = (char **)calloc(tabs->n + 1, sizeof(char *));
+    const nx_json_t **keep = (const nx_json_t **)calloc(tabs->n + 1, sizeof(void *));
+    int nk = 0, nfix = 0;
+    if (!oldids || !newids || !keep) {
+        free(oldids); free(newids); free(keep); nx_json_free(root); return -1;
+    }
+
+    for (size_t i = 0; i < tabs->n; i++) {
+        const nx_json_t *tab = nx_json_at(tabs, i);
+        const char *id = nx_json_str(nx_json_get(tab, "id"));
+        const nx_json_t *tg = nx_json_get(tab, "target");
+        const nx_json_t *ref = tg ? nx_json_get(tg, "threadRef") : NULL;
+        const char *env = ref ? nx_json_str(nx_json_get(ref, "environmentId")) : NULL;
+        const char *th = ref ? nx_json_str(nx_json_get(ref, "threadId")) : NULL;
+        int is_draft = id && strstr(id, "[\"draft\"") != NULL;
+
+        if (is_draft && env && th) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "[\"chat\",\"%s\",\"%s\"]", env, th);
+            int dup = 0;
+            for (int k = 0; k < nk; k++) if (!strcmp(newids[k], buf)) dup = 1;
+            if (dup) { nfix++; if (log) fprintf(log, "    = drop duplicate: %s\n", id); continue; }
+            oldids[nk] = x_strdup(id); newids[nk] = x_strdup(buf); keep[nk] = tab; nk++;
+            nfix++;
+            if (log) fprintf(log, "    ~ normalize: %s -> %s\n", id, buf);
+        } else if (is_draft && !th) {
+            nfix++;
+            if (log) fprintf(log, "    = drop empty draft: %s\n", id);
+        } else if (id) {
+            oldids[nk] = x_strdup(id); newids[nk] = x_strdup(id); keep[nk] = tab; nk++;
+        }
+    }
+    if (n_fixed) *n_fixed = nfix;
+
+    sbuf_t b; memset(&b, 0, sizeof(b));
+    const char *raw;
+    sb_adds(&b, "{\"state\":{\"tabs\":[");
+    for (int i = 0; i < nk; i++) {
+        if (i) sb_addc(&b, ',');
+        size_t n = nx_json_raw(keep[i], &raw);
+        if (!strcmp(oldids[i], newids[i])) sb_add(&b, raw, n);
+        else splice_id(raw, n, newids[i], &b);
+    }
+    sb_adds(&b, "],\"activeId\":");
+    const char *aid = nx_json_str(nx_json_get(state, "activeId"));
+    const char *mapped = NULL;
+    for (int i = 0; i < nk; i++) if (aid && !strcmp(aid, oldids[i])) mapped = newids[i];
+    if (mapped) sb_add_jstr(&b, mapped);
+    else sb_adds(&b, "null");
+
+    sb_adds(&b, ",\"recentIds\":[");
+    const nx_json_t *recent = nx_json_get(state, "recentIds");
+    int rf = 1;
+    if (recent && recent->type == NX_JSON_ARR) {
+        for (size_t i = 0; i < recent->n; i++) {
+            const char *rid = nx_json_str(nx_json_at(recent, i));
+            if (!rid) continue;
+            const char *to = NULL;
+            for (int k = 0; k < nk; k++) if (!strcmp(rid, oldids[k])) { to = newids[k]; break; }
+            if (!to) continue;
+            if (!rf) sb_addc(&b, ',');
+            rf = 0;
+            sb_add_jstr(&b, to);
+        }
+    }
+    sb_adds(&b, "]}");
+    const nx_json_t *ver = nx_json_get(root, "version");
+    if (ver) { size_t n = nx_json_raw(ver, &raw); sb_adds(&b, ",\"version\":"); sb_add(&b, raw, n); }
+    sb_addc(&b, '}');
+    if (out) *out = b.p; else free(b.p);
+
+    for (int i = 0; i < nk; i++) { free(oldids[i]); free(newids[i]); }
+    free(oldids); free(newids); free(keep);
+    nx_json_free(root);
+    return 0;
+}
+
+/* 同じ threadRef + target.kind のタブが複数あるとき、最初の 1 枚だけ残す。
+   chat と surface は種別が違うので別物として扱う (正規の対)。 */
+int nx_deepai_dedupe_kindred_json(const char *json, size_t len,
+                                  char **out, int *n_removed, FILE *log) {
+    if (out) *out = NULL;
+    if (n_removed) *n_removed = 0;
+    if (!json) return -1;
+    nx_json_t *root = nx_json_parse(json, len);
+    if (!root) return -1;
+    const nx_json_t *state = wx_state_node(root);
+    const nx_json_t *tabs = state ? nx_json_get(state, "tabs") : NULL;
+    if (!tabs || tabs->type != NX_JSON_ARR) { nx_json_free(root); return -1; }
+
+    char **seen = (char **)calloc(tabs->n + 1, sizeof(char *));
+    int nseen = 0;
+    char **removed = (char **)calloc(tabs->n + 1, sizeof(char *));
+    int nrem = 0;
+    if (!seen || !removed) { free(seen); free(removed); nx_json_free(root); return -1; }
+
+    for (size_t i = 0; i < tabs->n; i++) {
+        const nx_json_t *tab = nx_json_at(tabs, i);
+        const char *id = nx_json_str(nx_json_get(tab, "id"));
+        const nx_json_t *tg = nx_json_get(tab, "target");
+        const nx_json_t *ref = tg ? nx_json_get(tg, "threadRef") : NULL;
+        const char *th = ref ? nx_json_str(nx_json_get(ref, "threadId")) : NULL;
+        const char *k = tg ? nx_json_str(nx_json_get(tg, "kind")) : NULL;
+        if (!id || !th) continue;
+        char key[512];
+        snprintf(key, sizeof(key), "%s|%s", th, k ? k : "?");
+        int dup = 0;
+        for (int s = 0; s < nseen; s++) if (!strcmp(seen[s], key)) dup = 1;
+        if (dup) {
+            removed[nrem++] = x_strdup(id);
+            if (log) fprintf(log, "    = drop duplicate tab: %s\n", id);
+            continue;
+        }
+        seen[nseen++] = x_strdup(key);
+    }
+    if (n_removed) *n_removed = nrem;
+
+    int rc = nrem > 0 ? rebuild_state(root, state, tabs, removed, nrem, out) : 0;
+    if (nrem == 0 && out) { *out = x_strdup(json); }
+    for (int i = 0; i < nseen; i++) free(seen[i]);
+    for (int i = 0; i < nrem; i++) free(removed[i]);
+    free(seen); free(removed);
+    nx_json_free(root);
+    return rc;
+}
+
+/* 同じ実体を指す「同種の」タブをまとめて除去する。
+   なぜ id 一致だけでは足りないか:
+     アプリは surface タブの id を表示に合わせて書き換える
+     (file:... -> diff 等)。id 文字列で 1 枚だけ消すと、次の描画で
+     同じ threadRef のタブが別 id として復活する。
+   ここでは「threadRef + target.kind」を同一性とみなし、まとめて落とす。
+   chat は消さない (surface だけ等、種別を跨がない)。 */
+int nx_deepai_remove_kindred_json(const char *json, size_t len, const char *tab_id,
+                                  char **out, int *n_removed, FILE *log) {
+    if (out) *out = NULL;
+    if (n_removed) *n_removed = 0;
+    if (!json || !tab_id) return -1;
+    nx_json_t *root = nx_json_parse(json, len);
+    if (!root) return -1;
+    const nx_json_t *state = wx_state_node(root);
+    const nx_json_t *tabs = state ? nx_json_get(state, "tabs") : NULL;
+    if (!tabs || tabs->type != NX_JSON_ARR) { nx_json_free(root); return -1; }
+
+    const char *want_thread = NULL;
+    const char *want_kind = NULL;
+    for (size_t i = 0; i < tabs->n; i++) {
+        const nx_json_t *tab = nx_json_at(tabs, i);
+        const char *id = nx_json_str(nx_json_get(tab, "id"));
+        if (!id || strcmp(id, tab_id) != 0) continue;
+        const nx_json_t *tg = nx_json_get(tab, "target");
+        const nx_json_t *ref = tg ? nx_json_get(tg, "threadRef") : NULL;
+        want_thread = ref ? nx_json_str(nx_json_get(ref, "threadId")) : NULL;
+        want_kind = tg ? nx_json_str(nx_json_get(tg, "kind")) : NULL;
+        break;
+    }
+
+    char **removed = (char **)calloc(tabs->n + 1, sizeof(char *));
+    int nrem = 0;
+    if (!removed) { nx_json_free(root); return -1; }
+    for (size_t i = 0; i < tabs->n; i++) {
+        const nx_json_t *tab = nx_json_at(tabs, i);
+        const char *id = nx_json_str(nx_json_get(tab, "id"));
+        if (!id) continue;
+        int hit = strcmp(id, tab_id) == 0;
+        if (!hit && want_thread) {
+            const nx_json_t *tg = nx_json_get(tab, "target");
+            const nx_json_t *ref = tg ? nx_json_get(tg, "threadRef") : NULL;
+            const char *th = ref ? nx_json_str(nx_json_get(ref, "threadId")) : NULL;
+            const char *k = tg ? nx_json_str(nx_json_get(tg, "kind")) : NULL;
+            if (th && strcmp(th, want_thread) == 0 &&
+                (!want_kind || !k || strcmp(k, want_kind) == 0))
+                hit = 1;
+        }
+        if (hit) {
+            removed[nrem++] = x_strdup(id);
+            if (log && !(strcmp(id, tab_id) == 0))
+                fprintf(log, "    - remove kindred tab: %s\n", id);
+        }
+    }
+    if (n_removed) *n_removed = nrem;
+
+    int rc = rebuild_state(root, state, tabs, removed, nrem, out);
+    for (int i = 0; i < nrem; i++) free(removed[i]);
+    free(removed);
+    nx_json_free(root);
+    return rc;
+}
+
 /* 所有スレッドを失った surface タブ (閉じられないタブ) の id を集める。
    log が非 NULL なら各件を出力する。戻り値は件数。 */
 static int collect_stuck_surfaces(const nx_json_t *tabs, char ***out_ids, FILE *log) {
@@ -701,6 +952,43 @@ int nx_deepai_dump_state(const char *json, FILE *out) {
                 (active && id && strcmp(active, id) == 0) ? "yes" : "no",
                 kind ? kind : "", sid ? sid : "",
                 env ? env : "", th ? th : "", id ? id : "");
+    }
+    nx_json_free(root);
+    return 0;
+}
+
+/* タブ 1 件が持つキーを列挙する (診断用)。
+   作業先 (パス/ディレクトリ) がどのキーに入っているかを C 側で確かめる。 */
+static void dump_obj(const nx_json_t *obj, const char *prefix, FILE *out) {
+    if (!obj || obj->type != NX_JSON_OBJ) return;
+    for (size_t k = 0; k < obj->n; k++) {
+        const nx_json_t *v = obj->items[k];
+        const char *s = nx_json_str(v);
+        fprintf(out, "  %s%-20s %-6s %s\n", prefix ? prefix : "", obj->keys[k],
+                v->type == NX_JSON_OBJ ? "obj" :
+                v->type == NX_JSON_ARR ? "arr" :
+                v->type == NX_JSON_STR ? "str" : "other",
+                s ? s : "");
+    }
+}
+
+int nx_deepai_dump_keys(const char *json, FILE *out) {
+    if (!out) out = stdout;
+    if (!json) return -1;
+    nx_json_t *root = nx_json_parse(json, strlen(json));
+    if (!root) { fprintf(out, "  (invalid json)\n"); return -1; }
+    const nx_json_t *st = wx_state_node(root);
+    const nx_json_t *tabs = st ? nx_json_get(st, "tabs") : NULL;
+    if (!tabs) { fprintf(out, "  (no tabs)\n"); nx_json_free(root); return -1; }
+
+    for (size_t i = 0; i < tabs->n; i++) {
+        const nx_json_t *tab = nx_json_at(tabs, i);
+        fprintf(out, "tab[%zu]\n", i);
+        dump_obj(tab, "", out);
+        dump_obj(nx_json_get(tab, "target"), "target.", out);
+        const nx_json_t *tg = nx_json_get(tab, "target");
+        dump_obj(nx_json_get(tg, "threadRef"), "threadRef.", out);
+        dump_obj(nx_json_get(tg, "session"), "session.", out);
     }
     nx_json_free(root);
     return 0;

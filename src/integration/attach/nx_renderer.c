@@ -29,8 +29,10 @@ int nx_renderer_eval_js(const nx_renderer_opts_t *opts, const char *payload_js,
     if (!out) out = stdout;
     if (!payload_js) return -1;
 
-    int widx = opts ? opts->window_index : 0;
-    if (widx < 0) widx = 0;
+    /* window_index < 0 は「全ウィンドウ」。各窓が別ストアを持つため、
+       1 枚だけ直すと他の窓が古い値を persist して削除が復活する。 */
+    int widx = opts ? opts->window_index : -1;
+    if (widx >= 0) { /* 指定窓のみ */ }
 
     /* レンダラ側で実行する JS のソースを JSON 文字列化 */
     char *jsjson = jes(payload_js);
@@ -46,14 +48,22 @@ int nx_renderer_eval_js(const nx_renderer_opts_t *opts, const char *payload_js,
         "(function(){try{"
         "const e=process.mainModule.require('electron');"
         "const ws=e.BrowserWindow.getAllWindows();"
-        "const w=ws[%d];"
-        "if(!w)return JSON.stringify({err:'no window at index %d',count:ws.length});"
+        "if(!ws.length)return JSON.stringify({err:'no window',count:0});"
+        "/* ウィンドウごとに別のストア (zustand) を持つ。1 枚だけ直すと、"
+        "   他の窓が古い値を persist して「削除が復活」する。全窓に同じ値を書く。 */"
+        "const only=%d;"
+        "const list=(only>=0&&ws[only])?[ws[only]]:ws;"
         "globalThis.__NX_RESULT=null;"
-        "w.webContents.executeJavaScript(%s).then(v=>{globalThis.__NX_RESULT=v})"
-        ".catch(err=>{globalThis.__NX_RESULT=JSON.stringify({err:'executeJavaScript failed: '+err.message})});"
+        "Promise.all(list.map(w=>w.webContents.executeJavaScript(%s)"
+        ".then(v=>({ok:true,v})).catch(err=>({ok:false,err:err.message}))))"
+        ".then(rs=>{"
+        "  const bad=rs.filter(r=>!r.ok);"
+        "  if(bad.length)globalThis.__NX_RESULT=JSON.stringify({err:'executeJavaScript failed',detail:bad[0].err});"
+        "  else globalThis.__NX_RESULT=JSON.stringify({windows:rs.length,results:rs.map(r=>r.v)});"
+        "});"
         "return 'sent'"
         "}catch(err){return JSON.stringify({err:'main: '+err.message})}})()",
-        widx, widx, jsjson);
+        widx, jsjson);
     free(jsjson);
     if (!expr) return -1;
 

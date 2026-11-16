@@ -4,6 +4,12 @@
 #include <string.h>
 #include <stdio.h>
 
+static char g_module_hint[256];
+
+void nx_payload_set_module_hint(const char *name) {
+    snprintf(g_module_hint, sizeof(g_module_hint), "%s", name ? name : "");
+}
+
 char *nx_b64_encode(const char *data, size_t len) {
     static const char *T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     size_t olen = ((len + 2) / 3) * 4 + 1;
@@ -23,9 +29,19 @@ char *nx_b64_encode(const char *data, size_t len) {
     return out;
 }
 
-/* ストアを解決する共通前置き JS (export_names を順に試す) */
+/* ストアを解決する共通前置き JS。
+ *
+ * なぜ URL の部分一致では足りないか:
+ *   この版ではストア定義が `WorkspaceTabs-*.js` ではなく、別チャンク
+ *   (FadeTruncate-*.js) に入っている。名前で 1 つに絞ると取り違える。
+ *
+ * そこで、読み込み済みの JS チャンクを順に import し、
+ *   persist.getOptions().name === key
+ * で「永続化キーが一致するストア」を選ぶ。名前ではなく中身で同定する。
+ * subs に一致する URL を先に試し、見つからなければ全チャンクを試す。
+ */
 static void append_store_resolve(char *js, size_t cap, const char *store_substr,
-                                 const char *export_names) {
+                                 const char *key, const char *export_names) {
     if (!export_names || !*export_names) export_names = "default";
     char names[256];
     snprintf(names, sizeof(names), "%s", export_names);
@@ -44,19 +60,34 @@ static void append_store_resolve(char *js, size_t cap, const char *store_substr,
 
     size_t cur = strlen(js);
     snprintf(js + cur, cap - cur,
-        "const subs='%s';"
-        "const seen=[];"
-        "const add=u=>{if(u&&u.indexOf(subs)>=0&&seen.indexOf(u)<0)seen.push(u);};"
-        "try{performance.getEntriesByType('resource').forEach(e=>add(e.name));}catch(e){}"
-        "try{document.querySelectorAll('script[src],link[href]').forEach(el=>add(el.src||el.href));}catch(e){}"
-        "if(!seen.length)return JSON.stringify({err:'store asset not loaded',subs});"
-        "const mod=await import(seen[seen.length-1]);"
-        "const candidates=%s;"
-        "let store=null;"
-        "for(const nm of candidates){if(mod[nm]&&typeof mod[nm].getState==='function'){store=mod[nm];break;}}"
-        "if(!store){for(const k of Object.keys(mod)){const v=mod[k];if(v&&typeof v.getState==='function'&&typeof v.setState==='function'){store=v;break;}}}"
-        "if(!store)return JSON.stringify({err:'no store',keys:Object.keys(mod)});",
-        store_substr, js_names);
+        "const subs='%s';const KEY='%s';"
+        "const cand=[];const push=u=>{if(u&&/\.js(\\?|$)/.test(u)&&cand.indexOf(u)<0)cand.push(u);};"
+        "try{performance.getEntriesByType('resource').forEach(e=>push(e.name));}catch(e){}"
+        "try{document.querySelectorAll('script[src]').forEach(el=>push(el.src));}catch(e){}"
+        "/* ストアを含むチャンク名 (C 側が asar から渡す) を先頭に。 */"
+        "const hint='%s';"
+        "const script0=(function(){try{return document.querySelector('script[src]');}catch(e){return null;}})();"
+        "const dir=script0&&script0.src?script0.src.replace(/[^/]*$/,''):(location.origin+'/assets/');"
+        "const pref=(hint?[dir+hint]:[]).concat(cand.filter(u=>u.indexOf(subs)>=0));"
+        "const order=pref.concat(cand.filter(u=>pref.indexOf(u)<0)).slice(0,120);"
+        "if(!order.length)return JSON.stringify({err:'no scripts loaded',subs});"
+        "const isStore=v=>v&&typeof v.getState==='function'&&typeof v.setState==='function';"
+        "const named=v=>{try{const op=v.persist&&v.persist.getOptions&&v.persist.getOptions();return !!op&&op.name===KEY;}catch(e){return false;}};"
+        "let store=null,fallback=null;"
+        "const names=%s;"
+        "for(const u of order){"
+        "  let mod=null;try{mod=await import(u);}catch(e){continue;}"
+        "  for(const nm of names){const v=mod[nm];if(isStore(v)&&named(v)){store=v;break;}}"
+        "  if(!store)for(const k of Object.keys(mod)){const v=mod[k];"
+        "    if(!isStore(v))continue;"
+        "    if(named(v)){store=v;break;}"
+        "    if(!fallback&&u.indexOf(subs)>=0)fallback=v;"
+        "  }"
+        "  if(store)break;"
+        "}"
+        "if(!store)store=fallback;"
+        "if(!store)return JSON.stringify({err:'no store',key:KEY,tried:order.length});",
+        store_substr, key ? key : "", g_module_hint, js_names);
 }
 
 char *nx_payload_build_rehydrate(const char *store_substr,
@@ -66,7 +97,7 @@ char *nx_payload_build_rehydrate(const char *store_substr,
     char *b64 = NULL;
     if (value && value_len > 0) b64 = nx_b64_encode(value, value_len);
 
-    size_t cap = 8192 + (b64 ? strlen(b64) : 0);
+    size_t cap = 32768 + (b64 ? strlen(b64) : 0);
     char *js = (char *)malloc(cap);
     if (!js) { free(b64); return NULL; }
     js[0] = 0;
@@ -82,7 +113,7 @@ char *nx_payload_build_rehydrate(const char *store_substr,
             "localStorage.setItem('%s',val);}",
             b64, key);
     }
-    append_store_resolve(js, cap, store_substr, export_names);
+    append_store_resolve(js, cap, store_substr, key, export_names);
     {
         size_t cur = strlen(js);
         /* ここが肝。
@@ -111,11 +142,11 @@ char *nx_payload_build_rehydrate(const char *store_substr,
 char *nx_payload_build_remove_key(const char *store_substr, const char *key,
                                   const char *export_names) {
     if (!store_substr || !key) return NULL;
-    size_t cap = 8192;
+    size_t cap = 32768;
     char *js = (char *)malloc(cap);
     if (!js) return NULL;
     snprintf(js, cap, "(async()=>{localStorage.removeItem('%s');", key);
-    append_store_resolve(js, cap, store_substr, export_names);
+    append_store_resolve(js, cap, store_substr, key, export_names);
     {
         size_t cur = strlen(js);
         snprintf(js + cur, cap - cur,
@@ -137,7 +168,7 @@ char *nx_payload_build_read_key(const char *key) {
 char *nx_payload_build_stop_restore(const char *store_substr,
                                     const char *export_names,
                                     const char *key_prefix) {
-    size_t cap = 8192;
+    size_t cap = 32768;
     char *js = (char *)malloc(cap);
     if (!js) return NULL;
     const char *pfx = key_prefix ? key_prefix : "";
@@ -154,7 +185,7 @@ char *nx_payload_build_stop_restore(const char *store_substr,
 
     /* 2) ストアが特定できれば、その永続化内容も消す。 */
     if (store_substr && *store_substr) {
-        append_store_resolve(js, cap, store_substr, export_names);
+        append_store_resolve(js, cap, store_substr, key_prefix, export_names);
         size_t cur2 = strlen(js);
         snprintf(js + cur2, cap - cur2,
             "if(store&&store.persist&&store.persist.clearStorage){"
@@ -172,7 +203,7 @@ char *nx_payload_build_baseline_restore(const char *store_substr,
                                         const char *export_names,
                                         const char *key) {
     if (!store_substr) return NULL;
-    size_t cap = 8192;
+    size_t cap = 32768;
     char *js = (char *)malloc(cap);
     if (!js) return NULL;
     const char *k = key ? key : "";
@@ -186,7 +217,7 @@ char *nx_payload_build_baseline_restore(const char *store_substr,
         k, k);
 
     /* 2) ストアを解決する。 */
-    append_store_resolve(js, cap, store_substr, export_names);
+    append_store_resolve(js, cap, store_substr, k, export_names);
 
     /* 3) 現在の状態から「何も開いていない」妥当な状態を作って適用・永続化する。
           スキーマを知らなくても、配列を空にしてセッション選択系を消せば済む。 */

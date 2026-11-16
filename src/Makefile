@@ -78,6 +78,50 @@ TRACK_CPP_SRCS = \
 	../gui/model/nx_boxlayout.cpp
 TRACK_OBJS = $(patsubst %.cpp,%.o,$(TRACK_CPP_SRCS))
 
+# --- GUI (bin/neodax-ui) が使う実装は「分類ごとの静的ライブラリ」で与える ---
+# 分類: core / attach / spec / plan / track
+# plan/ 配下は列挙しない (新しい部品を置くだけでアーカイブに入る)。
+# リンカはアーカイブ単位で引き抜くので、どの分類を使うかは
+# コードの include (src/integration/nx_all.h) で決まる。
+LIB_DIR = ../src/lib
+CAT_CORE = \
+	$(LIB_DIR)/core_macho.o $(LIB_DIR)/core_macho_static.o $(LIB_DIR)/core_nx_decode.o \
+	$(LIB_DIR)/core_nx_update.o $(LIB_DIR)/core_nx_asar_patch.o \
+	$(LIB_DIR)/core_x86_decode.o $(LIB_DIR)/core_arm64_decode.o \
+	$(LIB_DIR)/core_nx_json.o $(LIB_DIR)/core_nx_leveldb.o $(LIB_DIR)/core_nx_state.o \
+	$(LIB_DIR)/core_nx_deepai.o $(LIB_DIR)/core_nx_sim.o \
+	$(LIB_DIR)/core_nx_threads.o
+CAT_ATTACH = $(patsubst %.c,$(LIB_DIR)/attach_%.o,$(notdir $(wildcard integration/attach/*.c)))
+CAT_SPEC = $(patsubst %.c,$(LIB_DIR)/spec_%.o,$(notdir $(wildcard integration/spec/*.c)))
+CAT_PLAN = $(patsubst %.cpp,$(LIB_DIR)/plan_%.o,$(notdir $(wildcard integration/plan/*.cpp)))
+CAT_TRACK = $(LIB_DIR)/track_advise.o $(LIB_DIR)/track_search.o
+
+# OS 固有の操作 (mac / win) は os/ 配下に分かれている。
+# 分析 (integration/) はどちらの OS でも同じ。ここで選択するのは
+# 「どの操作実装をリンクするか」だけ。
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+OS_DIR = os/mac
+else
+OS_DIR = os/win
+endif
+OS_OBJS = $(patsubst %.c,%.o,$(wildcard $(OS_DIR)/*.c)) \
+          $(patsubst %.cpp,%.o,$(wildcard $(OS_DIR)/*.cpp))
+# integrated は C ドライバでリンクするので、C++ の OS 実装は含めない。
+OS_C_OBJS = $(patsubst %.c,%.o,$(wildcard $(OS_DIR)/*.c))
+CAT_OS = $(patsubst %.c,$(LIB_DIR)/os_%.o,$(notdir $(wildcard $(OS_DIR)/*.c))) \
+         $(patsubst %.cpp,$(LIB_DIR)/os_%.o,$(notdir $(wildcard $(OS_DIR)/*.cpp)))
+
+CAT_OBJS = $(CAT_CORE) $(CAT_ATTACH) $(CAT_SPEC) $(CAT_PLAN) $(CAT_TRACK) $(CAT_OS)
+LIB_ARCHIVES = $(LIB_DIR)/libnxc_core.a $(LIB_DIR)/libnxc_attach.a \
+	$(LIB_DIR)/libnxc_spec.a $(LIB_DIR)/libnxc_plan.a $(LIB_DIR)/libnxc_track.a \
+	$(LIB_DIR)/libnxc_os.a
+# build.sh と同じフラグ (挙動を変えない)
+CAT_CXXFLAGS = -std=c++17 -O2
+# 分類の中身を「分類名なし」で include できるようにする (ヘッダを増やさない)。
+CAT_INCLUDES = -I. -I../include -Iintegration -Iintegration/attach \
+	-Iintegration/plan -I$(OS_DIR)
+
 # All source files
 ALL_SRCS = $(CORE_SRCS) $(LEGACY_SRCS) $(ANALYSIS_SRCS) $(FLOW_SRCS) $(TRACKING_SRCS) $(INTEGRATION_SRCS) $(MAIN_SRCS)
 
@@ -98,29 +142,44 @@ TARGET_INTEGRATED = $(BUILD_DIR)/neodax-integrated
 
 # Default target
 #
-# NOTE: この Makefile は旧来のビルド経路です。CLI 本体 (neodax) は
-#       リポジトリ直下の setup.sh が、GUI は gui/build.sh が担当します。
-#       解析フレームワークを単体ビルドしたい場合のみ `make framework` を使ってください。
+# この Makefile は「ビルド定義の唯一の場所」です。
+#   nx-categories : GUI (bin/neodax-ui) が使う分類ライブラリを生成
+#                   (core / attach / spec / plan / track / os)
+#   framework     : 単体 CLI (bin/neodax) と neodax-integrated
+# 入口スクリプトはこれを呼ぶだけで、オブジェクトを列挙しない。
+#   GUI : gui/build.sh  → make -C src nx-categories
+#   CLI : setup.sh      → make -C src (framework)
 all:
-	@echo "  [i] src/Makefile: 旧ビルド経路のため 'all' では何もビルドしません。"
-	@echo "      CLI  : make        (リポジトリ直下 → setup.sh)"
-	@echo "      GUI  : bash gui/build.sh"
-	@echo "      FW   : make -C src neodax"
-
+	@echo "  [i] src/Makefile: ビルド定義の唯一の場所です。"
+	@echo "      GUI 部品: make nx-categories  (gui/build.sh が呼ぶ)"
+	@echo "      CLI     : make framework     (setup.sh が呼ぶ)"
+	@echo "      GUI 起動: bash gui/build.sh"
 framework: $(TARGET) $(TARGET_INTEGRATED)
 
 # 単体 CLI: make -C src neodax
 neodax: $(TARGET)
 
 # Main static analysis tool
-$(TARGET): $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(TRACK_OBJS) main.o
+$(TARGET): $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(TRACK_OBJS) $(OS_OBJS) main.o
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^ $(LIBS)
 
 # Integrated version with full pipeline
-$(TARGET_INTEGRATED): $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) main_integrated.o
+$(TARGET_INTEGRATED): $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) $(OS_C_OBJS) main_integrated.o
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ $(LIBS)
+
+# OS 固有の操作は分類フォルダを include パスに足してコンパイルする。
+# (汎用の %.o より先に置く。make は先に一致したパターン規則を使う)
+OS_INCLUDES = $(INCLUDES) -Iintegration/attach -Iintegration -Iintegration/plan
+os/mac/%.o: os/mac/%.c
+	$(CC) $(CFLAGS) $(OS_INCLUDES) -c $< -o $@
+os/mac/%.o: os/mac/%.cpp
+	$(CXX) $(CXXFLAGS) $(OS_INCLUDES) -c $< -o $@
+os/win/%.o: os/win/%.c
+	$(CC) $(CFLAGS) $(OS_INCLUDES) -c $< -o $@
+os/win/%.o: os/win/%.cpp
+	$(CXX) $(CXXFLAGS) $(OS_INCLUDES) -c $< -o $@
 
 # Object files
 %.o: %.c
@@ -129,9 +188,54 @@ $(TARGET_INTEGRATED): $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
+# UI 部品は build.sh と同じフラグで、分類別のライブラリへ入れる。
+# (オブジェクトは lib/ にまとめ、どの中間ファイルもソース隣に散らかさない)
+$(LIB_DIR):
+	mkdir -p $@
+
+$(LIB_DIR)/core_%.o: %.c | $(LIB_DIR)
+	$(CC) $(CFLAGS) $(CAT_INCLUDES) -c $< -o $@
+$(LIB_DIR)/core_macho_static.o: core/macho_static.c | $(LIB_DIR)
+	$(CC) $(CFLAGS) $(CAT_INCLUDES) -c $< -o $@
+$(LIB_DIR)/core_nx_%.o: integration/nx_%.c | $(LIB_DIR)
+	$(CC) $(CFLAGS) $(CAT_INCLUDES) -c $< -o $@
+$(LIB_DIR)/attach_%.o: integration/attach/%.c | $(LIB_DIR)
+	$(CC) $(CFLAGS) $(CAT_INCLUDES) -c $< -o $@
+$(LIB_DIR)/spec_%.o: integration/spec/%.c | $(LIB_DIR)
+	$(CC) $(CFLAGS) $(CAT_INCLUDES) -c $< -o $@
+$(LIB_DIR)/plan_%.o: integration/plan/%.cpp | $(LIB_DIR)
+	$(CXX) $(CAT_CXXFLAGS) $(CAT_INCLUDES) -c $< -o $@
+$(LIB_DIR)/track_advise.o: integration/track/advise.cpp | $(LIB_DIR)
+	$(CXX) $(CAT_CXXFLAGS) $(CAT_INCLUDES) -c $< -o $@
+$(LIB_DIR)/track_search.o: integration/track/search.cpp | $(LIB_DIR)
+	$(CXX) $(CAT_CXXFLAGS) $(CAT_INCLUDES) -c $< -o $@
+# OS 固有の操作は選択されたフォルダ (os/mac または os/win) から取る。
+$(LIB_DIR)/os_%.o: $(OS_DIR)/%.c | $(LIB_DIR)
+	$(CC) $(CFLAGS) $(CAT_INCLUDES) -c $< -o $@
+$(LIB_DIR)/os_%.o: $(OS_DIR)/%.cpp | $(LIB_DIR)
+	$(CXX) $(CAT_CXXFLAGS) $(CAT_INCLUDES) -c $< -o $@
+
+# 分類ごとの静的ライブラリ (リンク時の引き抜き単位)
+$(LIB_DIR)/libnxc_core.a: $(CAT_CORE)
+	rm -f $@ && ar rcs $@ $^
+$(LIB_DIR)/libnxc_attach.a: $(CAT_ATTACH)
+	rm -f $@ && ar rcs $@ $^
+$(LIB_DIR)/libnxc_spec.a: $(CAT_SPEC)
+	rm -f $@ && ar rcs $@ $^
+$(LIB_DIR)/libnxc_plan.a: $(CAT_PLAN)
+	rm -f $@ && ar rcs $@ $^
+$(LIB_DIR)/libnxc_track.a: $(CAT_TRACK)
+	rm -f $@ && ar rcs $@ $^
+$(LIB_DIR)/libnxc_os.a: $(CAT_OS)
+	rm -f $@ && ar rcs $@ $^
+
+# GUI のリンクに必要なのはこの 1 つだけ。
+nx-categories: $(LIB_ARCHIVES)
+
 # Clean — in-tree オブジェクトも消す (以前は BUILD_DIR を見ていて実体を消せていなかった)
 clean:
 	rm -f $(CORE_OBJS) $(LEGACY_OBJS) $(ANALYSIS_OBJS) $(FLOW_OBJS) $(TRACKING_OBJS) $(INTEGRATION_OBJS) $(TRACK_OBJS) main.o main_integrated.o
+	rm -rf $(LIB_DIR)
 	rm -rf $(BUILD_DIR)/neodax $(BUILD_DIR)/neodax-integrated
 
 # Very clean
@@ -143,7 +247,7 @@ dep:
 	$(CC) -MM $(CFLAGS) $(INCLUDES) $(ALL_SRCS)
 
 # Phony targets
-.PHONY: all neodax framework clean veryclean dep
+.PHONY: all neodax framework clean veryclean dep nx-categories
 
 # Build individual components
 build_core: $(CORE_OBJS)

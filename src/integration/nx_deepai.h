@@ -78,6 +78,18 @@ char *nx_deepai_load_state(const char *path);
 
 /* 指定した id のタブだけを除去する (base の component/他タブは保持)。
    activeId / recentIds の参照だけ整合を取る。 */
+/* draft id を threadRef に合わせる / 空 draft を落とす。 */
+int nx_deepai_normalize_ids_json(const char *json, size_t len,
+                                 char **out, int *n_fixed, FILE *log);
+
+/* 同じ threadRef + target.kind のタブを 1 枚だけ残す。 */
+int nx_deepai_dedupe_kindred_json(const char *json, size_t len,
+                                  char **out, int *n_removed, FILE *log);
+
+/* 同じ threadRef + target.kind のタブをまとめて除去 (id 書き換え対策)。 */
+int nx_deepai_remove_kindred_json(const char *json, size_t len, const char *tab_id,
+                                 char **out, int *n_removed, FILE *log);
+
 int nx_deepai_remove_tab_json(const char *json, size_t len, const char *tab_id,
                               char **out, int *n_removed, FILE *log);
 
@@ -87,6 +99,10 @@ int nx_deepai_remove_tab_path(const char *path, const char *tab_id, FILE *out);
 
 /* タブ一覧を機械可読 (TSV) で出力する。エージェント/CLI 用。 */
 int nx_deepai_dump_state(const char *json, FILE *out);
+
+/* タブ 1 件が持つキーを列挙する (診断用)。状態の形は版ごとに変わるので、
+   どのキーに作業先 (パス/ディレクトリ) が入っているかを C 側で確かめる。 */
+int nx_deepai_dump_keys(const char *json, FILE *out);
 
 /* 実キャプチャを撮らずに、状態から「画面の再現レイアウト」を組み立てる。
    行を line 配列として返し、GUI (CGContext) と CLI (テキスト) が共有する。 */

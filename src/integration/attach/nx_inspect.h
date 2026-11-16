@@ -58,6 +58,22 @@ int nx_inspect_eval_capture(int port, const char *expression,
 int nx_inspect_run(const nx_inspect_opts_t *opts, const char *expression,
                    char **result_out, FILE *out);
 
+/* ---- OS 固有の操作 (実装は os/mac, os/win に分かれる) --------------------
+ * ここだけがプラットフォーム依存。呼び出し側 (nx_inspect.c) は
+ * この 2 つを呼ぶだけで、mac と win で同じ流れになる。 */
+
+/* pid が inspector を持つ種類 (Electron/Node) かを確かめる。
+ * SIGUSR1 を送ると macOS では既定動作が終了なので、送る前に必ず問う。 */
+int nx_os_is_inspectable(long pid);
+
+/* inspector を起動させる。mac: SIGUSR1 / win: process._debugProcess。
+ * 成功で 0。 */
+int nx_os_inspector_kick(long pid);
+
+/* プロセスの実行ファイルパスを out に書く。成功で 0。
+   asar の場所 (app バンドル) を OS 非依存に得るために使う。 */
+int nx_os_executable_path(long pid, char *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

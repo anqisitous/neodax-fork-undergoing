@@ -44,44 +44,17 @@ done
 # --- minimal CLI (GUI とは独立の別プロセス) ---
 # 画面キャプチャ + タブ状態の可読出力/選択削除/シミュレーション。
 # GUI 版の描画・操作は変更しない。
-# --- attach package (self-contained): inspect + renderer + payload + appfix ---
-ATTACH_OBJS="src/integration/attach/nx_inspect.o src/integration/attach/nx_renderer.o src/integration/attach/nx_payload.o src/integration/attach/nx_appfix.o"
-SPEC_OBJS="src/integration/spec/nx_spec.o src/integration/spec/nx_specs_builtin.o src/integration/spec/nx_recog.o src/integration/spec/nx_gen.o src/integration/spec/nx_pe.o src/integration/spec/nx_pe_disasm.o src/integration/spec/nx_pipeline.o"
-UI_OBJS="src/integration/nx_decode.o src/x86_decode.o src/arm64_decode.o src/integration/nx_json.o src/integration/nx_leveldb.o src/integration/nx_state.o src/integration/nx_deepai.o src/integration/nx_sim.o $ATTACH_OBJS $SPEC_OBJS"
-# 修復の「判断」(advise) と「計画」(nx_plan) も UI から使う。
-clang++ -std=c++17 -O2 -c -I src -I include \
-    src/integration/track/advise.cpp -o src/integration/track/advise.o
-clang++ -std=c++17 -O2 -c -I src -I include \
-    src/integration/plan/nx_plan.cpp -o src/integration/plan/nx_plan.o
-clang++ -std=c++17 -O2 -c -I src -I include \
-    src/integration/plan/nx_case.cpp -o src/integration/plan/nx_case.o
-clang++ -std=c++17 -O2 -c -I src -I include \
-    src/integration/nx_appfix_flow.cpp -o src/integration/nx_appfix_flow.o
-# nx_recipe: 書き換え手順の保存と段ごとの検証実行 (P4/P2/P3 の安全原則)
-clang++ -std=c++17 -O2 -c -I src -I include \
-    src/integration/plan/nx_recipe.cpp -o src/integration/plan/nx_recipe.o
-# nx_strategy: 観測→テンプレで介入戦略を一般探索する
-clang++ -std=c++17 -O2 -c -I src -I include \
-    src/integration/plan/nx_strategy.cpp -o src/integration/plan/nx_strategy.o
-# nx_template: 解析結果を保存し、段階的に除去する
-clang++ -std=c++17 -O2 -c -I src -I include \
-    src/integration/plan/nx_template.cpp -o src/integration/plan/nx_template.o
-# nx_appstore: 直前に起動した app の分析を app ごとに保存
-clang++ -std=c++17 -O2 -c -I src -I include \
-    src/integration/plan/nx_appstore.cpp -o src/integration/plan/nx_appstore.o
-# nx_bestfix: 動かない問題を 1 個に絞って最善を尽くす
-clang++ -std=c++17 -O2 -c -I src -I include \
-    src/integration/plan/nx_bestfix.cpp -o src/integration/plan/nx_bestfix.o
-# seek (ABD 安全化済み)
-clang++ -std=c++17 -O2 -c -I src -I include \
-    src/integration/track/search.cpp -o src/integration/track/search.o
-# nx_plan は事実を集めるのに nx_deepai / nx_state / nx_leveldb を使う。
-UI_OBJS="$UI_OBJS src/integration/track/advise.o src/integration/plan/nx_plan.o src/integration/plan/nx_case.o src/integration/plan/nx_recipe.o src/integration/plan/nx_strategy.o src/integration/plan/nx_template.o src/integration/plan/nx_appstore.o src/integration/plan/nx_bestfix.o src/integration/track/search.o"
+#
+# リンクする実装は「分類ごとの静的ライブラリ」で与える。
+# リンカはアーカイブ単位で引き抜くので、どの分類を使うかは
+# gui/neodax-ui.mm が include したヘッダで決まる。
+# ここに個別の .o を並べない (コードとビルドで同じことを 2 回書かない)。
+make -s -C src nx-categories
 clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 \
     -I src -I include \
     -framework Cocoa -framework CoreGraphics -framework ImageIO -framework CoreFoundation \
     -framework ApplicationServices \
-    gui/neodax-ui.mm $UI_OBJS -lpthread -lm \
+    gui/neodax-ui.mm src/lib/*.a -lpthread -lm -lsqlite3 \
     -o bin/neodax-ui
 echo "built: bin/neodax-ui"
 

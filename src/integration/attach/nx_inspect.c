@@ -4,14 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <signal.h>
-#include <errno.h>
 #include <time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <libproc.h>
-#include <sys/stat.h>
 
 /* ================================================================== */
 /* 小さなヘルパ                                                        */
@@ -54,32 +50,8 @@ static void sleep_ms(int ms) {
     nanosleep(&ts, NULL);
 }
 
-/* ================================================================== */
-/* プロセス解決 (macOS libproc)                                        */
-/* ================================================================== */
-
-long nx_inspect_find_pid(const char *app_name) {
-    if (!app_name || !*app_name) app_name = "Electron";
-    int npid = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
-    if (npid <= 0) return -1;
-    pid_t *pids = (pid_t *)malloc((size_t)npid + 1024);
-    if (!pids) return -1;
-    npid = proc_listpids(PROC_ALL_PIDS, 0, pids, npid + 1024);
-    if (npid <= 0) { free(pids); return -1; }
-    int count = npid / (int)sizeof(pid_t);
-    pid_t best = -1, fallback = -1;
-    for (int i = 0; i < count; i++) {
-        pid_t pid = pids[i];
-        if (pid <= 0) continue;
-        char name[256] = {0};
-        if (proc_name(pid, name, sizeof(name)) <= 0) continue;
-        if (!strstr(name, app_name)) continue;
-        if (!strstr(name, "Helper")) { best = pid; break; }   /* 本体を優先 */
-        if (fallback < 0) fallback = pid;
-    }
-    free(pids);
-    return (long)(best > 0 ? best : fallback);
-}
+/* プロセス解決は OS ごとに分かれる (os/mac/nx_proc.c, os/win/nx_proc.c)。
+ * mac 版は libproc。ここには置かない。 */
 
 /* ================================================================== */
 /* HTTP (Content-Length 準拠)                                          */
@@ -340,25 +312,8 @@ static int nx_inspect_ready(int port) {
 
 /* SIGUSR1 は Node/Electron の inspector を起動するシグナルだが、
  * macOS の既定動作は「プロセス終了」。Electron/Node でない相手に送ると
- * アプリを殺す。送る前に、相手が inspector を持つ種類かを必ず確かめる。 */
-static int nx_inspect_is_inspectable(pid_t pid) {
-    char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
-    if (proc_pidpath(pid, path, sizeof(path)) <= 0) return 0;
-    if (strstr(path, "Electron Framework") != NULL) return 1;
-    const char *base = strrchr(path, '/');
-    base = base ? base + 1 : path;
-    if (strncmp(base, "node", 4) == 0) return 1;
-    char *app = strstr(path, ".app/");
-    if (app) {
-        size_t n = (size_t)(app - path) + 4;
-        char probe[PROC_PIDPATHINFO_MAXSIZE];
-        snprintf(probe, sizeof(probe),
-                 "%.*s/Contents/Frameworks/Electron Framework.framework", (int)n, path);
-        struct stat st;
-        if (stat(probe, &st) == 0) return 1;
-    }
-    return 0;
-}
+ * アプリを殺す。送る前に、相手が inspector を持つ種類かを必ず確かめる。
+ * 検査そのものは OS 固有 (os/mac, os/win) にある。 */
 
 int nx_inspect_start(long pid, int port, int wait_ms, FILE *out) {
     if (!out) out = stdout;
@@ -368,13 +323,13 @@ int nx_inspect_start(long pid, int port, int wait_ms, FILE *out) {
 
     /* 既に inspector が居るなら、シグナルは一切送らない。 */
     if (!nx_inspect_ready(port)) {
-        if (!nx_inspect_is_inspectable((pid_t)pid)) {
+        if (!nx_os_is_inspectable(pid)) {
             fprintf(out, "  [inspect] 対象は Electron/Node ではないため SIGUSR1 を送りません"
                          " (macOS の既定動作は終了)。pid=%ld\n", pid);
             return -1;
         }
-        if (kill((pid_t)pid, SIGUSR1) != 0) {
-            fprintf(out, "  [inspect] SIGUSR1 failed: %s\n", strerror(errno));
+        if (nx_os_inspector_kick(pid) != 0) {
+            fprintf(out, "  [inspect] inspector 起動に失敗しました: pid=%ld\n", pid);
             return -1;
         }
     }
