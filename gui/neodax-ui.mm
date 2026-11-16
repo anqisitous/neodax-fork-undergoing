@@ -600,30 +600,25 @@ static void cmd_delete_stale(const char *state_path, const char *app,
     char *state = nx_deepai_load_state(state_path);
     if (!state) { printf("ERROR: no state at %s\n", state_path); return; }
 
-    /* 消してよい id を全部集める (判定は advise と同じ基準)。 */
+    /* 消す id を全部集める。format を推測せず、実体の index から引く。
+       nx_residual_stale_indices が「未解決参照か重複を持つ実体」を返す。 */
     std::vector<std::string> ids;
     {
-        /* nx_advise_tabs が出す一覧をそのまま使う。 */
-        FILE *tmp = tmpfile();
-        if (!tmp) { free(state); return; }
-        nx_advise_tabs(state_path, state, NULL, tmp);
-        rewind(tmp);
-        char line[4096];
-        while (fgets(line, sizeof line, tmp)) {
-            /* 行頭が IDX 以外で、壊れている印を持つ行から id を拾う。
-               実際の id 抽出は nx_advise_tab_can_delete に任せる。 */
-            if (strstr(line, "orphan") || strstr(line, "stuck") ||
-                strstr(line, "unresolved")) {
-                char *p = strrchr(line, '\t');
-                if (p) {
-                    char *idv = p + 1;
-                    char *nl = strchr(idv, '\n');
-                    if (nl) *nl = 0;
-                    if (*idv == '[') ids.push_back(idv);
-                }
-            }
+        nx_residual_map_t m;
+        if (nx_residual_collect(state, &m) != 0) { free(state); return; }
+        int *stale = nullptr;
+        int ns = nx_residual_stale_indices(&m, &stale);
+        for (int i = 0; i < ns; i++) {
+            int idx = stale[i];
+            if (idx < 0 || (size_t)idx >= m.n_entities) continue;
+            /* 所有者が生きている surface は壊れていないので消さない。 */
+            char why[256] = {0};
+            if (m.entities[idx].id[0] &&
+                nx_advise_tab_can_delete(state, m.entities[idx].id, why, sizeof why))
+                ids.push_back(m.entities[idx].id);
         }
-        fclose(tmp);
+        free(stale);
+        nx_residual_free(&m);
     }
 
     if (ids.empty()) {
