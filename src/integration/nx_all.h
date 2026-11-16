@@ -50,6 +50,18 @@
 #include "plan/nx_residual.hpp"
 #include "plan/nx_clean.hpp"
 
+/* --- 永続層の事実と判断 (状態の見方を 1 箇所に固定する) --- */
+#include "plan/nx_store_facts.hpp"
+
+/* --- コマンドをノードから呼ぶ橋 (実装を 2 つ持たない) --- */
+#include "plan/nx_node.hpp"
+
+/* --- board 探索 (2 人の player が finish を競う) --- */
+#include "plan/nx_arena.hpp"
+
+/* --- 分析をプロジェクトファイルに保存する --- */
+#include "plan/nx_project.h"
+
 /* --- テンプレート = C++ ファイル (構成はヘッダとして cpp 内に逆順で) --- */
 #include "plan/nx_tplcpp.hpp"
 

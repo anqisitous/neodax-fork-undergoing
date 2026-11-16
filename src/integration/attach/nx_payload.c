@@ -201,20 +201,27 @@ char *nx_payload_build_stop_restore(const char *store_substr,
 
 char *nx_payload_build_baseline_restore(const char *store_substr,
                                         const char *export_names,
-                                        const char *key) {
+                                        const char *key,
+                                        int backup) {
     if (!store_substr) return NULL;
     size_t cap = 32768;
     char *js = (char *)malloc(cap);
     if (!js) return NULL;
     const char *k = key ? key : "";
 
-    /* 1) 元の永続値を退避し、後で戻せるようにする。 */
-    snprintf(js, cap,
-        "(async()=>{const r={};"
-        "try{r.before=localStorage.getItem('%s');"
-        "if(r.before!==null)localStorage.setItem('%s.nx-backup',r.before);}"
-        "catch(e){r.backupErr=String(e);}",
-        k, k);
+    /* 1) 退避を作るか。
+       消すだけの用途 (backup=0) では作らない。退避キーが残ると、
+       本体を消しても次回の復元がそこから読んで戻ってしまう。 */
+    if (backup) {
+        snprintf(js, cap,
+            "(async()=>{const r={};"
+            "try{r.before=localStorage.getItem('%s');"
+            "if(r.before!==null)localStorage.setItem('%s.nx-backup',r.before);}"
+            "catch(e){r.backupErr=String(e);}",
+            k, k);
+    } else {
+        snprintf(js, cap, "(async()=>{const r={};");
+    }
 
     /* 2) ストアを解決する。 */
     append_store_resolve(js, cap, store_substr, k, export_names);

@@ -49,7 +49,11 @@ int nx_appfix_stop_restore(const nx_appfix_profile_t *profile, FILE *out);
 
 /* 復元先を「空の妥当な状態」に置き換える。
    ブロックではなく置換なので、アプリの復元経路はそのまま正常に走る。
-   元の値は <key>.nx-backup に退避され、後で戻せる。 */
+
+   退避 (<key>.nx-backup) は作らない。
+   これは「消す」ための経路で、退避を残すと本体を消しても
+   次回の復元でそこから読まれて戻る (タブが復活する原因)。
+   戻す手段が要るなら、呼ぶ側が値を先に読んで持っておく。 */
 int nx_appfix_baseline_restore(const nx_appfix_profile_t *profile, FILE *out);
 
 #ifdef __cplusplus

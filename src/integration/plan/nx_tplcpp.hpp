@@ -73,6 +73,36 @@ typedef struct {
 int nx_tplcpp_scan(const char *dir, nx_tpl_graph_t *out);
 void nx_tplcpp_free(nx_tpl_graph_t *g);
 
+/* ---- 中核の入口: 種類を auto で受ける ----
+ *
+ * 呼び側が「これは cpp か svg か node か」を先に判定して、
+ * それに合わせて関数を選ぶ必要をなくす。渡すだけで中で振り分ける。
+ *
+ *   src に渡せるもの:
+ *     * ディレクトリ      → 中の資産を全部読む (部分資産も可)
+ *     * .cpp ファイル     → その資産を読む
+ *     * .svg ファイル     → 図からノードと矢印を拾って構成にする
+ *     * .tsv / .txt       → 1 行 1 ノード/リンクとして読む
+ *     * 上の文字列そのもの → 中身で判定して読む
+ *
+ * 戻り: 0=成功 / <0=読めない。kind に何として読んだかを返す。
+ */
+typedef enum {
+    NX_TPL_SRC_DIR = 0,
+    NX_TPL_SRC_CPP,
+    NX_TPL_SRC_SVG,
+    NX_TPL_SRC_NODE,
+    NX_TPL_SRC_NONE
+} nx_tpl_src_kind_t;
+
+int nx_tplcpp_open(const char *src, nx_tpl_graph_t *out, nx_tpl_src_kind_t *kind);
+
+/* 渡されたものが何として読めるかだけを返す (読まない)。 */
+nx_tpl_src_kind_t nx_tplcpp_probe(const char *src);
+
+/* 種類の名前 (表示用)。 */
+const char *nx_tplcpp_kind_name(nx_tpl_src_kind_t k);
+
 /* 実行順・依存・学習状態を表示する。 */
 int nx_tplcpp_dump(const nx_tpl_graph_t *g, FILE *out);
 

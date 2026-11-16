@@ -114,6 +114,7 @@ typedef enum {
     NX_MISS_ORPHAN_REF,    /* 所有者不在 (目に見えるが閉じられない) */
     NX_MISS_DUPLICATE,     /* 同じものが 2 つ (UI では区別が付かない) */
     NX_MISS_STORE_SPLIT,   /* 退避コピー側が解決先になっている */
+    NX_MISS_STALE_BACKUP,  /* 退避コピーが残っている (いまは無害でも復活源になる) */
     NX_MISS_WAL_DAMAGE,    /* 追記の末尾が壊れて読めない */
 } nx_miss_kind_t;
 

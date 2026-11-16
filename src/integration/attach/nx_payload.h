@@ -58,12 +58,17 @@ char *nx_payload_build_stop_restore(const char *store_substr,
    stop_restore は「復元させない」が、これは「置き換える」：
      - 現在の状態から配列コレクションを空にした baseline を作る
      - それを store に適用して永続化する
-     - 元の値は <key>.nx-backup に退避する
    アプリは復元処理をそのまま正常に走らせ、結果だけが空のセッションになる。
-   エラー経路に入らないので振る舞いが乖離しない。 */
+   エラー経路に入らないので振る舞いが乖離しない。
+
+   backup=0 なら <key>.nx-backup を作らない。
+   退避キーは「戻す手段」だが、本体を消した後も残ると
+   次回の復元でそこから読まれてタブが戻る。消すだけの用途では
+   退避を作らないのが正しい。 */
 char *nx_payload_build_baseline_restore(const char *store_substr,
                                        const char *export_names,
-                                       const char *key);
+                                       const char *key,
+                                       int backup);
 
 
 #ifdef __cplusplus

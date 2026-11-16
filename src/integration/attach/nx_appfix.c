@@ -117,6 +117,7 @@ int nx_appfix_stop_restore(const nx_appfix_profile_t *in, FILE *out) {
 
 int nx_appfix_baseline_restore(const nx_appfix_profile_t *in, FILE *out) {
     nx_appfix_profile_t p = merged(in);
-    char *js = nx_payload_build_baseline_restore(p.store_substr, p.store_exports, p.key);
+    /* backup=0: 退避を作らない。作ると次回の復元で戻る。 */
+    char *js = nx_payload_build_baseline_restore(p.store_substr, p.store_exports, p.key, 0);
     return run_payload(&p, js, out);
 }

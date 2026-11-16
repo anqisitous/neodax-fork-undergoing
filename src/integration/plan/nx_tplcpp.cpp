@@ -116,7 +116,21 @@ bool parse_block(const std::string &text, const std::string &file, RawTpl &t) {
         line++;
     }
     t.file = file;
-    return !t.id.empty();
+    /* 部分資産を受け入れる。
+       以前は id: が無いと捨てていたが、部分資産 (ノードを 1 つだけ
+       書いたもの) は他と組み合わせて使う前提なので、捨てない。
+       id が無ければファイル名から作る (同じファイルなら同じ id)。
+       何も書いていない (ノードも link も無い) ものだけを捨てる。 */
+    if (t.nodes.empty() && t.links.empty()) return false;
+    if (t.id.empty()) {
+        size_t sl = file.find_last_of("/\\");
+        std::string base = (sl == std::string::npos) ? file : file.substr(sl + 1);
+        size_t dot = base.find_last_of('.');
+        if (dot != std::string::npos) base = base.substr(0, dot);
+        if (base.empty()) base = "partial";
+        t.id = base;
+    }
+    return true;
 }
 
 std::string learning_path() {
@@ -154,6 +168,30 @@ Learn load_learning() {
 
 int find_node(const std::vector<std::string> &names, const std::string &n) {
     for (size_t i = 0; i < names.size(); i++) if (names[i] == n) return (int)i;
+    return -1;
+}
+
+/* ノード id だけで探す。部分資産をまたいで link を張るときに使う。 */
+int find_node_by_id(const std::vector<nx_tpl_node_t> &nodes, const char *id) {
+    for (size_t i = 0; i < nodes.size(); i++)
+        if (std::strcmp(nodes[i].id, id) == 0) return (int)i;
+    return -1;
+}
+
+/* 同じファイルの名前を優先し、無ければ全体から探す。
+   部分資産は「persist を宣言せずに persist を指す link を書ける」
+   ので、名前だけで引ける必要がある。 */
+int find_node_any(const std::vector<std::string> &names, const std::string &own_id,
+                  const std::string &node) {
+    int local = find_node(names, own_id + "::" + node);
+    if (local >= 0) return local;
+    const std::string suffix = "::" + node;
+    for (size_t i = 0; i < names.size(); i++) {
+        const std::string &nm = names[i];
+        if (nm.size() >= suffix.size() &&
+            nm.compare(nm.size() - suffix.size(), suffix.size(), suffix) == 0)
+            return (int)i;
+    }
     return -1;
 }
 
@@ -206,6 +244,12 @@ extern "C" const char *nx_tplcpp_default_dir(void) {
     return d.c_str();
 }
 
+/* RawTpl の集合から 1 つの graph を組む。
+   scan (ディレクトリ) も open (cpp/svg/node) もここを通る。
+   組む処理を 2 度書かない。 */
+static int build_graph(std::vector<RawTpl> &tpls, const std::string &graph_name,
+                       nx_tpl_graph_t *out);
+
 extern "C" int nx_tplcpp_scan(const char *dir, nx_tpl_graph_t *out) {
     if (!out) return -1;
     std::memset(out, 0, sizeof(*out));
@@ -236,6 +280,13 @@ extern "C" int nx_tplcpp_scan(const char *dir, nx_tpl_graph_t *out) {
         if (parse_block(ss.str(), ent.path().string(), t)) tpls.push_back(t);
     }
     if (tpls.empty()) return -1;
+    return build_graph(tpls, "", out);
+}
+
+/* 実際に graph を組む部分。scan と open の両方がここを通る。 */
+static int build_graph(std::vector<RawTpl> &tpls, const std::string &graph_name,
+                       nx_tpl_graph_t *out) {
+    if (tpls.empty()) return -1;
 
     Learn learn = load_learning();
 
@@ -258,6 +309,11 @@ extern "C" int nx_tplcpp_scan(const char *dir, nx_tpl_graph_t *out) {
             std::snprintf(nn.run, sizeof(nn.run), "%s", n.run.c_str());
             std::snprintf(nn.file, sizeof(nn.file), "%s", n.file.c_str());
             nn.line = n.line;
+            /* 同名ノードは 1 つに寄せる (部分資産が同じ persist を
+               宣言していても増やさない)。 */
+            if (find_node(names, t.id + "::" + n.name) >= 0 ||
+                find_node_by_id(nodes, n.name.c_str()) >= 0)
+                continue;
             names.push_back(t.id + "::" + n.name);
             nodes.push_back(nn);
         }
@@ -269,8 +325,11 @@ extern "C" int nx_tplcpp_scan(const char *dir, nx_tpl_graph_t *out) {
     for (size_t t = 0; t < tpls.size(); t++) {
         auto &tp = tpls[t];
         for (auto &l : tp.links) {
-            int a = find_node(names, tp.id + "::" + l.a);
-            int b = find_node(names, tp.id + "::" + l.b);
+            /* 部分資産を組み合わせるので、link の端点が同じファイルに
+               無いことが普通にある。なので「ファイル内で」ではなく、
+               「全体で」名前を探す。見つかった最初のノードを使う。 */
+            int a = find_node_any(names, tp.id, l.a);
+            int b = find_node_any(names, tp.id, l.b);
             if (a < 0 || b < 0) continue;
             nx_tpl_edge_t e;
             std::memset(&e, 0, sizeof(e));
@@ -350,10 +409,188 @@ extern "C" int nx_tplcpp_scan(const char *dir, nx_tpl_graph_t *out) {
     out->n_order = order.size();
     out->n_rings = nring;
     std::snprintf(out->graph, sizeof(out->graph), "%s",
-                  graph_ids.empty() ? "" : graph_ids[0].c_str());
+                  !graph_name.empty() ? graph_name.c_str()
+                  : (graph_ids.empty() ? "" : graph_ids[0].c_str()));
     return 0;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* 中核の入口: cpp / svg / node を auto で受ける                      */
+/* ------------------------------------------------------------------ */
+
+/* なぜ必要か:
+
+   呼び側が「これは cpp だ」「これは svg だ」と先に判定して、
+   それに合った関数を選ぶ形にすると、種類が増えるたびに呼び側が増える。
+   中核では「渡されたものを読む」だけにしたい。種類の判定は中でやる。
+
+   受けるもの:
+     dir     ディレクトリ          → 中の資産を全部読む (部分資産も可)
+     .cpp    資産                  → ブロックを読む
+     .svg    図                    → 図からノードと矢印を拾って構成にする
+     .tsv/.txt/.node               → 1 行 1 ノード/リンクとして読む
+     (文字列そのもの)              → 中身を見て判定する
+*/
+extern "C" const char *nx_tplcpp_kind_name(nx_tpl_src_kind_t k) {
+    switch (k) {
+        case NX_TPL_SRC_DIR:  return "dir";
+        case NX_TPL_SRC_CPP:  return "cpp";
+        case NX_TPL_SRC_SVG:  return "svg";
+        case NX_TPL_SRC_NODE: return "node";
+        default:              return "none";
+    }
+}
+
+/* 拡張子で判定する。拡張子が無い/知らないなら中身で判定する。 */
+static nx_tpl_src_kind_t kind_by_ext(const std::string &s) {
+    auto ends = [&](const char *e) {
+        size_t n = std::strlen(e);
+        return s.size() >= n && s.compare(s.size() - n, n, e) == 0;
+    };
+    if (ends(".cpp") || ends(".cc") || ends(".hpp")) return NX_TPL_SRC_CPP;
+    if (ends(".svg")) return NX_TPL_SRC_SVG;
+    if (ends(".tsv") || ends(".txt") || ends(".node")) return NX_TPL_SRC_NODE;
+    return NX_TPL_SRC_NONE;
+}
+
+/* 中身で判定する。 */
+static nx_tpl_src_kind_t kind_by_content(const std::string &s) {
+    if (s.find("===== NX TEMPLATE =====") != std::string::npos) return NX_TPL_SRC_CPP;
+    if (s.find("<svg") != std::string::npos) return NX_TPL_SRC_SVG;
+    /* node 形式: "node<TAB>id<TAB>label" か "node id label" の行 */
+    if (s.find("node ") != std::string::npos || s.find("node\t") != std::string::npos)
+        return NX_TPL_SRC_NODE;
+    if (s.find("link ") != std::string::npos || s.find("link\t") != std::string::npos)
+        return NX_TPL_SRC_NODE;
+    return NX_TPL_SRC_NONE;
+}
+
+extern "C" nx_tpl_src_kind_t nx_tplcpp_probe(const char *src) {
+    if (!src || !*src) return NX_TPL_SRC_NONE;
+    std::error_code ec;
+    if (fs::is_directory(src, ec)) return NX_TPL_SRC_DIR;
+    nx_tpl_src_kind_t k = kind_by_ext(src);
+    if (k != NX_TPL_SRC_NONE) return k;
+    std::ifstream f(src, std::ios::binary);
+    if (f) {
+        std::stringstream ss; ss << f.rdbuf();
+        return kind_by_content(ss.str());
+    }
+    /* ファイルでもない → 中身そのものとして見る */
+    return kind_by_content(src);
+}
+
+/* svg からノードと矢印を拾う。
+   我々が出す svg (nx_tplcpp_svg) は円に id、線に from→to を持つので、
+   それを読み戻せる。読めなければ 0 件で返す (捏造しない)。 */
+static void parse_svg(const std::string &s, RawTpl &t) {
+    /* <circle ... data-id="node"> と <text ...>id</text> の組を拾う。 */
+    auto attr = [](const std::string &line, const char *name) -> std::string {
+        std::string key = std::string(name) + "=\"";
+        size_t p = line.find(key);
+        if (p == std::string::npos) return "";
+        p += key.size();
+        size_t e = line.find('"', p);
+        return e == std::string::npos ? "" : line.substr(p, e - p);
+    };
+    std::istringstream is(s);
+    std::string ln;
+    while (std::getline(is, ln)) {
+        if (ln.find("<rect") != std::string::npos || ln.find("<circle") != std::string::npos) {
+            std::string id = attr(ln, "data-id");
+            if (id.empty()) id = attr(ln, "id");
+            if (!id.empty()) {
+                RawNode n; n.name = id; n.label = attr(ln, "data-label");
+                t.nodes.push_back(n);
+            }
+        } else if (ln.find("<line") != std::string::npos) {
+            std::string a = attr(ln, "data-from"), b = attr(ln, "data-to");
+            std::string k = attr(ln, "data-kind");
+            if (!a.empty() && !b.empty()) {
+                RawLink l; l.a = a; l.b = b; l.kind = k.empty() ? "next" : k;
+                t.links.push_back(l);
+            }
+        }
+    }
+}
+
+/* node 形式 (TSV / 空白区切り) を読む。
+     node <id> [label...]
+     link <from> <kind> <to>                                     */
+static void parse_node_lines(const std::string &s, RawTpl &t) {
+    std::istringstream is(s);
+    std::string ln;
+    while (std::getline(is, ln)) {
+        std::string c = trim(ln);
+        if (c.empty() || c[0] == '#') continue;
+        std::istringstream ls(c);
+        std::string kw; ls >> kw;
+        if (kw == "node") {
+            RawNode n;
+            ls >> n.name;
+            std::string rest, w;
+            while (ls >> w) rest += (rest.empty() ? "" : " ") + w;
+            n.label = rest;
+            if (!n.name.empty()) t.nodes.push_back(n);
+        } else if (kw == "link") {
+            RawLink l;
+            if (ls >> l.a >> l.kind >> l.b) t.links.push_back(l);
+        }
+    }
+}
+
+extern "C" int nx_tplcpp_open(const char *src, nx_tpl_graph_t *out,
+                              nx_tpl_src_kind_t *kind) {
+    if (!out) return -1;
+    if (kind) *kind = NX_TPL_SRC_NONE;
+    std::memset(out, 0, sizeof(*out));
+    /* src が無いときは既定の置き場所を見る。scan と同じ振る舞い。 */
+    if (!src || !*src) {
+        if (kind) *kind = NX_TPL_SRC_DIR;
+        return nx_tplcpp_scan(NULL, out);
+    }
+
+    nx_tpl_src_kind_t k = nx_tplcpp_probe(src);
+    if (kind) *kind = k;
+
+    /* ディレクトリは既存の scan に任せる (部分資産を全部読む)。 */
+    if (k == NX_TPL_SRC_DIR) return nx_tplcpp_scan(src, out);
+
+    std::string body;
+    std::string name = src;
+    std::error_code ec;
+    if (fs::is_regular_file(src, ec)) {
+        std::ifstream f(src, std::ios::binary);
+        if (!f) return -1;
+        std::stringstream ss; ss << f.rdbuf();
+        body = ss.str();
+    } else {
+        body = src;  /* 中身そのもの */
+    }
+
+    std::vector<RawTpl> tpls;
+    RawTpl t;
+    t.file = name;
+    if (k == NX_TPL_SRC_CPP) {
+        if (!parse_block(body, name, t)) return -1;
+        tpls.push_back(t);
+    } else if (k == NX_TPL_SRC_SVG) {
+        parse_svg(body, t);
+        if (t.nodes.empty()) return -1;
+        if (t.id.empty()) t.id = "svg";
+        tpls.push_back(t);
+    } else if (k == NX_TPL_SRC_NODE) {
+        parse_node_lines(body, t);
+        if (t.nodes.empty()) return -1;
+        if (t.id.empty()) t.id = "node";
+        tpls.push_back(t);
+    } else {
+        return -1;
+    }
+
+    return build_graph(tpls, t.id, out);
+}
 extern "C" void nx_tplcpp_free(nx_tpl_graph_t *g) {
     if (!g) return;
     std::free(g->nodes); std::free(g->edges);
@@ -419,9 +656,13 @@ extern "C" int nx_tplcpp_svg(const nx_tpl_graph_t *g, const char *path, FILE *ou
     for (size_t i = 0; i < g->n_edges; i++) {
         const nx_tpl_edge_t &e = g->edges[i];
         std::fprintf(f, "<line x1=\"%.0f\" y1=\"%.0f\" x2=\"%.0f\" y2=\"%.0f\" "
-                        "stroke=\"%s\" stroke-width=\"1.2\"/>",
+                        "stroke=\"%s\" stroke-width=\"1.2\" "
+                        "data-from=\"%s\" data-to=\"%s\" data-kind=\"%s\"/>",
                      nx[e.from], ny[e.from], nx[e.to], ny[e.to],
-                     e.pruned ? "#5a3030" : "#3f6d8f");
+                     e.pruned ? "#5a3030" : "#3f6d8f",
+                     esc(g->nodes[e.from].id).c_str(),
+                     esc(g->nodes[e.to].id).c_str(),
+                     esc(e.kind).c_str());
         if (std::strcmp(e.kind, "requires") != 0)
             std::fprintf(f, "<text x=\"%.0f\" y=\"%.0f\" fill=\"#6b7a90\" "
                             "font-size=\"9\">%s</text>",
@@ -432,8 +673,10 @@ extern "C" int nx_tplcpp_svg(const nx_tpl_graph_t *g, const char *path, FILE *ou
     for (size_t i = 0; i < g->n_nodes; i++) {
         const nx_tpl_node_t &n = g->nodes[i];
         bool layout = std::strstr(n.kind, "layout") != nullptr;
-        std::fprintf(f, "<rect x=\"%.0f\" y=\"%.0f\" width=\"12\" height=\"12\" "
-                        "fill=\"%s\"/>\n", nx[i] - 6, ny[i] - 6,
+        std::fprintf(f, "<rect data-id=\"%s\" data-label=\"%s\" x=\"%.0f\" y=\"%.0f\" "
+                        "width=\"12\" height=\"12\" fill=\"%s\"/>\n",
+                     esc(n.id).c_str(), esc(n.label).c_str(),
+                     nx[i] - 6, ny[i] - 6,
                      layout ? "#c9a227" : "#4c9be8");
         std::fprintf(f, "<text x=\"%.0f\" y=\"%.0f\" fill=\"#c8d2e0\" font-size=\"10\">%s</text>\n",
                      nx[i] + 9, ny[i] + 4, esc(n.id).c_str());

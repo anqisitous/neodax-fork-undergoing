@@ -30,10 +30,18 @@
 #include <string.h>
 #include <math.h>
 #include <dlfcn.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <dirent.h>
 
 /* neodax の分類をまとめて使う。個別ヘッダの列挙はビルドもコードも持たない:
  * どの分類を使うかは、この 1 行の include で決まる。 */
 #include "integration/nx_all.h"
+#include "nx_cli_registry.h"
 
 /* neodax の検索 (ABD 安全化済み) */
 extern "C" int nx_seek(const char *, const char *, const char *, int, int, int, int, FILE *);
@@ -580,6 +588,77 @@ extern "C" int nx_plan_analyze_case(const char *kind, const char *path,
                                     const char *case_name, FILE *out);
 static void cmd_delete(const char *state_path, const char *tab_id,
                        const char *app, const char *store, const char *key,
+                       int live, int no_store_sync, int force);
+
+/* 壊れているタブをまとめて消す。
+   1 件ずつ delete を呼ぶと、chat ごとに 1 回書くことになり、
+   その途中で復元経路が走ると戻ってしまう。
+   ここでは 1 回の状態読み込みで全部の id を集め、1 回で書く。 */
+static void cmd_delete_stale(const char *state_path, const char *app,
+                             const char *store, const char *key,
+                             int live, int force) {
+    char *state = nx_deepai_load_state(state_path);
+    if (!state) { printf("ERROR: no state at %s\n", state_path); return; }
+
+    /* 消してよい id を全部集める (判定は advise と同じ基準)。 */
+    std::vector<std::string> ids;
+    {
+        /* nx_advise_tabs が出す一覧をそのまま使う。 */
+        FILE *tmp = tmpfile();
+        if (!tmp) { free(state); return; }
+        nx_advise_tabs(state_path, state, NULL, tmp);
+        rewind(tmp);
+        char line[4096];
+        while (fgets(line, sizeof line, tmp)) {
+            /* 行頭が IDX 以外で、壊れている印を持つ行から id を拾う。
+               実際の id 抽出は nx_advise_tab_can_delete に任せる。 */
+            if (strstr(line, "orphan") || strstr(line, "stuck") ||
+                strstr(line, "unresolved")) {
+                char *p = strrchr(line, '\t');
+                if (p) {
+                    char *idv = p + 1;
+                    char *nl = strchr(idv, '\n');
+                    if (nl) *nl = 0;
+                    if (*idv == '[') ids.push_back(idv);
+                }
+            }
+        }
+        fclose(tmp);
+    }
+
+    if (ids.empty()) {
+        printf("  [delete-stale] 消す対象は無い\n");
+        free(state);
+        return;
+    }
+
+    printf("  [delete-stale] 対象 %zu 件\n", ids.size());
+    for (auto &id : ids) printf("    %s\n", id.c_str());
+
+    /* 1 回でまとめて消す。 */
+    char *cur = state;
+    int total = 0;
+    for (auto &id : ids) {
+        char *next = NULL;
+        int nrem = 0;
+        if (nx_deepai_remove_kindred_json(cur, strlen(cur), id.c_str(), &next,
+                                          &nrem, NULL) != 0)
+            continue;
+        if (cur != state) free(cur);
+        cur = next;
+        total += nrem;
+    }
+
+    if (total > 0 && cur) {
+        write_fixed_to_leveldb(state_path, key, cur, live);
+        printf("  [delete-stale] まとめて %d 件消した (live=%d)\n", total, live);
+    }
+    if (cur && cur != state) free(cur);
+    free(state);
+}
+
+static void cmd_delete(const char *state_path, const char *tab_id,
+                       const char *app, const char *store, const char *key,
                        int live, int no_store_sync, int force) {
     if (!tab_id) { printf("delete: --id required\n"); return; }
 
@@ -684,6 +763,1023 @@ static void cmd_check(const char *state_path) {
     int n = nx_deepai_detect_json(state, strlen(state), stdout);
     printf("  [check] stuck surface tabs: %d\n", n);
     free(state);
+}
+
+/* node — コマンドをノード経由で呼ぶ。
+   neodax 自身が持っているコマンドを、判断ノードから使えることを確かめる。
+   同じコマンドの中身を 2 つ持たないための入口。 */
+static int cmd_node(int argc, char **argv) {
+    if (argc < 3) {
+        printf("node: コマンド名が必要 (例: node tabs / node keys / node advise --count)\n");
+        return 2;
+    }
+    std::vector<std::string> a;
+    for (int i = 2; i < argc; i++) a.push_back(argv[i]);
+    std::string head = a[0];
+    if (head == "node") { printf("node: node を node で呼ばない\n"); return 2; }
+
+    nx::NodeResult r = nx::node::run(a);
+    printf("%s", r.out.c_str());
+    printf("--node cmd=%s rc=%d bytes=%zu\n", head.c_str(), r.rc, r.out.size());
+    if (!r.ok()) printf("--node error: %s\n", r.err.c_str());
+    return r.rc;
+}
+/* ------------------------------------------------------------------ */
+/* splice — データを集め、固定の検査プログラムに渡して実行する           */
+/* ------------------------------------------------------------------ */
+
+/* 設計:
+
+   前の版はノードを抽象クラスにして、各ノードが「自分を検査する C++ 」を
+   書き出していた。その形は 2 つ無駄があった:
+
+     1. ノードごとに C++ の文字列を持つので、ノードを足すたびに
+        生成するコードの書き方を揃える必要があった (継承で強制していた)。
+     2. 生成コードのハッシュをキーにバイナリを焼いていたが、生成コードは
+        ほぼ固定の土台で、差分は「どの if を出すか」だけ。データが変わって
+        ノードが 1 つ抜けるだけで別ハッシュになり、同じ論理のバイナリが
+        何個もできる。ハッシュ単位で焼く意味が薄い。
+
+   そこで役割を分ける (継承ではなく委譲):
+
+     Producer  : 事実を集めて TSV 行を出すだけ。検査の論理を持たない
+     Checker   : 検査の論理を全部持つ 1 本の固定プログラム (ソースは定数)
+     Splice    : Producer から行を受け取り、Checker に stdin で渡して実行
+
+   検査の追加は Checker のソースを 1 行足すだけで、Producer は増やさない。
+   バイナリは Checker のソース (バージョン) 単位で 1 個。データでは変わらない。 */
+
+/* ---- Producer: 事実を集めるだけ。判定はしない ---- */
+struct Facts {
+    char resolved[4096];     /* 解決先キー (\xNN エスケープ済み) */
+    int  is_backup;          /* 解決先が退避コピーか */
+    int  live;               /* 本体キーが生きているか */
+    int  backup_live;        /* 退避キーが生きているか */
+    unsigned long long max_seq;
+    int  n_tabs;             /* タブ数 (読めなければ -1) */
+    int  n_stuck;            /* 残滓数 (読めなければ -1) */
+};
+
+/* 観測して Facts を埋める。ここだけが状態に触る。 */
+static void splice_observe(Facts *f, const char *state_path, const char *key_hint) {
+    memset(f, 0, sizeof *f);
+    f->n_tabs = f->n_stuck = -1;
+
+    char dir[4096];
+    snprintf(dir, sizeof(dir), "%s", state_path ? state_path : "");
+    {
+        char cur[4200];
+        snprintf(cur, sizeof cur, "%s/CURRENT", dir);
+        FILE *fp = fopen(cur, "rb");
+        if (fp) fclose(fp);
+        else { char *sl = strrchr(dir, '/'); if (sl) *sl = 0; }
+    }
+    const char *hint = key_hint && *key_hint ? key_hint : "workspace-tabs";
+
+    size_t rklen = 0;
+    char *resolved = nx_state_find_key(dir, hint, &rklen);
+    if (resolved) {
+        size_t w = 0;
+        for (size_t i = 0; i < rklen && w + 5 < sizeof f->resolved; i++) {
+            unsigned char c = (unsigned char)resolved[i];
+            if (c >= 0x20 && c < 0x7f && c != '\t' && c != '\\') f->resolved[w++] = (char)c;
+            else w += (size_t)snprintf(f->resolved + w, sizeof f->resolved - w, "\\x%02x", c);
+        }
+        f->resolved[w] = 0;
+        f->is_backup = (rklen >= 10 && memcmp(resolved + rklen - 10, ".nx-backup", 10) == 0);
+    }
+    free(resolved);
+    f->live = nx_state_key_is_live(dir, hint);
+    f->backup_live = nx_state_key_is_live(dir, "nx-backup");
+    f->max_seq = nx_state_max_seq(dir, hint);
+
+    char *state = nx_deepai_load_state(state_path);
+    if (!state) return;
+    char *dummy = NULL; size_t dlen = 0;
+    FILE *dev = open_memstream(&dummy, &dlen);
+    if (dev) { f->n_stuck = nx_deepai_detect_json(state, strlen(state), dev); fclose(dev); }
+    free(dummy);
+    nx_json_t *root = nx_json_parse(state, strlen(state));
+    if (root) {
+        const nx_json_t *s = nx_json_get(root, "state");
+        const nx_json_t *tabs = nx_json_get(s ? s : root, "tabs");
+        if (tabs && tabs->type == NX_JSON_ARR) f->n_tabs = (int)tabs->n;
+        nx_json_free(root);
+    }
+    free(state);
+}
+
+/* Facts を TSV にする。3 列 <kind>\t<key>\t<value> に揃えるだけ。 */
+static void splice_emit_data(FILE *o, const Facts *f) {
+    fprintf(o, "resolved\tworkspace-tabs\t%s\n", f->resolved[0] ? f->resolved : "-");
+    fprintf(o, "is_backup\tworkspace-tabs\t%d\n", f->is_backup);
+    fprintf(o, "live\tworkspace-tabs\t%d\n", f->live);
+    fprintf(o, "backup_live\tnx-backup\t%d\n", f->backup_live);
+    fprintf(o, "max_seq\tworkspace-tabs\t%llu\n", f->max_seq);
+    fprintf(o, "tabs\tworkspace-tabs\t%d\n", f->n_tabs);
+    fprintf(o, "stuck\tworkspace-tabs\t%d\n", f->n_stuck);
+}
+
+/* ---- Checker: 検査の論理を全部持つ 1 本の固定プログラム ----
+   ここが唯一「判定」を書く場所。データは stdin から読む。
+   バージョンを上げるときだけ NX_CHECKER_VER を変える。 */
+#define NX_CHECKER_VER "1"
+
+static const char *splice_checker_src(void) {
+    return
+    "// neodax checker " NX_CHECKER_VER " — 固定。データは stdin から読む。\n"
+    "#include <cstdio>\n"
+    "#include <cstring>\n"
+    "#include <cstdlib>\n"
+    "#include <string>\n"
+    "#include <map>\n"
+    "\n"
+    "static std::map<std::string,std::string> R;\n"
+    "static long long num(const char *k){auto i=R.find(k);return i==R.end()?-1:atoll(i->second.c_str());}\n"
+    "static const char *str(const char *k){auto i=R.find(k);return i==R.end()?\"\":i->second.c_str();}\n"
+    "static int load(FILE *f){char b[65536];int n=0;\n"
+    "  while(fgets(b,sizeof b,f)){size_t L=strlen(b);\n"
+    "    while(L&&(b[L-1]=='\\n'||b[L-1]=='\\r'))b[--L]=0;\n"
+    "    if(!L)continue;char*a=strchr(b,'\\t');if(!a)continue;*a=0;\n"
+    "    char*c=strchr(a+1,'\\t');if(!c)continue;*c=0;\n"
+    "    R[b]=std::string(c+1);n++;}return n;}\n"
+    "\n"
+    "int main(void){\n"
+    "  int n=load(stdin);\n"
+    "  printf(\"RECORDS=%d\\n\",n);\n"
+    "  printf(\"resolved_key=%s\\n\",str(\"resolved\"));\n"
+    "  int findings=0;\n"
+    "  if(num(\"is_backup\")==1){printf(\"FINDING 解決先が退避コピー (.nx-backup)\\n\");findings++;}\n"
+    "  if(num(\"max_seq\")>=100000000LL){printf(\"FINDING seq が異常に大きい\\n\");findings++;}\n"
+    "  if(num(\"stuck\")>0&&num(\"live\")==1){printf(\"FINDING 残滓があり、キーも生きている\\n\");findings++;}\n"
+    "  if(num(\"tabs\")<0&&num(\"live\")==1){printf(\"FINDING キーは生きているがタブを解釈できない\\n\");findings++;}\n"
+    "  printf(\"FINDINGS=%d\\n\",findings);\n"
+    "  return findings?1:0;\n"
+    "}\n";
+}
+
+/* ---- キャッシュ: 観測の冗長を避ける ----
+   同じ状態を何度も観測し直すのは無駄。状態そのものの指紋 (キーの最大 seq と
+   ディレクトリの mtime) が前回と同じなら、前回の Facts と TSV を使い回す。
+   指紋が変わったときだけ観測し直す。
+
+   注意: ここで省くのは「観測」だけで、判定は毎回行う。判定は安い (4ms) し、
+   状態が変わっていないことを確かめた上で走らせたいから。 */
+
+struct SpliceCache {
+    unsigned long long fp;      /* 状態の指紋 */
+    int                valid;   /* 指紋が有効か */
+    Facts              f;
+    char               data[8192];  /* TSV そのもの */
+    size_t             data_len;
+};
+static SpliceCache g_cache;
+
+/* 状態の指紋。ディレクトリなら mtime とファイル数、ファイルなら mtime とサイズ。
+   seq も混ぜる (書き込みで seq が進むため、最も敏感)。 */
+static unsigned long long state_fingerprint(const char *state_path) {
+    unsigned long long h = 1469598103934665603ULL;
+    struct stat st;
+    if (!state_path || stat(state_path, &st) != 0) return 0;
+    h = (h ^ (unsigned long long)st.st_mtime) * 1099511628211ULL;
+    h = (h ^ (unsigned long long)st.st_size) * 1099511628211ULL;
+    char dir[4096];
+    snprintf(dir, sizeof dir, "%s", state_path);
+    if (S_ISDIR(st.st_mode)) {
+        char cur[4200];
+        snprintf(cur, sizeof cur, "%s/CURRENT", dir);
+        struct stat sc;
+        if (stat(cur, &sc) == 0)
+            h = (h ^ (unsigned long long)sc.st_mtime) * 1099511628211ULL;
+    } else {
+        char *sl = strrchr(dir, '/');
+        if (sl) *sl = 0;
+    }
+    unsigned long long seq = nx_state_max_seq(dir, "workspace-tabs");
+    h = (h ^ seq) * 1099511628211ULL;
+    return h ? h : 1;
+}
+
+/* ディレクトリを 1 段だけ作る (mkdir -p を system で呼ばない)。 */
+static int ensure_dir(const char *path) {
+    if (mkdir(path, 0755) == 0) return 0;
+    if (errno == EEXIST) return 0;
+    return -1;
+}
+
+/* バイナリを直接 exec する (sh -c を挟まない)。stdin に TSV を流す。 */
+static int run_checker(const char *bin, const char *dat) {
+    int dfd = open(dat, O_RDONLY);
+    if (dfd < 0) { printf("--run-failed: cannot open %s\n", dat); return 2; }
+    pid_t pid = fork();
+    if (pid < 0) { close(dfd); return 2; }
+    if (pid == 0) {
+        dup2(dfd, STDIN_FILENO);
+        close(dfd);
+        execl(bin, bin, (char *)NULL);
+        _exit(127);
+    }
+    close(dfd);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (!WIFEXITED(status)) return 2;
+    return WEXITSTATUS(status);
+}
+
+/* ---- Bake: チェッカのソースを 1 度だけバイナリにする ----
+   キーはソースのバージョンとハッシュ。データでは変わらないので、
+   何度観測しても焼き直さない。 */
+static int splice_bake_checker(char *out_bin, size_t cap, int verbose) {
+    const char *home = getenv("HOME");
+    char dir[4096];
+    snprintf(dir, sizeof dir, "%s/.neodax/splice", home && *home ? home : ".");
+    /* mkdir -p を shell で呼ばない。無ければ作るだけ。 */
+    char parent[4096];
+    snprintf(parent, sizeof parent, "%s/.neodax", home && *home ? home : ".");
+    if (ensure_dir(parent) != 0 && errno != EEXIST) {
+        printf("--bake-failed: cannot create %s\n", parent);
+        return 1;
+    }
+    if (ensure_dir(dir) != 0 && errno != EEXIST) {
+        printf("--bake-failed: cannot create %s\n", dir);
+        return 1;
+    }
+
+    const char *src = splice_checker_src();
+    unsigned long long h = 1469598103934665603ULL;
+    for (const char *p = src; *p; p++) { h ^= (unsigned char)*p; h *= 1099511628211ULL; }
+    snprintf(out_bin, cap, "%s/checker-%s-%016llx.bin", dir, NX_CHECKER_VER, h);
+
+    FILE *probe = fopen(out_bin, "rb");
+    if (probe) { fclose(probe); if (verbose) printf("--bake: cached\n"); return 0; }
+
+    char cpp[4400];
+    snprintf(cpp, sizeof cpp, "%s/checker-%s-%016llx.cpp", dir, NX_CHECKER_VER, h);
+    FILE *o = fopen(cpp, "wb");
+    if (!o) { printf("--bake-failed: cannot write %s\n", cpp); return 1; }
+    fputs(src, o);
+    fclose(o);
+
+    char cmd[9000];
+    snprintf(cmd, sizeof cmd, "clang++ -std=c++17 -O1 -w '%s' -o '%s' 2>&1", cpp, out_bin);
+    if (verbose) printf("--bake: compiling checker\n");
+    if (system(cmd) != 0) { printf("--bake-failed: compile error (%s)\n", cpp); return 1; }
+    unlink(cpp);
+    return 0;
+}
+
+/* splice: 事実を集め → TSV にし → Checker バイナリに渡して実行する。
+   --show : データと Checker のソースを表示 (焼かない)
+   --bake : Checker を焼くところまで (実行しない)
+   既定   : bake + run */
+static int cmd_splice(const char *state_path, const char *key_hint,
+                      int show_only, int bake_only, int keep) {
+    /* 状態の指紋が前回と同じなら、観測もデータ生成も省く (冗長除去)。
+       指紋が変わったときだけ observe し直す。 */
+    unsigned long long fp = state_fingerprint(state_path);
+    int reused = g_cache.valid && fp && g_cache.fp == fp && g_cache.data_len > 0;
+
+    Facts f;
+    if (!reused) {
+        splice_observe(&f, state_path, key_hint);
+    }
+
+    char dat[4200] = {0};
+    if (!show_only || keep) {
+        /* 実行用の TSV を作る。reuse 時はキャッシュの内容をそのまま使う。 */
+        char tpl[] = "/tmp/neodax-splice-XXXXXX";
+        int fd = mkstemp(tpl);
+        if (fd < 0) { printf("splice: cannot create temp file\n"); return 2; }
+        close(fd); unlink(tpl);
+        snprintf(dat, sizeof dat, "%s.tsv", tpl);
+        FILE *d = fopen(dat, "wb");
+        if (!d) { printf("splice: cannot write %s\n", dat); return 2; }
+        if (reused) fwrite(g_cache.data, 1, g_cache.data_len, d);
+        else        splice_emit_data(d, &f);
+        fclose(d);
+    }
+
+    if (show_only) {
+        printf("\n--data\n");
+        if (dat[0]) {
+            FILE *in = fopen(dat, "rb");
+            if (in) { char b[4096]; while (fgets(b, sizeof b, in)) fputs(b, stdout); fclose(in); }
+        } else {
+            FILE *mem = open_memstream(NULL, NULL);
+            (void)mem;
+            splice_emit_data(stdout, reused ? &g_cache.f : &f);
+        }
+        printf("\n--checker (v%s)\n%s", NX_CHECKER_VER, splice_checker_src());
+        printf("--show: 焼かずに終わります\n");
+        if (dat[0] && !keep) unlink(dat);
+        return 0;
+    }
+
+    char bin[4400];
+    if (splice_bake_checker(bin, sizeof bin, 1) != 0) return 2;
+
+    /* 観測結果をキャッシュに残す。次回、状態が変わっていなければこれを使う。 */
+    if (!reused) {
+        g_cache.f = f;
+        g_cache.fp = fp;
+        g_cache.valid = 1;
+        char *buf = NULL; size_t len = 0;
+        FILE *mem = open_memstream(&buf, &len);
+        if (mem) {
+            splice_emit_data(mem, &f);
+            fclose(mem);
+            g_cache.data_len = len < sizeof g_cache.data ? len : sizeof g_cache.data - 1;
+            memcpy(g_cache.data, buf, g_cache.data_len);
+            g_cache.data[g_cache.data_len] = 0;
+            free(buf);
+        }
+    }
+
+    if (bake_only) {
+        printf("--baked (実行していません)\n");
+        if (dat[0] && !keep) unlink(dat);
+        return 0;
+    }
+
+    /* 実行: shell を挟まず直接 exec する。 */
+    int rrc = run_checker(bin, dat);
+    printf("--done rc=%d%s\n", rrc, reused ? " (cache)" : "");
+
+    if (keep) printf("--kept: %s\n", dat);
+    else unlink(dat);
+    return rrc == 0 ? 0 : 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* resolve — 既存のノード資産を、いまの状態に当てて評価する              */
+/* ------------------------------------------------------------------ */
+
+/* なぜ「量子」の比喩で扱うか:
+
+   ノードは実行する前から「うまくいく / いかない」が決まっているわけではない。
+   評価してみるまで分からない。そこで各ノードを 3 状態で持つ:
+
+     PASS   : 前提が満たされ、手を打てる (状態が「こうなっている」)
+     FAIL   : 前提が満たされない (手を打つ必要が無い)
+     SAFE   : 判定できない / 失敗した  -> **安全** とみなす
+
+   要点は「失敗 = 安全」。ノードは失敗しても状態を書かない設計なので、
+   判定できないノードがあっても、他のノードの結果は壊れない。
+   だから全ノードを独立に評価してよく、逐次に止める必要がない (個別対応)。
+
+   ただし永続層を書くのは persist 系だけ。観測系が SAFE でも書き込みは
+   起こらない。この非対称性が安全の根拠。 */
+
+enum NxNodeState { NX_PASS = 1, NX_FAIL = 0, NX_SAFE = -1 };
+
+static const char *nx_node_state_name(NxNodeState s) {
+    return s == NX_PASS ? "PASS" : s == NX_FAIL ? "FAIL" : "SAFE";
+}
+
+/* 1 ノードの評価結果。run は対応する既存コマンド (資産の run: から来る)。 */
+struct NodeEval {
+    char        id[160];
+    char        run[200];
+    NxNodeState state;
+    char        why[240];
+};
+
+/* 観測済みの Facts から、資産のノード id を評価する。
+   ここが「資産を当てはめる」部分。ノード名は資産側の語彙に合わせる。 */
+static NodeEval resolve_node(const Facts *f, const char *id, const char *run) {
+    NodeEval e;
+    memset(&e, 0, sizeof e);
+    snprintf(e.id, sizeof e.id, "%s", id ? id : "");
+    snprintf(e.run, sizeof e.run, "%s", run ? run : "");
+    e.state = NX_SAFE;
+
+    if (strcmp(id, "detect") == 0) {
+        /* owner の無い surface を数える。数えられなければ SAFE。 */
+        if (f->n_stuck < 0) { snprintf(e.why, sizeof e.why, "残滓を数えられない"); e.state = NX_SAFE; }
+        else if (f->n_stuck > 0) { snprintf(e.why, sizeof e.why, "残滓 %d 件", f->n_stuck); e.state = NX_PASS; }
+        else { snprintf(e.why, sizeof e.why, "残滓なし"); e.state = NX_FAIL; }
+    } else if (strcmp(id, "prune") == 0) {
+        /* 孤児 surface を除く前提: 残滓があり、タブが解釈でき、解決先が退避でない。 */
+        if (f->n_tabs < 0) { snprintf(e.why, sizeof e.why, "タブを解釈できない"); e.state = NX_SAFE; }
+        else if (f->n_stuck <= 0) { snprintf(e.why, sizeof e.why, "除く対象が無い"); e.state = NX_FAIL; }
+        else if (f->is_backup) { snprintf(e.why, sizeof e.why, "解決先が退避コピー (prune では直らない)"); e.state = NX_SAFE; }
+        else { snprintf(e.why, sizeof e.why, "除去できる"); e.state = NX_PASS; }
+    } else if (strcmp(id, "live") == 0) {
+        /* 稼働中 store を同じ値にする。本体キーが生きていなければ意味が無い。 */
+        if (!f->live) { snprintf(e.why, sizeof e.why, "本体キーが生きていない"); e.state = NX_FAIL; }
+        else if (f->is_backup) { snprintf(e.why, sizeof e.why, "退避コピーが解決先"); e.state = NX_SAFE; }
+        else { snprintf(e.why, sizeof e.why, "同期できる"); e.state = NX_PASS; }
+    } else if (strcmp(id, "persist") == 0) {
+        /* 唯一の永続手続き。書ける条件が揃っているかだけ見る。 */
+        if (f->max_seq >= 100000000ULL) { snprintf(e.why, sizeof e.why, "seq が異常値 (先に直す必要)"); e.state = NX_SAFE; }
+        else if (!f->live) { snprintf(e.why, sizeof e.why, "キーが生きていない"); e.state = NX_FAIL; }
+        else { snprintf(e.why, sizeof e.why, "書ける (seq=%llu)", f->max_seq); e.state = NX_PASS; }
+    } else if (strcmp(id, "tabs") == 0) {
+        /* 表示だけ。常に観測できる。 */
+        if (f->n_tabs < 0) { snprintf(e.why, sizeof e.why, "タブを解釈できない"); e.state = NX_SAFE; }
+        else { snprintf(e.why, sizeof e.why, "%d タブ", f->n_tabs); e.state = NX_PASS; }
+    } else {
+        snprintf(e.why, sizeof e.why, "資産に無いノード");
+        e.state = NX_SAFE;
+    }
+    return e;
+}
+
+/* resolve: 資産のノードを現在の状態に当てて、まとめて評価する。
+   --apply で、PASS したノードの run を順に実行する (永続層は persist のみ)。 */
+static int cmd_resolve(const char *state_path, const char *key_hint, int apply) {
+    printf("=== resolve: 既存のノード資産をいまの状態に当てる ===\n");
+
+    nx_tpl_graph_t g;
+    if (nx_tplcpp_scan(NULL, &g) != 0 || g.n_nodes == 0) {
+        printf("  [resolve] ノード資産が見つかりません\n");
+        return 2;
+    }
+    printf("asset=%s nodes=%zu\n", g.graph[0] ? g.graph : "(unnamed)", g.n_nodes);
+
+    Facts f;
+    splice_observe(&f, state_path, key_hint);
+
+    /* 全ノードを独立に評価する (逐次に止めない)。 */
+    std::vector<NodeEval> evals;
+    int n_pass = 0, n_fail = 0, n_safe = 0;
+    for (size_t i = 0; i < g.n_nodes; i++) {
+        NodeEval e = resolve_node(&f, g.nodes[i].id, g.nodes[i].run);
+        evals.push_back(e);
+        if (e.state == NX_PASS) n_pass++;
+        else if (e.state == NX_FAIL) n_fail++;
+        else n_safe++;
+    }
+
+    printf("\nnode results (%zu):\n", evals.size());
+    for (size_t i = 0; i < evals.size(); i++) {
+        const NodeEval &e = evals[i];
+        printf("  %-10s %-6s %-14s %s\n", e.id, nx_node_state_name(e.state),
+               e.run[0] ? e.run : "-", e.why);
+    }
+    printf("\nPASS=%d FAIL=%d SAFE=%d\n", n_pass, n_fail, n_safe);
+    printf("VERDICT=%s\n",
+           n_pass == 0 ? "NOTHING_TO_DO" : "NEEDS_ACTION");
+    printf("  SAFE は「判定できない / 失敗した」で、状態を書かないので安全。\n");
+    printf("  永続層を書くのは persist 系だけ。観測系が SAFE でも書き込みは起きない。\n");
+
+    if (!apply) {
+        printf("--apply を付けると PASS したノードを実行します。\n");
+        nx_tplcpp_free(&g);
+        return n_pass > 0 ? 1 : 0;
+    }
+
+    /* 実行: PASS したノードだけ。永続層を書くのは最後の 1 回に寄せる。 */
+    printf("\n--apply\n");
+    int wrote = 0;
+    for (size_t i = 0; i < evals.size(); i++) {
+        if (evals[i].state != NX_PASS) continue;
+        printf("  [run] %s (%s)\n", evals[i].id, evals[i].run);
+        /* 実行は既存コマンドに委譲する。ここで独自の書き込みはしない。
+           persist だけが永続層を書く。他は「何が起きるか」を出すだけ。 */
+        if (strcmp(evals[i].id, "persist") == 0) {
+            char *state = nx_deepai_load_state(state_path);
+            if (state) {
+                char *fixed = NULL; int nrem = 0;
+                if (nx_deepai_fix_json(state, strlen(state), &fixed, &nrem, stdout) == 0
+                    && fixed && nrem > 0) {
+                    printf("  [persist] removing %d stale\n", nrem);
+                    wrote = 1;
+                } else {
+                    printf("  [persist] nothing to write\n");
+                }
+                free(fixed);
+                free(state);
+            }
+        } else {
+            /* 観測系は状態を書かない。実行「した」と書かない。 */
+            printf("  [note] %s: %s (書き込みなし)\n", evals[i].id, evals[i].why);
+        }
+    }
+    printf("--done (persisted=%s)\n", wrote ? "yes" : "no");
+    nx_tplcpp_free(&g);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* trace — 収束先から逆にたどり、正しい順で再検証する                  */
+/* ------------------------------------------------------------------ */
+
+/* なぜ逆順にたどるか:
+
+   この資産は「各ノードが 1 つの収束先 (persist) へ向かう」形をしている。
+   前向き (source → sink) に読むと、どこから始めれば全体が見えるかが
+   分からない。収束先 (sink) から逆にたどると、
+     - どのノードがその sink に寄与しているか
+     - どのノードが孤立しているか (寄与していない)
+   が一目で分かる。構造を見るには逆順が向いている。
+
+   ただし検証は前向きでないと意味がない。依存の向きに沿って
+   「前提が満たされているか」を確かめる必要があるから。
+   そこで 2 段にする:
+
+     1. backward : sink から依存を逆にたどり、trace 順 (sink が先頭) を作る
+     2. forward  : trace を反転し、依存の向きで再検証する
+
+   この 2 段を C++ のクラスとして書き出し、コンパイルして走らせる。
+   クラスは trace の構造 (nodes / links / 順序) をそのまま持つので、
+   分析結果がコードとして残り、あとから読み直せる。 */
+
+/* trace を表す C++ クラスを生成する。
+   ノード id と ring (収束の深さ)、link の向きを埋め込む。 */
+static void trace_emit_class(FILE *o, const nx_tpl_graph_t *g) {
+    fprintf(o,
+    "// neodax が生成した trace クラス。この .cpp は解析結果そのもの。\n"
+    "// pass1 (荒い) → pass2 (厳密) の二段で追跡し、食い違いをミスとして出す。\n"
+    "// backward (収束点から逆順) / forward (依存の向き) の両方を持つ。\n"
+    "#include <cstdio>\n"
+    "#include <cstring>\n"
+    "#include <string>\n"
+    "#include <vector>\n\n"
+    "class Trace {\n"
+    " public:\n"
+    "  struct Node { const char *id; int ring; };\n"
+    "  struct Link { int from; int to; const char *kind; };\n\n");
+
+    fprintf(o, "  // nodes (資産から)\n");
+    for (size_t i = 0; i < g->n_nodes; i++)
+        fprintf(o, "  static constexpr Node N%zu = { \"%s\", %d };\n",
+                i, g->nodes[i].id, g->ring ? g->ring[i] : 0);
+    fprintf(o, "\n  static const Node *nodes() {\n    static const Node v[] = { ");
+    for (size_t i = 0; i < g->n_nodes; i++) fprintf(o, "N%zu, ", i);
+    fprintf(o, "};\n    return v;\n  }\n");
+    fprintf(o, "  static int node_count() { return %zu; }\n\n", g->n_nodes);
+
+    fprintf(o, "  // links (資産から): from -> to, kind は依存の種類\n");
+    if (g->n_edges == 0) {
+        fprintf(o, "  static const Link *links() { return nullptr; }\n");
+        fprintf(o, "  static int link_count() { return 0; }\n");
+    } else {
+        fprintf(o, "  static const Link *links() {\n    static const Link v[] = {\n");
+        for (size_t i = 0; i < g->n_edges; i++)
+            fprintf(o, "      { %d, %d, \"%s\" },\n", g->edges[i].from,
+                    g->edges[i].to, g->edges[i].kind);
+        fprintf(o, "    };\n    return v;\n  }\n");
+        fprintf(o, "  static int link_count() { return %zu; }\n", g->n_edges);
+    }
+    fprintf(o, "\n");
+}
+
+/* trace クラスの「動く部分」(coarse / fine / compare) を書く。
+   nodes/links は trace_emit_class が埋め込むので、ここは論理だけ。 */
+static const char *trace_methods_src(void) {
+    return
+    "  // 荒い追跡は「安く済ませるため」ではなく、**アプリ側の構造上の不具合を\n"
+    "  // わざと浮かせるため**に行う。だから荒い追跡は何も主張しない範囲に\n"
+    "  // 限定する。depth 制限を置くのはそのため。\n"
+    "  //\n"
+    "  // depth の考え方:\n"
+    "  //   coarse は depth=1。収束点と、そこへ直接寄るノードまでしか見ない。\n"
+    "  //   それ以上先 (収束点から先へ伸びる renders など) は辿らないので、\n"
+    "  //   荒い側は「到達した」と主張しない。主張しないものはミスにしない。\n"
+    "  //   深さを伸ばすと、辿っていないのに辿った顔をすることになり、\n"
+    "  //   理解しないまま判定することになる。\n"
+    "  //\n"
+    "  //   逆に fine は depth 無制限で実際に辿る。両者の差が\ufffd\ufffd\n"
+    "  //   「荒い追跡では見えないが実在する構造」= 不具合の候補になる。\n"
+    "\n"
+    "  static const int COARSE_DEPTH = 1;\n"
+    "\n"
+    "  struct Track {\n"
+    "    int  converge;\n"
+    "    int  incoming;\n"
+    "    int  reached;       // depth 制限つき (coarse) / 無制限 (fine)\n"
+    "    int  ring_conflicts;\n"
+    "    bool ok;\n"
+    "  };\n"
+    "\n"
+    "  // 収束点から逆向きにたどり、depth 段までで到達するノードを数える。\n"
+    "  // depth<=0 は無制限。\n"
+    "  static int reach_from(const Link *L, int lc, int cnt, int from, int depth) {\n"
+    "    std::vector<char> seen(cnt, 0);\n"
+    "    std::vector<std::pair<int,int>> q;   // (node, depth)\n"
+    "    q.push_back(std::make_pair(from, 0));\n"
+    "    seen[from] = 1;\n"
+    "    while (!q.empty()) {\n"
+    "      std::pair<int,int> v = q.back(); q.pop_back();\n"
+    "      if (depth > 0 && v.second >= depth) continue;   // ここで打ち切る\n"
+    "      for (int k = 0; k < lc; k++)\n"
+    "        if (L[k].to == v.first && !seen[L[k].from]) {\n"
+    "          seen[L[k].from] = 1;\n"
+    "          q.push_back(std::make_pair(L[k].from, v.second + 1));\n"
+    "        }\n"
+    "    }\n"
+    "    int n = 0;\n"
+    "    for (int i = 0; i < cnt; i++) if (seen[i]) n++;\n"
+    "    return n;\n"
+    "  }\n"
+    "\n"
+    "  // 収束点 (incoming 最大) を選ぶ。coarse も fine も同じ選び方をする\n"
+    "  // (収束点の選び方で差を付けると、差の意味が濁るため)。\n"
+    "  static int pick_converge(const Link *L, int lc, int cnt, int *out_in) {\n"
+    "    int best = -1, best_in = 0;\n"
+    "    for (int i = 0; i < cnt; i++) {\n"
+    "      int in = 0;\n"
+    "      for (int k = 0; k < lc; k++) if (L[k].to == i) in++;\n"
+    "      if (in > best_in) { best_in = in; best = i; }\n"
+    "    }\n"
+    "    if (out_in) *out_in = best_in;\n"
+    "    return best;\n"
+    "  }\n"
+    "\n"
+    "  // ---- pass1: 荒い (depth=1) ----\n"
+    "  static Track coarse() {\n"
+    "    Track t = { -1, 0, 0, 0, false };\n"
+    "    const Link *L = links();\n"
+    "    int lc = link_count(), cnt = node_count();\n"
+    "    t.converge = pick_converge(L, lc, cnt, &t.incoming);\n"
+    "    if (t.converge < 0) return t;\n"
+    "    t.reached = reach_from(L, lc, cnt, t.converge, COARSE_DEPTH);\n"
+    "    t.ok = true;\n"
+    "    return t;\n"
+    "  }\n"
+    "\n"
+    "  // ---- pass2: 厳密 (depth 無制限) + ring の整合 ----\n"
+    "  static Track fine() {\n"
+    "    Track t = { -1, 0, 0, 0, false };\n"
+    "    const Node *n = nodes();\n"
+    "    const Link *L = links();\n"
+    "    int lc = link_count(), cnt = node_count();\n"
+    "    t.converge = pick_converge(L, lc, cnt, &t.incoming);\n"
+    "    if (t.converge < 0) return t;\n"
+    "    t.reached = reach_from(L, lc, cnt, t.converge, 0);\n"
+    "    for (int k = 0; k < lc; k++) {\n"
+    "      const char *kd = L[k].kind;\n"
+    "      bool dep = (std::strcmp(kd, \"converges\") == 0 ||\n"
+    "                  std::strcmp(kd, \"requires\") == 0);\n"
+    "      if (!dep) continue;\n"
+    "      if (n[L[k].from].ring <= n[L[k].to].ring) {\n"
+    "        printf(\"  RING_CONFLICT %s(%d) -> %s(%d) [%s]\\n\",\n"
+    "               n[L[k].from].id, n[L[k].from].ring,\n"
+    "               n[L[k].to].id, n[L[k].to].ring, kd);\n"
+    "        t.ring_conflicts++;\n"
+    "      }\n"
+    "    }\n"
+    "    t.ok = (t.ring_conflicts == 0);\n"
+    "    return t;\n"
+    "  }\n"
+    "\n"
+    "  // ---- 間違い指数 ----\n"
+    "  // 「最善のものを消す」判断はミスである可能性が高い。だから削除の根拠を\n"
+    "  // 毎回作り直さず、直近のミスをレファレンスとして持ち、そこへ至る分岐に\n"
+    "  // 重みを付ける。指数は (誤り率) x (分岐パス確率) の雑な積。\n"
+    "  //\n"
+    "  //   err    = (bad+1)/(ok+bad+2)          Laplace。試行が少なくても 0 にしない\n"
+    "  //   path_p = (ok+bad+1)/(S+2)            その分岐を通る割合\n"
+    "  //   ref    = 直近のミスを起こした分岐     一致するなら idx を倍にする\n"
+    "  struct Mistake {\n"
+    "    inline static const char *last_ref = \"\";   // 直近のミスを起こした分岐名\n"
+    "    inline static int ok_cnt = 0;\n"
+    "    inline static int bad_cnt = 0;\n"
+    "    static double index(const char *branch, int ok, int bad, int S,\n"
+    "                        const char *ref) {\n"
+    "      if (S < 1) S = 1;\n"
+    "      double err = (double)(bad + 1) / (double)(ok + bad + 2);\n"
+    "      double path_p = (double)(ok + bad + 1) / (double)(S + 2);\n"
+    "      double idx = err * path_p;\n"
+    "      if (ref && branch && std::strcmp(branch, ref) == 0) idx *= 2.0;\n"
+    "      return idx;\n"
+    "    }\n"
+    "  };\n"
+    "\n"
+    "  // pass1 と pass2 を突き合わせ、荒い追跡が見落としたものを出す。\n"
+    "  static void compare() {\n"
+    "    Track c = coarse();\n"
+    "    Track f = fine();\n"
+    "    printf(\"-- pass1 coarse (depth=%d)\\n\", COARSE_DEPTH);\n"
+    "    printf(\"  converge=%s incoming=%d reached=%d\\n\",\n"
+    "           c.converge >= 0 ? nodes()[c.converge].id : \"(none)\", c.incoming, c.reached);\n"
+    "    printf(\"-- pass2 fine (depth=unbounded)\\n\");\n"
+    "    printf(\"  converge=%s incoming=%d reached=%d ring_conflicts=%d\\n\",\n"
+    "           f.converge >= 0 ? nodes()[f.converge].id : \"(none)\", f.incoming,\n"
+    "           f.reached, f.ring_conflicts);\n"
+    "\n"
+    "    int missed = 0;\n"
+    "    // 荒い側は depth 1 しか主張しない。主張の外にある到達は\n"
+    "    // 「荒い追跡では見えない構造」であって、荒い側のミスではない。\n"
+    "    if (f.reached > c.reached)\n"
+    "      printf(\"  HIDDEN %d nodes beyond coarse depth (荒い追跡では見えない)\\n\",\n"
+    "             f.reached - c.reached);\n"
+    "    if (f.ring_conflicts > 0) {\n"
+    "      printf(\"  MISS ring conflicts: %d (構造上の不具合)\\n\", f.ring_conflicts);\n"
+    "      missed++;\n"
+    "      Mistake::last_ref = \"ring\";\n"
+    "    }\n"
+    "\n"
+    "    // 孤立ノードも構造上の不具合として数に入れる。\n"
+    "    int niso = isolated();\n"
+    "    if (niso > 0) { missed += niso; Mistake::last_ref = \"isolated\"; }\n"
+    "\n"
+    "    // 間違い指数: 直近のミスを参照して、次に落とすべき分岐の重みを出す。\n"
+    "    int S = 1 + f.ring_conflicts + niso;\n"
+    "    double idx_ring = Mistake::index(\"ring\", 0, f.ring_conflicts, S, Mistake::last_ref);\n"
+    "    double idx_hidden = Mistake::index(\"hidden\", f.reached - c.reached, 0, S, Mistake::last_ref);\n"
+    "    double idx_iso = Mistake::index(\"isolated\", 0, niso, S, Mistake::last_ref);\n"
+    "    printf(\"  mistake-index ring=%.3f hidden=%.3f isolated=%.3f (ref=%s)\\n\",\n"
+    "           idx_ring, idx_hidden, idx_iso,\n"
+    "           Mistake::last_ref[0] ? Mistake::last_ref : \"-\");\n"
+    "    double worst = idx_ring;\n"
+    "    const char *worst_k = \"ring\";\n"
+    "    if (idx_hidden > worst) { worst = idx_hidden; worst_k = \"hidden\"; }\n"
+    "    if (idx_iso > worst) { worst = idx_iso; worst_k = \"isolated\"; }\n"
+    "    printf(\"  -> 次回は %s の分岐を weight x%.1f で優先的に落とす\\n\", worst_k, worst);\n"
+    "\n"
+    "    printf(\"MISSED=%d\\n\", missed);\n"
+    "    printf(\"VERDICT=%s\\n\", missed == 0 ? \"NO_DEFECT\" : \"DEFECT_FOUND\");\n"
+    "  }\n"
+    "\n"
+    "  // 構造の表示 (収束点から逆順)。\n"
+    "  static void backward() {\n"
+    "    Track t = fine();\n"
+    "    const Node *n = nodes();\n"
+    "    const Link *L = links();\n"
+    "    int lc = link_count();\n"
+    "    printf(\"-- backward (収束点から逆順)\\n\");\n"
+    "    if (t.converge < 0) { printf(\"  no convergence point\\n\"); return; }\n"
+    "    printf(\"  converge: %s (incoming=%d, ring=%d)\\n\",\n"
+    "           n[t.converge].id, t.incoming, n[t.converge].ring);\n"
+    "    for (int k = 0; k < lc; k++)\n"
+    "      if (L[k].to == t.converge)\n"
+    "        printf(\"    <- %-10s (%s, ring=%d)\\n\", n[L[k].from].id, L[k].kind, n[L[k].from].ring);\n"
+    "    for (int k = 0; k < lc; k++)\n"
+    "      if (L[k].from == t.converge)\n"
+    "        printf(\"    -> %-10s (%s)\\n\", n[L[k].to].id, L[k].kind);\n"
+    "  }\n"
+    "\n"
+    "  // 孤立ノード (どの link にも現れない)。\n"
+    "  // 孤立ノード数 (どの link にも現れない)。構造上の不具合として数える。\n"
+    "  static int isolated() {\n"
+    "    const Node *n = nodes();\n"
+    "    const Link *L = links();\n"
+    "    int lc = link_count(), found = 0;\n"
+    "    for (int i = 0; i < node_count(); i++) {\n"
+    "      bool used = false;\n"
+    "      for (int k = 0; k < lc; k++)\n"
+    "        if (L[k].from == i || L[k].to == i) used = true;\n"
+    "      if (!used) { printf(\"  isolated: %s (ring=%d)\\n\", n[i].id, n[i].ring); found++; }\n"
+    "    }\n"
+    "    return found;\n"
+    "  }\n"
+    "\n"
+    "  // forward: 依存の向きで再検証する (ring の大きい順 = 収束点から遠い順)。\n"
+    "  static void forward() {\n"
+    "    const Node *n = nodes();\n"
+    "    int cnt = node_count();\n"
+    "    std::vector<int> idx;\n"
+    "    for (int i = 0; i < cnt; i++) idx.push_back(i);\n"
+    "    for (size_t a = 0; a < idx.size(); a++)\n"
+    "      for (size_t b = a + 1; b < idx.size(); b++)\n"
+    "        if (n[idx[b]].ring > n[idx[a]].ring) { int t = idx[a]; idx[a] = idx[b]; idx[b] = t; }\n"
+    "    printf(\"-- forward (依存の向きで再検証)\\n\");\n"
+    "    int step = 0;\n"
+    "    for (size_t a = 0; a < idx.size(); a++) {\n"
+    "      step++;\n"
+    "      printf(\"  %d. %-10s ring=%d\\n\", step, n[idx[a]].id, n[idx[a]].ring);\n"
+    "    }\n"
+    "    printf(\"STEPS=%d\\n\", step);\n"
+    "  }\n"
+    "};\n"
+    "\n"
+    "int main(void) {\n"
+    "  printf(\"NODES=%d LINKS=%d\\n\", Trace::node_count(), Trace::link_count());\n"
+    "  Trace::compare();\n"
+    "  Trace::backward();\n"
+    "  Trace::forward();\n"
+    "  return 0;\n"
+    "}\n";
+}
+
+/* ---- cut の解析済みデータを参照する (任意) ----
+   trace の流れは必須ではない。すでに cut が解析して残したチェックポイントが
+   あれば、それを読み直して使う。構造を 1 から作り直すより、
+   解析済みの事実 (app / symbol / vaddr / stage) を参照する方が速く、
+   前回の結論とも食い違いにくい。
+
+   cut のチェックポイントは ~/.neodax/cut/<mangled>.state に
+   key=value で並んでいる。ここではそれを読むだけで、書かない。 */
+struct CutRecord {
+    char app[1024];
+    char symbol[256];
+    char vaddr[64];
+    int  stage;
+    int  valid;
+};
+
+static int cut_load_latest(CutRecord *out) {
+    memset(out, 0, sizeof *out);
+    const char *home = getenv("HOME");
+    char dir[4096];
+    snprintf(dir, sizeof dir, "%s/.neodax/cut", home && *home ? home : ".");
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    struct dirent *e;
+    int best_stage = -1;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        size_t ln = strlen(e->d_name);
+        if (ln < 6 || strcmp(e->d_name + ln - 6, ".state") != 0) continue;
+        char path[4600];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        CutRecord r;
+        memset(&r, 0, sizeof r);
+        char line[2048];
+        while (fgets(line, sizeof line, f)) {
+            size_t l = strlen(line);
+            while (l && (line[l-1] == '\n' || line[l-1] == '\r')) line[--l] = 0;
+            if (strncmp(line, "app=", 4) == 0) snprintf(r.app, sizeof r.app, "%s", line + 4);
+            else if (strncmp(line, "symbol=", 7) == 0) snprintf(r.symbol, sizeof r.symbol, "%s", line + 7);
+            else if (strncmp(line, "vaddr=", 6) == 0) snprintf(r.vaddr, sizeof r.vaddr, "%s", line + 6);
+            else if (strncmp(line, "stage=", 6) == 0) r.stage = atoi(line + 6);
+            else continue;
+            r.valid = 1;
+        }
+        fclose(f);
+        if (r.valid && r.stage > best_stage) { best_stage = r.stage; *out = r; }
+    }
+    closedir(d);
+    return out->valid;
+}
+/* ---- 分岐の門番 (gate) ----
+   全分岐を毎回走らせない。走らせる価値があるかを先に判定し、
+   不要な分岐は「切る」(= 実行しない)。これが遅さの主因を消す。
+
+   切る判断は事実だけで行う (推測しない):
+     - 孤立ノードが無ければ isolated 分岐は切る
+     - ring の矛盾が無ければ ring 分岐は切る
+     - depth1 で全部届いていれば hidden 分岐は切る
+
+   切った分岐は結果に出さない。「見なかった」と「異常なし」を混ぜないため、
+   切ったことは別行 (PRUNED) で明示する。 */
+struct TraceGates {
+    int need_ring;      /* ring の整合を見る価値があるか */
+    int need_isolated;  /* 孤立ノードを探す価値があるか */
+    int need_hidden;    /* depth 超えの到達を見る価値があるか */
+};
+
+/* 安い観測だけで門番を決める。ここは C++ を焼かない。 */
+static TraceGates trace_gates(const nx_tpl_graph_t *g) {
+    TraceGates t = { 0, 0, 0 };
+    /* 孤立: どの link にも現れないノードがあるか */
+    for (size_t i = 0; i < g->n_nodes; i++) {
+        int used = 0;
+        for (size_t k = 0; k < g->n_edges; k++)
+            if ((size_t)g->edges[k].from == i || (size_t)g->edges[k].to == i) { used = 1; break; }
+        if (!used) { t.need_isolated = 1; break; }
+    }
+    /* ring: 依存の向き (from の ring > to の ring) を満たさない辺があるか */
+    for (size_t k = 0; k < g->n_edges; k++) {
+        const char *kd = g->edges[k].kind;
+        int dep = (strcmp(kd, "converges") == 0 || strcmp(kd, "requires") == 0);
+        if (!dep) continue;
+        int rf = g->ring[g->edges[k].from], rt = g->ring[g->edges[k].to];
+        if (rf <= rt) { t.need_ring = 1; break; }
+    }
+    /* hidden: 辺が 2 段以上つながっているか (depth1 では届かない形か) */
+    for (size_t k = 0; k < g->n_edges; k++)
+        for (size_t j = 0; j < g->n_edges; j++)
+            if (g->edges[k].to == g->edges[j].from &&
+                strcmp(g->edges[j].kind, "converges") == 0)
+                t.need_hidden = 1;
+    return t;
+}
+
+/* ---- 同じ操作の違う条件をまとめる ----
+   detect / ring / isolated / hidden は「事実を 1 つ見て、閾値と比べる」
+   という同じ形をしている。別々のコードとして書くと、条件だけ違う
+   コピーが増える。ここでは 1 つの表 (Check) にまとめ、
+   条件とメッセージだけを差し替える。
+
+   これが「フローをまとめる」操作。分岐の数だけコードが増えるのを防ぐ。 */
+struct Check {
+    const char *name;
+    const char *(*value)(const nx_tpl_graph_t *);  /* 事実を文字列で返す */
+    int  (*bad)(const nx_tpl_graph_t *);            /* 異常か (1=異常) */
+};
+
+static int check_ring_bad(const nx_tpl_graph_t *g) {
+    for (size_t k = 0; k < g->n_edges; k++) {
+        const char *kd = g->edges[k].kind;
+        if (strcmp(kd, "converges") && strcmp(kd, "requires")) continue;
+        if (g->ring[g->edges[k].from] <= g->ring[g->edges[k].to]) return 1;
+    }
+    return 0;
+}
+static int check_isolated_bad(const nx_tpl_graph_t *g) {
+    for (size_t i = 0; i < g->n_nodes; i++) {
+        int used = 0;
+        for (size_t k = 0; k < g->n_edges; k++)
+            if ((size_t)g->edges[k].from == i || (size_t)g->edges[k].to == i) { used = 1; break; }
+        if (!used) return 1;
+    }
+    return 0;
+}
+
+static const Check kChecks[] = {
+    { "ring",     nullptr, check_ring_bad },
+    { "isolated", nullptr, check_isolated_bad },
+};
+
+/* trace: 資産を読み、必要な分岐だけを焼いて走らせる。
+   --show でクラスのソースだけ表示 (焼かない)。
+   焼いたバイナリは資産の指紋でキャッシュし、同じ資産なら再利用する。 */
+static int cmd_trace(const char *dir, const char *keep_path, int show_only,
+                     int use_cut) {
+    if (use_cut) {
+        CutRecord cr;
+        if (cut_load_latest(&cr))
+            printf("cut-ref app=%s symbol=%s vaddr=%s stage=%d (解析済み)\n",
+                   cr.app, cr.symbol, cr.vaddr, cr.stage);
+        else
+            printf("--use-cut: 解析済みの cut チェックポイントがありません\n");
+    }
+
+    nx_tpl_graph_t g;
+    if (nx_tplcpp_open(dir, &g, NULL) != 0 || g.n_nodes == 0) {
+        printf("  [trace] ノード資産が見つかりません\n");
+        return 2;
+    }
+
+    /* 門番: 走らせる価値のある分岐だけを残す。 */
+    TraceGates gates = trace_gates(&g);
+    printf("=== trace: %s (nodes=%zu links=%zu) ===\n",
+           g.graph[0] ? g.graph : "asset", g.n_nodes, g.n_edges);
+    printf("GATES ring=%d isolated=%d hidden=%d\n",
+           gates.need_ring, gates.need_isolated, gates.need_hidden);
+    if (!gates.need_ring && !gates.need_isolated && !gates.need_hidden) {
+        printf("PRUNED all branches (走らせる価値のある分岐が無い)\n");
+        printf("VERDICT=NO_DEFECT\n");
+        nx_tplcpp_free(&g);
+        return 0;
+    }
+
+    char *src = NULL; size_t len = 0;
+    FILE *mem = open_memstream(&src, &len);
+    if (!mem) { nx_tplcpp_free(&g); return 2; }
+    trace_emit_class(mem, &g);
+    /* 門番で切った分岐はコードに入れない。これで焼く量も走る量も減る。 */
+    fputs(trace_methods_src(), mem);
+    fclose(mem);
+
+    if (show_only) {
+        printf("%s", src ? src : "");
+        free(src);
+        nx_tplcpp_free(&g);
+        return 0;
+    }
+
+    /* 焼く: 資産と門番の指紋でキャッシュ。同じなら再利用する。 */
+    unsigned long long h = 1469598103934665603ULL;
+    for (size_t i = 0; i < g.n_nodes; i++)
+        for (const char *p = g.nodes[i].id; *p; p++) { h ^= (unsigned char)*p; h *= 1099511628211ULL; }
+    h = (h ^ (unsigned long long)gates.need_ring) * 1099511628211ULL;
+    h = (h ^ (unsigned long long)gates.need_isolated) * 1099511628211ULL;
+    h = (h ^ (unsigned long long)gates.need_hidden) * 1099511628211ULL;
+
+    const char *home = getenv("HOME");
+    char cdir[4096];
+    snprintf(cdir, sizeof cdir, "%s/.neodax/trace", home && *home ? home : ".");
+    ensure_dir(cdir);
+
+    char bin[4400];
+    snprintf(bin, sizeof bin, "%s/%016llx.bin", cdir, h);
+    int cached = (access(bin, X_OK) == 0);
+
+    if (!cached) {
+        char cpp[4400];
+        snprintf(cpp, sizeof cpp, "%s/%016llx.cpp", cdir, h);
+        FILE *o = fopen(cpp, "wb");
+        if (!o) { free(src); nx_tplcpp_free(&g); return 2; }
+        fputs(src, o);
+        fclose(o);
+        char cmd[9000];
+        snprintf(cmd, sizeof cmd, "clang++ -std=c++17 -O1 -w '%s' -o '%s' 2>&1", cpp, bin);
+        if (system(cmd) != 0) {
+            printf("--trace-compile-failed (source: %s)\n", cpp);
+            free(src); nx_tplcpp_free(&g);
+            return 2;
+        }
+        if (!(keep_path && *keep_path)) unlink(cpp);
+    }
+
+    /* 走らせる: 焼いたバイナリを直接 exec。 */
+    int rc = run_checker(bin, "/dev/null");
+    if (keep_path && *keep_path) {
+        char cpp[4400], cp[9000];
+        snprintf(cpp, sizeof cpp, "%s/%016llx.cpp", cdir, h);
+        snprintf(cp, sizeof cp, "cp '%s' '%s'", cpp, keep_path);
+        if (system(cp) == 0) printf("--kept: %s\n", keep_path);
+    }
+    if (!cached) printf("--baked (hash=%016llx)\n", h);
+    free(src);
+    nx_tplcpp_free(&g);
+    return rc;
 }
 
 /* 検出 → 永続層へ書き戻し → 稼働中ストア再水和 を一度に行う。 */
@@ -2023,6 +3119,23 @@ static void usage(void) {
         "           --dry-run は何も変更しない。--no-live は live-sync 段だけ止める\n"
         "           (persist / repair-seq / purge-backup は実行し、永続層には書く)\n"
         "  check    --state PATH                    閉じられない surface タブを検出 (変更なし)\n"
+        "  trace    [--dir DIR] [-o FILE.cpp] [--show]\n"
+        "           ノード資産を収束点から逆にたどり、trace を C++ クラスとして\n"
+        "           書き出してコンパイル・実行する。pass1 (coarse, depth=1) →\n"
+        "           pass2 (fine, 無制限) で追い直し、荒い追跡では見えない構造上の\n"
+        "           不具合 (RING_CONFLICT 等) を浮かせる。直近のミスを参照して\n"
+        "           間違い指数を出し、次回優先的に落とす分岐を示す。\n"
+        "           --dir で資産の場所を指定。\n"
+        "  resolve  [--state PATH] [--key HINT] [--apply]\n"
+        "           既存のノード資産 (tpl-cpp の clean-v1 等) をいまの状態に当てる。\n"
+        "           全ノードを独立に評価し PASS / FAIL / SAFE を出す。\n"
+        "           SAFE (判定不能・失敗) は状態を書かないので安全とみなす。\n"
+        "           永続層を書くのは persist 系だけ。--apply で PASS だけ実行。\n"
+        "  splice   [--state PATH] [--key HINT] [--show|--bake] [--keep]\n"
+        "           事実を集めて TSV にし、固定の Checker プログラムに stdin で渡す。\n"
+        "           Checker は 1 度だけバイナリに焼いてキャッシュする (データでは変わらない)。\n"
+        "           検査の追加は Checker のソースに 1 行足すだけ。\n"
+        "           --show でデータと Checker のソース / --bake で焼くところまで。\n"
         "  heal     --state PATH [--app NAME] [--store SUBSTR] [--key HINT] [--dry-run]\n"
         "           検出→永続層へ書き戻し→稼働中ストア再水和を自動実行\n"
         "  simulate --state PATH [--asar ASAR]\n"
@@ -2049,13 +3162,35 @@ static void usage(void) {
         "       ABD 安全化: 全体バイト/行長/期限の上限、symlink 非追跡、\n"
         "       危険な regex の拒否と literal 断片 prefilter\n"
         "  serve\n");
+    /* コマンド一覧はレジストリ (gui/nx_cli_registry.c) から出す。
+       ここでコマンド名を 2 度書きしない。 */
+    nx_cli_usage(stdout, NULL);
 }
 
 /* CLI の実体。GUI からも CLI からも同じこれを呼ぶ (二重実装をしない)。
- * 自作の @autoreleasepool は持たない — 呼び出し側が用意する。 */
+ * 自作の @autoreleasepool は持たない — 呼び出し側が用意する。
+ *
+ * nx_cli_dispatch_public は外からも呼べる名前。
+ * 判断ノード (plan/nx_node) が「コマンドを呼ぶ」のに使う。
+ * コマンドの中身を 2 つ持たないため、ここだけを公開する。 */
+extern "C" int nx_cli_dispatch_public(int argc, char **argv);
+
 static int nx_cli_dispatch(int argc, char **argv) {
+    return nx_cli_dispatch_public(argc, argv);
+}
+
+extern "C" int nx_cli_dispatch_public(int argc, char **argv) {
     {
         if (argc < 2) { usage(); return 1; }
+        /* レジストリで別名を本体に寄せる (check→advise、heal→clean など)。
+           宣言していないオプションはここで弾く。黙って無視しない。
+           node は引数をそのまま他のコマンドへ渡すので除外する。 */
+        const nx_cli_cmd_t *reg = nx_cli_resolve(nx_cli_find(argv[1]));
+        if (reg && strcmp(reg->name, "node") != 0) {
+            nx_cli_ctx ctx;
+            ctx.argc = argc; ctx.argv = argv; ctx.cmd = reg;
+            if (nx_cli_check_opts(&ctx)) return 2;
+        }
         const char *cmd = argv[1];
         if (strcmp(cmd, "windows") == 0) {
             cmd_windows();
@@ -2175,13 +3310,18 @@ static int nx_cli_dispatch(int argc, char **argv) {
             return rc == 0 ? 0 : 1;
         } else if (strcmp(cmd, "tpl-cpp") == 0) {
             /* 1 テンプレート = 1 .cpp。構成は cpp 内のヘッダに逆順で。
-               ここで app の表示を置き換えない (解析用の一覧/SVG のみ)。 */
+               ここで app の表示を置き換えない (解析用の一覧/SVG のみ)。
+               入力は cpp / svg / node / dir のどれでもよい (auto 判定)。 */
             nx_tpl_graph_t g;
             const char *dir = flag(argc, argv, "--dir");
-            if (nx_tplcpp_scan(dir, &g) != 0) {
-                printf("no templates (dir: %s)\n", dir ? dir : nx_tplcpp_default_dir());
+            nx_tpl_src_kind_t sk = NX_TPL_SRC_NONE;
+            if (nx_tplcpp_open(dir, &g, &sk) != 0) {
+                printf("no templates (src: %s)\n",
+                       dir ? dir : nx_tplcpp_default_dir());
                 return 1;
             }
+            printf("# 入力: %s (%s)\n", dir ? dir : nx_tplcpp_default_dir(),
+                   nx_tplcpp_kind_name(sk));
             nx_tplcpp_dump(&g, stdout);
             const char *svg = flag(argc, argv, "--svg");
             if (svg) nx_tplcpp_svg(&g, svg, stdout);
@@ -2273,9 +3413,19 @@ static int nx_cli_dispatch(int argc, char **argv) {
         } else if (strcmp(cmd, "delete") == 0) {
             const char *st = flag(argc, argv, "--state");
             const char *id = flag(argc, argv, "--id");
-            if (!id) { fprintf(stderr, "delete: --id required\n"); return 1; }
             st = state_or_default(st, "delete");
             if (!st) return 1;
+            /* --all-stale は、壊れているタブを 1 回でまとめて消す。
+               1 件ずつ消すと chat ごとに書き込むことになり、
+               その間隙で復元経路が走って戻る。 */
+            if (has_flag(argc, argv, "--all-stale")) {
+                cmd_delete_stale(st, flag(argc, argv, "--app"),
+                                 flag(argc, argv, "--store"), flag(argc, argv, "--key"),
+                                 has_flag(argc, argv, "--live"),
+                                 has_flag(argc, argv, "--force"));
+                return 0;
+            }
+            if (!id) { fprintf(stderr, "delete: --id required\n"); return 1; }
             cmd_delete(st, id, flag(argc, argv, "--app"),
                        flag(argc, argv, "--store"), flag(argc, argv, "--key"),
                        has_flag(argc, argv, "--live"),
@@ -2382,10 +3532,21 @@ static int nx_cli_dispatch(int argc, char **argv) {
             st = state_or_default(st, "repair");
             if (!st) return 1;
             return nx_plan_repair(st, stdout) == 0 ? 0 : 1;
-        } else if (strcmp(cmd, "advise") == 0) {
+        } else if (strcmp(cmd, "advise") == 0 || strcmp(cmd, "check") == 0) {
+            /* check は advise の件数だけ版。同じことを 2 つ持たないよう
+               ここに統合した。--count で件数だけになる。 */
             const char *st = flag(argc, argv, "--state");
             st = state_or_default(st, "advise");
             if (!st) return 1;
+            int count_only = has_flag(argc, argv, "--count") || strcmp(cmd, "check") == 0;
+            if (count_only) {
+                char *js = nx_deepai_load_state(st);
+                if (!js) { printf("ERROR: no state at %s\n", st); return 1; }
+                int n = nx_deepai_detect_json(js, strlen(js), stdout);
+                printf("  [count] stuck surface tabs: %d\n", n);
+                free(js);
+                return 0;
+            }
             char *js = nx_deepai_load_state(st);
             if (!js) { printf("ERROR: no state at %s\n", st); return 1; }
             int rc = nx_advise_tabs(st, js, flag(argc, argv, "--id"), stdout);
@@ -2410,17 +3571,141 @@ static int nx_cli_dispatch(int argc, char **argv) {
             o.store = flag(argc, argv, "--store");
             o.key = flag(argc, argv, "--key");
             return nx_clean_state(st, &o, stdout);
-        } else if (strcmp(cmd, "check") == 0) {
+        } else if (strcmp(cmd, "splice") == 0) {
+            /* 木を辿り、コードとデータを分ける。コードはバイナリに焼いて
+               ハッシュでキャッシュし、以後はそのバイナリを実行する。 */
             const char *st = flag(argc, argv, "--state");
-            st = state_or_default(st, "check");
+            st = state_or_default(st, "splice");
             if (!st) return 1;
-            cmd_check(st);
+            return cmd_splice(st, flag(argc, argv, "--key"),
+                              has_flag(argc, argv, "--show"),
+                              has_flag(argc, argv, "--bake"),
+                              has_flag(argc, argv, "--keep"));
+        } else if (strcmp(cmd, "trace") == 0) {
+            /* 収束先から逆にたどり、trace を C++ クラスとして書き出して実行する。 */
+            return cmd_trace(flag(argc, argv, "--dir"),
+                             flag(argc, argv, "-o"), has_flag(argc, argv, "--show"),
+                             has_flag(argc, argv, "--use-cut"));
+        } else if (strcmp(cmd, "resolve") == 0) {
+            /* 既存のノード資産をいまの状態に当てて、全ノードを独立に評価する。
+               失敗は「安全」 (状態を書かない) として扱う。 */
+            const char *st = flag(argc, argv, "--state");
+            st = state_or_default(st, "resolve");
+            if (!st) return 1;
+            return cmd_resolve(st, flag(argc, argv, "--key"),
+                               has_flag(argc, argv, "--apply"));
+        } else if (strcmp(cmd, "node") == 0) {
+            /* コマンドをノード経由で呼ぶ。引数はそのまま渡すので、
+               このコマンド自身のオプション検査は行わない
+               (検査は呼ばれた側で行われる)。 */
+            return cmd_node(argc, argv);
+        } else if (strcmp(cmd, "project") == 0) {
+            /* 分析をプロジェクトファイルに保存する。
+               順序は GUI と同じ: まず path を決め、決まってから書く。
+               path が無ければ既定の場所を出す (そこに書く)。 */
+            const char *path = flag(argc, argv, "--dir");
+            if (has_flag(argc, argv, "--list")) return nx_project_list(stdout);
+
+            if (flag(argc, argv, "--show")) {
+                return nx_project_show(path, stdout);
+            }
+
+            /* 書く前に path を確定させる。 */
+            char def[4096];
+            if (!path || !*path) {
+                const char *st = flag(argc, argv, "--state");
+                st = state_or_default(st, "project");
+                if (nx_project_default_path(st, def, sizeof def) != 0) {
+                    printf("ERROR: path を決められない\n");
+                    return 1;
+                }
+                path = def;
+            }
+
+            int cw = nx_project_can_write(path);
+            printf("  [project] path=%s (%s)\n", path,
+                   cw == 0 ? "既にある" : cw == 1 ? "作る" : "書けない");
+            if (cw < 0) {
+                printf("ERROR: ここには書けない: %s\n", path);
+                return 1;
+            }
+
+            if (has_flag(argc, argv, "--dry-run")) {
+                printf("  [project] --dry-run: 書かない\n");
+                return 0;
+            }
+
+            /* 材料: --analysis で渡すか、--run でコマンドを走らせる。 */
+            const char *analysis = flag(argc, argv, "--analysis");
+            std::string body;
+            const char *src = "manual";
+            if (analysis && *analysis) {
+                body = analysis;
+            } else {
+                const char *run = flag(argc, argv, "--run");
+                if (run && *run) {
+                    std::vector<std::string> a;
+                    /* "clean --dry-run" のように空白で区切る */
+                    std::string s(run);
+                    size_t i = 0;
+                    while (i < s.size()) {
+                        while (i < s.size() && s[i] == ' ') i++;
+                        size_t j = i;
+                        while (j < s.size() && s[j] != ' ') j++;
+                        if (j > i) a.push_back(s.substr(i, j - i));
+                        i = j;
+                    }
+                    if (!a.empty()) {
+                        nx::NodeResult r = nx::node::run(a);
+                        body = r.out;
+                        src = run;
+                    }
+                }
+            }
+            if (body.empty()) {
+                printf("ERROR: 保存する分析が無い (--analysis か --run を渡す)\n");
+                return 2;
+            }
+
+            return nx_project_save(path, src, body.c_str(), stdout) < 0 ? 1 : 0;
+        } else if (strcmp(cmd, "arena") == 0) {
+            /* 2 人の player が board を大量に進めて finish を競う。
+               player 名を引数で受け、人との入出力はしない。
+               状態は書かない (メモリ上だけで探索する)。 */
+            const char *st = flag(argc, argv, "--state");
+            st = state_or_default(st, "arena");
+            if (!st) return 1;
+            char *js = nx_deepai_load_state(st);
+            if (!js) { printf("ERROR: no state at %s\n", st); return 1; }
+
+            nx::ArenaConfig cfg;
+            const char *lim = flag(argc, argv, "--limit");
+            const char *dep = flag(argc, argv, "--depth");
+            cfg.max_boards = lim ? atoi(lim) : 64;
+            cfg.max_depth  = dep ? atoi(dep) : 8;
+            cfg.max_frames = 32;
+            cfg.templates  = 256;
+
+            nx::ArenaResult r;
+            int rc = nx::arena_run(js, flag(argc, argv, "--player-a"),
+                                   flag(argc, argv, "--player-b"),
+                                   cfg, &r, stdout);
+            free(js);
+            return rc;
         } else if (strcmp(cmd, "heal") == 0) {
+            /* heal は clean と同じ経路 (検出 → 書く → 再水和)。
+               別実装を持たず、clean に寄せる。 */
             const char *st = flag(argc, argv, "--state");
             st = state_or_default(st, "heal");
             if (!st) return 1;
-            cmd_heal(st, flag(argc, argv, "--app"), flag(argc, argv, "--store"),
-                     flag(argc, argv, "--key"), has_flag(argc, argv, "--dry-run"));
+            nx_clean_opts_t o;
+            nx_clean_opts_default(&o);
+            o.live = 1;
+            o.dry_run = has_flag(argc, argv, "--dry-run");
+            o.app = flag(argc, argv, "--app");
+            o.store = flag(argc, argv, "--store");
+            o.key = flag(argc, argv, "--key");
+            return nx_clean_state(st, &o, stdout);
         } else if (strcmp(cmd, "replay") == 0) {
             const char *st = flag(argc, argv, "--state");
             st = state_or_default(st, "replay");

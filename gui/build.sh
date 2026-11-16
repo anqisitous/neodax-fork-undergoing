@@ -54,7 +54,7 @@ clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 \
     -I src -I include \
     -framework Cocoa -framework CoreGraphics -framework ImageIO -framework CoreFoundation \
     -framework ApplicationServices \
-    gui/neodax-ui.mm src/lib/*.a -lpthread -lm -lsqlite3 \
+    gui/neodax-ui.mm gui/nx_cli_registry.c src/lib/*.a -lpthread -lm -lsqlite3 \
     -o bin/neodax-ui
 echo "built: bin/neodax-ui"
 
