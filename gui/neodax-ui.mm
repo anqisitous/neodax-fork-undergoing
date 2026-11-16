@@ -1080,9 +1080,10 @@ static const nx_cmd_t kNxCmds[] = {
     {"残存を強制終了", "AE手順", "kill|--match|.neodax-work", "作業コピーの残存プロセスを SIGKILL"},
     {"入口を外す (cut)", "AE手順", "cut|--step|--path", "解析→テンプレ保存→1段ずつ clone/patch/検証"},
     {"cut の途中状態", "AE手順", "cut-status", "チェックポイントの stage を表示"},
-    {"直前に起動したapp", "AE手順", "app|app-analyze|apps", "直前の app を分析し、app ごとのフォルダに保存"},
+    {"直前のapp",      "AE手順", "app", "直前の app と保存フォルダを表示 (--path で指定可)"},
+    {"app 分析",       "AE手順", "app-analyze", "分析して保存 (引数に --path ... --fix)"},
     {"app一覧",       "AE手順", "apps", "保存済み app フォルダを表示"},
-    {"1個特定して最善", "AE手順", "best|--path|--apply", "動かない問題を1個に絞り、その問題だけ確度順に尽くす"},
+    {"1個特定して最善", "AE手順", "best|--path", "パスを入れて実行。--apply で適用"},
     {"PE 解析",        "解析", "pe|--file|--disasm",     "Windows PE の解析/逆アセンブル"},
     {"pipeline",       "解析", "pipeline|--file",        "decode+encode 戦略選択"},
 };
@@ -1958,13 +1959,16 @@ static int run_gui(void) {
 static void usage(void) {
     printf(
         "neodax-ui — NeoDAX minimal CLI (GUI とは独立)\n"
+        "  (引数なし) | --gui | -g                 GUI を起動\n"
+        "  --selftest                              GUI と同じ実行経路を点検\n"
         "  windows\n"
-        "  capture --app NAME -o FILE.png\n"
+        "  capture --app NAME -o FILE.png          (--out も可)\n"
         "  display [--app NAME] [-o FILE] [--state PATH]\n"
         "  tabs     --state PATH\n"
         "  keys     --state PATH                     KV のキー・seq・生存を列挙 (診断用)\n"
+        "  tab-keys --state PATH                     タブが持つキーを列挙 (作業先の確認)\n"
         "  close    --state PATH --id ID\n"
-        "  case     --path PATH [--kind app|state|dir] [--case NAME]\n"
+        "  case     --path PATH [--kind app|state|dir] [--case tpl[N]]\n"
         "           案件ごとの自発解析。対象に合う案件を逐次に試し、問題と計画を出す\n"
         "  repair   --state PATH\n"
         "           1 つの永続手続き: 観測→計画→段順に実行→再観測 を健全になるまで繰り返す\n"
@@ -1988,11 +1992,16 @@ static void usage(void) {
         "  cut --abort --path APP --symbol NAME  途中状態を捨てる\n"
         "  cut-status        途中状態の一覧 (~/.neodax/cut)\n"
         "  templates         保存済みテンプレート (~/.neodax/templates.tsv)\n"
-        "  app              直前に起動した app と保存フォルダを表示\n"
-        "  app-analyze [--fix]  分析→app ごとのフォルダに保存。前回と違う時だけ --fix で修正\n"
+        "  app [--path APP]  直前に起動した app と保存フォルダを表示\n"
+        "  app-analyze [--path APP] [--fix]  分析→app ごとのフォルダに保存。前回と違う時だけ --fix で修正\n"
         "  apps             保存済み app フォルダの一覧\n"
-        "  best --path APP [--apply]  動かない問題を1個特定し、その1個に最善を尽くす\n"
+        "  best --path APP [--kind app|state|dir] [--apply]\n"
+        "           動かない問題を1個特定し、その1個に最善を尽くす\n"
+        "  tpl-cpp [--dir DIR] [--svg FILE] [--record FILE] [--ng]\n"
+        "           cpp テンプレートの構成・annulus・学習記録\n"
         "  kill [--match SUBSTR]   SUBSTR を含むプロセスを SIGKILL (既定 .neodax-work)\n"
+        "  advise-proc [--state PATH] [--apply]\n"
+        "           状態から修復手順を導出する。--apply で normalize→dedupe→persist→appfix\n"
         "  plan     --state PATH\n"
         "           自発解析。事実→問題→計画 (順序と並列/代替)→自信 を出す。変更しない。\n"
         "           特定のタブ名に依存せず、観測から「何を・どの順で直すか」を組み立てる\n"
@@ -2003,19 +2012,26 @@ static void usage(void) {
         "           先に advise と同じ判定を行い、壊れている (owner 不在) ときだけ削除する。\n"
         "           live surface / chat は拒否する。--force でその限りでなく実行。\n"
         "           永続層へ書き込み、同時に稼働中ストアも同じ値にする (reload なし)\n"
+        "           --no-store-sync は稼働中ストア同期だけ止める (永続層は書く)\n"
+        "  threads  [--db PATH] [--list] [--deleted] [--delete ID] [--within N] [--apply]\n"
+        "           チャット台帳の一覧・重複検出・恒久削除\n"
+        "           (既定 DB: ~/.deepai-code/userdata/statev2.sqlite)\n"
         "  fix      --state PATH                      タブ状態を修復\n"
         "  clean    --state PATH [--dry-run] [--no-live] [--app NAME] [--store SUBSTR] [--key HINT]\n"
         "           残滓を状態の形に依存せず判定し、種類と安全度から呼ぶ手順を選んで消す。\n"
         "           順序は seq の健全性→永続層→退避の掃除→稼働中ストア (reload しない)。\n"
-        "           --dry-run は何も変更しない。--no-live は永続層だけに書く。\n"
+        "           --dry-run は何も変更しない。--no-live は live-sync 段だけ止める\n"
+        "           (persist / repair-seq / purge-backup は実行し、永続層には書く)\n"
         "  check    --state PATH                    閉じられない surface タブを検出 (変更なし)\n"
         "  heal     --state PATH [--app NAME] [--store SUBSTR] [--key HINT] [--dry-run]\n"
         "           検出→永続層へ書き戻し→稼働中ストア再水和を自動実行\n"
         "  simulate --state PATH [--asar ASAR]\n"
         "  replay   --state PATH [-o FILE.png]   (capture 無しで画面を再現)\n"
-        "  apply    --state PATH [--id ID] [--key HINT] [--live]  (キー自動判別で書き戻し; --live は起動中 WAL に追記)\n"
+        "  apply    --state PATH [--id ID] [--key HINT] [--live]  (キー自動判別で書き戻し)\n"
+        "           --live は起動中 LevelDB の WAL に追記。無指定はオフライン書き込み。\n"
         "           --id 指定時はそのタブだけ除去 (未指定は stale surface を除去)\n"
-        "           --attach [--app NAME] [--store SUBSTR] [--key HINT] [--id ID]  (SIGUSR1+inspector で稼働中 renderer を再水和)\n"
+        "           --attach [--app NAME] [--store SUBSTR] [--key HINT] [--id ID]\n"
+        "           永続層に書かず、SIGUSR1+inspector で稼働中 renderer を再水和する\n"
         "  stop     [--app NAME] [--store SUBSTR] [--key PREFIX]  起動時の状態復元を止める (JS 差し込み)\n"
         "  baseline [--app NAME] [--store SUBSTR] [--key KEY]    復元先を空の妥当な状態に置き換える\n"
         "  layout   [--app NAME]                                 復元有無の判定用レイアウト署名 (キャプチャ不要)\n"
@@ -2023,7 +2039,11 @@ static void usage(void) {
         "  spec     --hex \"0x81 0x05 ...\" | --file PATH [--ws]   (構造認識)\n"
         "  gen      --spec NAME|all [--class NAME] [-o FILE]        (C++ クラス生成)\n"
         "  pe       --file FILE.exe [--disasm] [--limit N]          (Windows PE 解析/逆アセンブル)\n"
-        "  pipeline --file FILE.exe [--strategy auto|seq|sim] [-o out.cpp]  (decode+encode 戦略選択)\n"
+        "  pipeline --file FILE.exe [--strategy auto|seq|sim] [--limit N] [-o out.cpp]\n"
+        "           (decode+encode 戦略選択)\n"
+        "  probe [--app NAME]                       renderer の origin/scripts/localStorage キーを観測\n"
+        "  asar --file APP.asar [--grep SUBSTR] [--find TEXT] [--context N] [--limit N]\n"
+        "           asar のエントリ列挙 / 中身検索 (C 側)\n"
         "  seek PATTERN [ROOT] [--ignore-case] [--regex] [--word] [--binary] [--files]\n"
         "       [--include G] [--context N] [--limit N] [--time MS]\n"
         "       ABD 安全化: 全体バイト/行長/期限の上限、symlink 非追跡、\n"

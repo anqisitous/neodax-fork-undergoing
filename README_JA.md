@@ -1,6 +1,10 @@
-# NeoDAX 日本語ガイド
+# NeoDAX 日本語ガイド（上流の解析器）
 
-> 🇬🇧 **[English README](README.md)** — 英語版の README はこちら
+> このファイルは上流 NeoDAX の日本語ガイドです。fork 固有の
+> tab / state repair と app fix（`bin/neodax-ui`）のコマンド分類・
+> 全オプション・GUI 操作は **[README.md](README.md)** を参照してください。
+>
+> 🇬🇧 **[English README](README.md)** — fork README はこちら
 
 **マルチアーキテクチャ対応のバイナリ解析フレームワーク — 逆アセンブラ、CFG、デコンパイラ、エミュレータ**
 
