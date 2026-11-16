@@ -30,22 +30,14 @@
 
 ```sh
 git clone https://github.com/anqisitous/neodax-fork-undergoing.git
-cd neodax-fork-undergoing      # clone したディレクトリへ移動（以下のコマンドはここで実行）
 bash gui/build.sh              # bin/neodax-ui (GUI + CLI)
 ```
 
-コマンド例はすべてリポジトリのルート（`neodax-fork-undergoing/`）にいる前提です。
-`./bin/neodax-ui` は相対パスなので、別のディレクトリから実行する場合は
-フルパスを指定するか、PATH を通してください:
-
+コマンドはclone したディレクトリから
 ```sh
-export PATH="$HOME/neodax-fork-undergoing/bin:$PATH"   # .zshrc / .bashrc に追記
-# 以後はどのディレクトリからでも
-neodax-ui windows
+cd neodax-fork-undergoing
 ```
-
-なお `seek "PATTERN" DIR` の検索先など、相対パスを渡す引数は現在のディレクトリ基準で
-解決されます。PATH を通して使う場合はフルパスで渡すのが確実です。
+でneodax-fork-undergoingフォルダに移動して実行してください。
 
 ビルド定義は `src/Makefile` が唯一の場所です。分類ごとの静的ライブラリを作り、
 `gui/build.sh` はそれをリンクするだけです。上流アナライザ本体は従来どおり
@@ -156,7 +148,3 @@ src/*.c                      上流アナライザ（disasm / cfg / decomp / emu
 | [CLI_REFERENCE.md](CLI_REFERENCE.md) | 上流 `neodax` CLI のリファレンス |
 | [ARCHITECTURE.md](ARCHITECTURE.md) / [ALGORITHMS.md](ALGORITHMS.md) | 上流の内部設計とアルゴリズム |
 | [src/README.md](src/README.md) / [src/README_JA.md](src/README_JA.md) | src 配下の説明 |
-
-## License
-
-Apache 2.0 — see [LICENSE](LICENSE).
