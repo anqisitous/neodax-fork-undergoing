@@ -733,3 +733,37 @@ extern "C" int nx_recipe_run(const char *recipe_path, int apply, int upto, FILE 
             limit, apply ? "applied" : "dry-run");
     return 0;
 }
+
+/* 一発のアプリ修復。
+ *   1) recipe を作って ~/.neodax/recipes/fix-<app>.nxrecipe に保存する
+ *   2) その recipe を run する (apply=0 なら dry-run)
+ * 既存の recipe / recipe-run をそのまま呼ぶだけで、実装を増やさない。
+ * これが「AE を 1 コマンドで fix する」入口になる。 */
+extern "C" int nx_fix_app(const char *app_path, const char *target_hint, int apply, FILE *out) {
+    if (!out) out = stdout;
+    if (!app_path || !*app_path) {
+        std::fprintf(out, "fix: --path required\n");
+        return 2;
+    }
+    const char *home = std::getenv("HOME");
+    std::string dir = std::string(home && *home ? home : ".") + "/.neodax/recipes";
+    mkdir(dir.c_str(), 0755);
+
+    std::string base = app_path;
+    size_t sl = base.find_last_of('/');
+    if (sl != std::string::npos) base = base.substr(sl + 1);
+    if (base.empty()) base = "app";
+    std::string rec = dir + "/fix-" + base + ".nxrecipe";
+
+    std::fprintf(out, "=== fix: %s ===\n", app_path);
+    int rc = nx_recipe_build(app_path, target_hint, rec.c_str(), out);
+    if (rc != 0) {
+        std::fprintf(out, "  [fix] recipe が未完成 (rc=%d)。適用しない。\n", rc);
+        return rc;
+    }
+    std::fprintf(out, "  [fix] recipe: %s\n", rec.c_str());
+    if (!apply) {
+        std::fprintf(out, "  [fix] dry-run: 変更しない (--apply で作業コピーを作る)\n");
+    }
+    return nx_recipe_run(rec.c_str(), apply, 0, out);
+}

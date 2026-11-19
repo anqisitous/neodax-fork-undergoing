@@ -32,6 +32,7 @@ extern const nx_spec_t nx_spec_macho_fat;
 /* 永続化された状態 (Zustand persist JSON / LevelDB localStorage レコード) */
 extern const nx_spec_t nx_spec_json_state;
 extern const nx_spec_t nx_spec_ls_record;
+extern const nx_spec_t nx_spec_json_persist;
 
 /* 登録 */
 void nx_specs_builtin_register(void);

@@ -57,6 +57,11 @@ int nx_recipe_read_word(const char *lib, unsigned long long off, unsigned long *
  * 戻り値: 0=成功, 1=検証失敗 (rollback 済), 2=エラー/未完成 */
 int nx_recipe_run(const char *recipe_path, int apply, int upto, FILE *out);
 
+/* 一発のアプリ修復: recipe を作り、そのまま run する。
+ * apply=0 は dry-run (アプリを変更しない)。apply=1 で作業コピー
+ * (<app>.neodax-work) を作る。戻り値は nx_recipe_run と同じ。 */
+int nx_fix_app(const char *app_path, const char *target_hint, int apply, FILE *out);
+
 #ifdef __cplusplus
 }
 #endif

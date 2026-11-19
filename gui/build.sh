@@ -109,4 +109,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+# --- 解析プロジェクト (空の置き場) ---
+# analysis/project は中身をコミットしない。ビルドでも作らない・消さない。
+# 必要なときだけ手で `project --dir analysis/project ...` を実行する。
+mkdir -p analysis/project
+[ -f analysis/project/.gitkeep ] || : > analysis/project/.gitkeep
+echo "kept: analysis/project (empty)"
+
 echo "built: $APP (analysis dir: $APP/Contents/Resources/Analysis)"

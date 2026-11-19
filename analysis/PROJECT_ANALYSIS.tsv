@@ -1,0 +1,63 @@
+app	/Applications/DeepAI Code.app (0.3.41, Electron 44.4.5)
+state	~/Library/Application Support/deepai-code-v2/Local Storage/leveldb
+state.max_seq	8872
+state.keys	18
+store.deepai-code:workspace-tabs:v1	live=yes bytes=909 tabs=3
+store.t3code:right-panel-state:v2	live=yes bytes=80 byThreadKey=0 after=stop
+store.t3code:diff-panel-state:v1	live=yes bytes=1237 dead_refs=yes
+store.t3code:composer-drafts:v1	live=yes bytes=14739 dead_refs=yes
+store.t3code:browser-favicons:v1	live=yes bytes=1506 dead_refs=yes
+store.t3code:ui-state:v1	live=yes bytes=1338 dead_refs=yes
+store.t3code:closed-views:v2	live=yes bytes=4057 dead_refs=no
+store.t3code:terminal-state:v1	live=yes bytes=56 empty=yes
+store.t3code:last-editor	live=yes bytes=15 scalar
+store.t3code.diffFileTreeOpen	live=yes bytes=6 scalar
+store.t3code.fileExplorerOpen	live=yes bytes=6 scalar
+store.t3code.renderMarkdown	live=yes bytes=5 scalar
+store.t3code:provider-update-dismissals:v1	live=yes bytes=161 scalar
+store.t3.backgroundActivity.clientId	live=yes bytes=37 scalar
+threads.live	17
+threads.dead	336748f1-2242-408f-9119-2e63b69501c6,c362e560-0e23-48c7-8d70-e68da8e0c53a,73263324-07cf-4444-bfbd-8da8581fc5fa,8112363b-95fa-4d84-8a28-d0679bd2bd6b,0a3ad361-5c9e-4ba8-b516-f65d90e2a565,06501a70-1fa6-456e-908d-0e5c76eda6cf
+dead.right-panel	28b4c9f1-1b76-47f0-8572-a5148135faa6:336748f1-2242-408f-9119-2e63b69501c6	surfaces=diff,file:gui/neodax-viewer.mm
+dead.right-panel	d3d0c88e-4bd4-46ef-ad24-1fac103a9fbe:c362e560-0e23-48c7-8d70-e68da8e0c53a	surfaces=file:/Users/kennichiroshimizu/AE-independent/Adobe After Effects 2026.app
+dead.right-panel	d3d0c88e-4bd4-46ef-ad24-1fac103a9fbe:73263324-07cf-4444-bfbd-8da8581fc5fa	surfaces=file:src/integration/attach/nx_payload.c,file:README_UPSTREAM.md
+dead.diff-panel	28b4c9f1-1b76-47f0-8572-a5148135faa6:8112363b-95fa-4d84-8a28-d0679bd2bd6b	kind=branch
+dead.diff-panel	d3d0c88e-4bd4-46ef-ad24-1fac103a9fbe:0a3ad361-5c9e-4ba8-b516-f65d90e2a565	kind=branch
+dead.composer-drafts	28b4c9f1-1b76-47f0-8572-a5148135faa6:88d6eb15-f02f-4cc3-a771-42c97b5f6430	prompt=empty
+dead.browser-favicons	28b4c9f1-1b76-47f0-8572-a5148135faa6:06501a70-1fa6-456e-908d-0e5c76eda6cf	https://www.youtube.com:443
+edge.right-panel.byThreadKey[*].surfaces	WorkspaceTabs.surfaceTabs	ThreadRouteView-DSg65wV-.js:5637
+edge.WorkspaceTabs.surfaceTabs	workspace-tabs.tabs	WorkspaceTabs-BHIRv4l6.js:182 include(n.target)
+edge.workspace-tabs.tabs	reconcile	WorkspaceTabs-BHIRv4l6.js:182 b に無い surface を落とす
+edge.right-panel.persist	localStorage.setItem	t3code:right-panel-state:v2
+edge.stop.clearStorage	right-panel memory	zustand rehydrate は保存値が無いと現在値を残す
+fix.stop	memory reset	store.setState(empty) を追加 (nx_payload.c)
+fix.stop	hint	derive_module_hint を stop/baseline でも呼ぶ (nx_appfix.c)
+verify.tabs	3	new-tab,chat(draft),chat(12984364)
+verify.advise	VERDICT=NO	orphan surface 0
+verify.splice	FINDINGS=0	workspace-tabs に死んだ owner なし
+verdict	HEALTHY	right-panel empty, orphan surfaces gone
+asset.cpp	analysis/tab_restore.cpp	NX TEMPLATE tab-restore.audit (46 nodes / 30 edges)
+asset.svg	analysis/tab_restore.svg	generated from cpp
+command.audit	tpl-cpp --dir analysis/tab_restore.cpp	read-only full-store audit
+command.trace	trace --dir analysis/tab_restore.cpp	bake+run
+dead.total	24	across 5 stores (right-panel=0, workspace-tabs=0)
+dead.by_store	t3code:composer-drafts:v1	15
+dead.by_store	t3code:diff-panel-state:v1	4
+dead.by_store	t3code:closed-views:v2	3
+dead.by_store	t3code:browser-favicons:v1	1
+dead.by_store	t3code:ui-state:v1	1
+data.key	deepai-code:workspace-tabs:v1	909	state.tabs[]
+data.key	deepai-code:workspace-tabs:v1.nx-backup	0	absent (tombstone)
+data.key	t3code.diffFileTreeOpen	6	scalar
+data.key	t3code.fileExplorerOpen	6	scalar
+data.key	t3code.renderMarkdown	5	scalar
+data.key	t3code:browser-favicons:v1	1506	state.byKey
+data.key	t3code:closed-views:v2	4057	state.entries[]
+data.key	t3code:composer-drafts:v1	14739	state.draftsByThreadKey
+data.key	t3code:diff-panel-state:v1	1237	state.byThreadKey+branchBaseRefByThreadKey
+data.key	t3code:last-editor	15	scalar
+data.key	t3code:provider-update-dismissals:v1	161	scalar
+data.key	t3code:right-panel-state:v2	80	state.byThreadKey (empty after stop)
+data.key	t3code:terminal-state:v1	56	state.terminalUiStateByThreadKey (empty)
+data.key	t3code:ui-state:v1	1338	projectExpandedById+threadChangedFilesExpandedById
+data.key	t3.backgroundActivity.clientId	37	scalar

@@ -21,3 +21,8 @@ gui/.run.tsv
 
 # editor / OS
 .DS_Store
+
+# raw app state dumps (personal data)
+analysis/state/
+# CLI symlink (bin/ is ignored)
+neodax-ui

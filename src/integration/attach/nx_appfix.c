@@ -109,14 +109,27 @@ int nx_appfix_read(const nx_appfix_profile_t *in, FILE *out) {
     return run_payload(&p, js, out);
 }
 
+/* stop/baseline も apply と同じく、キーを含む JS チャンクを asar から
+   先に決めておく。これをやらないと append_store_resolve が
+   ロード済みチャンクだけを試し、right-panel のような別チャンクの
+   ストアを見つけられない (結果 "no store" で何も止まらない)。 */
+static void set_hint_for(const nx_appfix_profile_t *p, FILE *out) {
+    char hint[256];
+    derive_module_hint(p, hint, sizeof(hint));
+    nx_payload_set_module_hint(hint);
+    if (hint[0]) fprintf(out, "  [appfix] store module: %s\n", hint);
+}
+
 int nx_appfix_stop_restore(const nx_appfix_profile_t *in, FILE *out) {
     nx_appfix_profile_t p = merged(in);
+    set_hint_for(&p, out);
     char *js = nx_payload_build_stop_restore(p.store_substr, p.store_exports, p.key);
     return run_payload(&p, js, out);
 }
 
 int nx_appfix_baseline_restore(const nx_appfix_profile_t *in, FILE *out) {
     nx_appfix_profile_t p = merged(in);
+    set_hint_for(&p, out);
     /* backup=0: 退避を作らない。作ると次回の復元で戻る。 */
     char *js = nx_payload_build_baseline_restore(p.store_substr, p.store_exports, p.key, 0);
     return run_payload(&p, js, out);

@@ -380,7 +380,15 @@ static void cmd_keys(const char *path) {
     for (int i = 0; i < n; i++) {
         char shown[512];
         escape_key(keys[i], lens[i], shown, sizeof(shown));
-        printf("KEY\t%zu\t%s\n", lens[i], shown);
+        /* キーごとの seq。MAX_SEQ は全キーの最大値なので、どのキーが
+           その値を持っているかが見えないと、書き込み先の seq を
+           間違える (workspace-tabs の最大と全体の最大は違う)。
+
+           照合には shown (表示用にエスケープした文字列) ではなく
+           keys[i] (生バイト) を渡す。キーには NUL が含まれるので、
+           エスケープ後の文字列で探すと見つからない (seq=0 になる)。 */
+        printf("KEY\t%zu\t%s\tseq=%llu\n", lens[i], shown,
+               nx_state_max_seq_bytes(path, keys[i], lens[i]));
         free(keys[i]);
     }
     free(keys);
@@ -505,7 +513,12 @@ static int write_fixed_to_leveldb(const char *state_path, const char *key_hint,
        その状態では neodax の値が永久に勝ち続け、アプリ側の変更が
        一切永続化されなくなる。 */
     size_t vlen = strlen(fixed);
-    unsigned long long observed = nx_state_max_seq(dir, key_hint);
+    /* seq は「キーごとの最大」ではなく「ストア全体の最大」の次を使う。
+       Chromium は seq をストア全体で共有しており、キーごとの最大を
+       使うと、直前に別キー (退避の tombstone / META) が使った seq と
+       衝突する。同じ seq の 2 レコードはどちらが勝つか決まらず、
+       書いたはずの値が解決されないことがある。 */
+    unsigned long long observed = nx_state_max_seq(dir, NULL);
     unsigned long long seq = observed + 1;
     printf("  [apply] seq: observed max=%llu -> writing %llu\n", observed, seq);
     int rc = live
@@ -594,11 +607,33 @@ static void cmd_delete(const char *state_path, const char *tab_id,
    1 件ずつ delete を呼ぶと、chat ごとに 1 回書くことになり、
    その途中で復元経路が走ると戻ってしまう。
    ここでは 1 回の状態読み込みで全部の id を集め、1 回で書く。 */
+static char *read_live_state(const char *key);
+static int state_tab_count(const char *json);
+static int state_has_tab_id(const char *json, const char *id);
+
 static void cmd_delete_stale(const char *state_path, const char *app,
                              const char *store, const char *key,
                              int live, int force) {
-    char *state = nx_deepai_load_state(state_path);
+    /* 稼働中はメモリが現在値。ディスクの遅れを基準にすると、
+       消したはずのタブを別のタブとして書き戻す。 */
+    char *state = NULL;
+    char *live_state = NULL;
+    int base_live = 0;
+    if (live) {
+        live_state = read_live_state(key);
+        if (live_state && strstr(live_state, "\"tabs\"")) {
+            state = live_state;
+            base_live = 1;
+        } else {
+            free(live_state);
+            live_state = NULL;
+        }
+    }
+    if (!state) state = nx_deepai_load_state(state_path);
     if (!state) { printf("ERROR: no state at %s\n", state_path); return; }
+    int tabs_before = state_tab_count(state);
+    printf("  [delete-stale] base: %s (tabs=%d)\n",
+           base_live ? "live store" : "disk snapshot", tabs_before);
 
     /* 消す id を全部集める。format を推測せず、実体の index から引く。
        nx_residual_stale_indices が「未解決参照か重複を持つ実体」を返す。 */
@@ -647,9 +682,127 @@ static void cmd_delete_stale(const char *state_path, const char *app,
     if (total > 0 && cur) {
         write_fixed_to_leveldb(state_path, key, cur, live);
         printf("  [delete-stale] まとめて %d 件消した (live=%d)\n", total, live);
+
+        /* 永続層だけ書いても、稼働中メモリが次の persist で戻す。
+           メモリ側も同じ値にし、成否はメモリで確かめる。 */
+        if (live) {
+            nx_appfix_profile_t prof = *nx_appfix_default_profile();
+            if (app) prof.app_name = app;
+            if (store) prof.store_substr = store;
+            if (key) prof.key = key;
+            printf("  [delete-stale] syncing live store (no reload)\n");
+            nx_appfix_apply(&prof, cur, strlen(cur), stdout);
+            char *now = read_live_state(key);
+            if (now) {
+                int after = state_tab_count(now);
+                int left = 0;
+                for (auto &id : ids)
+                    if (state_has_tab_id(now, id.c_str())) left++;
+                if (after >= 0 && after < tabs_before && left == 0) {
+                    printf("  [delete-stale] verified live store: tabs %d -> %d\n",
+                           tabs_before, after);
+                } else {
+                    printf("  [delete-stale] LIVE VERIFY FAILED: tabs %d -> %d, %d id left\n",
+                           tabs_before, after, left);
+                }
+                free(now);
+            }
+        }
     }
     if (cur && cur != state) free(cur);
     free(state);
+}
+
+/* renderer の CDP 応答は文字列を二重にエスケープして返す。
+   1 段だけ戻す (中の JSON はそのまま残す)。 */
+static char *unescape_one_json_layer(const char *esc) {
+    if (!esc) return NULL;
+    size_t n = strcspn(esc, "\r\n");
+    char *lit = (char *)malloc(n + 3);
+    if (!lit) return NULL;
+    lit[0] = '"';
+    memcpy(lit + 1, esc, n);
+    lit[n + 1] = '"';
+    lit[n + 2] = 0;
+    nx_json_t *j = nx_json_parse(lit, n + 2);
+    char *out = NULL;
+    if (j && j->type == NX_JSON_STR && j->str) out = strdup(j->str);
+    nx_json_free(j);
+    free(lit);
+    return out;
+}
+
+/* 稼働中ストアの「今の値」を読む。
+
+   なぜディスクではなくこちらを基準にするか:
+     Chromium の localStorage は setItem してから非同期で LevelDB に
+     書く。直後にディスクを読むと、まだ古い値が残っている。その古い値
+     を基準に 2 件目を削除すると、1 件目で消したタブがそこに含まれて
+     いるため「復元」される。稼働中ならメモリ側が唯一の現在値。 */
+static char *read_live_state(const char *key) {
+    char *buf = NULL;
+    size_t len = 0;
+    FILE *ms = open_memstream(&buf, &len);
+    if (!ms) return NULL;
+    nx_appfix_profile_t prof = *nx_appfix_default_profile();
+    if (key && *key) prof.key = key;
+    int rc = nx_appfix_read(&prof, ms);
+    fclose(ms);
+    if (rc != 0 || !buf) { free(buf); return NULL; }
+
+    char *out = NULL;
+    const char *p = strstr(buf, "[renderer] result: ");
+    if (p) {
+        p += strlen("[renderer] result: ");
+        char *raw = unescape_one_json_layer(p);
+        if (raw) {
+            nx_json_t *root = nx_json_parse(raw, strlen(raw));
+            const nx_json_t *results = nx_json_get(root, "results");
+            const nx_json_t *first = results ? nx_json_at(results, 0) : NULL;
+            const char *inner = first ? nx_json_str(first) : NULL;
+            if (inner) {
+                nx_json_t *sig = nx_json_parse(inner, strlen(inner));
+                const char *val = sig ? nx_json_str(nx_json_get(sig, "value")) : NULL;
+                if (val && *val) out = strdup(val);
+                nx_json_free(sig);
+            }
+            nx_json_free(root);
+            free(raw);
+        }
+    }
+    free(buf);
+    return out;
+}
+
+/* state JSON のタブ数 (-1 は解釈不能)。 */
+static int state_tab_count(const char *json) {
+    if (!json) return -1;
+    nx_json_t *root = nx_json_parse(json, strlen(json));
+    if (!root) return -1;
+    const nx_json_t *st = nx_json_get(root, "state");
+    const nx_json_t *tabs = st ? nx_json_get(st, "tabs") : NULL;
+    int n = (tabs && tabs->type == NX_JSON_ARR) ? (int)tabs->n : -1;
+    nx_json_free(root);
+    return n;
+}
+
+/* state JSON に id のタブが残っているか。 */
+static int state_has_tab_id(const char *json, const char *id) {
+    if (!json || !id) return 0;
+    nx_json_t *root = nx_json_parse(json, strlen(json));
+    if (!root) return 0;
+    const nx_json_t *st = nx_json_get(root, "state");
+    const nx_json_t *tabs = st ? nx_json_get(st, "tabs") : NULL;
+    int found = 0;
+    for (size_t i = 0; tabs && tabs->type == NX_JSON_ARR && i < tabs->n; i++) {
+        const nx_json_t *tid = nx_json_get(nx_json_at(tabs, i), "id");
+        if (tid && nx_json_str(tid) && strcmp(nx_json_str(tid), id) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    nx_json_free(root);
+    return found;
 }
 
 static void cmd_delete(const char *state_path, const char *tab_id,
@@ -657,8 +810,26 @@ static void cmd_delete(const char *state_path, const char *tab_id,
                        int live, int no_store_sync, int force) {
     if (!tab_id) { printf("delete: --id required\n"); return; }
 
-    char *state = nx_deepai_load_state(state_path);
+    /* 稼働中なら、ディスク (遅れて書かれる) ではなくメモリの現在値を
+       基準にする。連続削除で前の削除が戻るのを防ぐ。 */
+    char *state = NULL;
+    char *live_before = NULL;
+    int base_live = 0;
+    if (live && !no_store_sync) {
+        live_before = read_live_state(key);
+        if (live_before && strstr(live_before, "\"tabs\"")) {
+            state = live_before;
+            base_live = 1;
+        } else {
+            free(live_before);
+            live_before = NULL;
+        }
+    }
+    if (!state) state = nx_deepai_load_state(state_path);
     if (!state) { printf("ERROR: no state at %s\n", state_path); return; }
+    int tabs_before = state_tab_count(state);
+    printf("  [delete] base: %s (tabs=%d)\n",
+           base_live ? "live store" : "disk snapshot", tabs_before);
 
     /* 0) 消す前に「壊れている根拠」を確かめる。
           ここを飛ばして削除するのが以前の失敗だった。
@@ -743,6 +914,26 @@ static void cmd_delete(const char *state_path, const char *tab_id,
         if (key) prof.key = key;
         printf("  [delete] syncing live store (no reload)\n");
         nx_appfix_apply(&prof, fixed, strlen(fixed), stdout);
+
+        /* ディスクの再読は Chromium の非同期フラッシュに負ける。
+           成否は「メモリ上の現在値」で判定する。 */
+        char *now = read_live_state(key);
+        if (now) {
+            int after = state_tab_count(now);
+            int still = state_has_tab_id(now, tab_id);
+            if (after >= 0 && after < tabs_before && !still) {
+                printf("  [delete] verified live store: tabs %d -> %d\n",
+                       tabs_before, after);
+                rc = 0;
+            } else {
+                printf("  [delete] LIVE VERIFY FAILED: tabs %d -> %d, id %s\n",
+                       tabs_before, after, still ? "still present" : "gone");
+                rc = -1;
+            }
+            free(now);
+        } else {
+            printf("  [delete] live store unreadable; using disk verification\n");
+        }
     }
 
     printf("  [delete] %s\n",
@@ -1616,7 +1807,56 @@ struct TraceGates {
     int need_ring;      /* ring の整合を見る価値があるか */
     int need_isolated;  /* 孤立ノードを探す価値があるか */
     int need_hidden;    /* depth 超えの到達を見る価値があるか */
+    int shadowed;       /* 密着した兄弟のうち、枝刈りした数 */
 };
+
+/* 密着した兄弟 (同じ段で同じ C に収束するノード) を 1 つに畳む。
+
+   なぜ畳めるか:
+     ring[v] は依存の深さ (persist=0 → detect/prune/live=1)。C が受け取る
+     形は ring の差だけで決まるので、ring が同じ A と B は C にとって
+     区別がつかない。AC と BC の両方を走らせても答えは同じ。
+
+   keep を渡すと「残したノード」を埋める。戻り値は畳んだ数。
+   畳まない条件 (事実で除外する):
+     - ring が違う (別の段なので別物)
+     - 辺の種類か行き先が違う (requires と converges は別の意味)
+     - B が A 以外からも指されている (消すと本物の隣接が消える)
+     - 自己ループ (A→A) は比較しない */
+static int tpl_shadow_siblings(const nx_tpl_graph_t *g, int *keep, int cap) {
+    int folded = 0;
+    if (!g) return 0;
+    for (size_t a = 0; a < g->n_edges; a++) {
+        const nx_tpl_edge_t *ea = &g->edges[a];
+        if (strcmp(ea->kind, "converges") != 0 &&
+            strcmp(ea->kind, "requires") != 0) continue;
+        if (ea->from == ea->to) continue;
+
+        for (size_t b = a + 1; b < g->n_edges; b++) {
+            const nx_tpl_edge_t *eb = &g->edges[b];
+            if (eb->to != ea->to) continue;              /* 同じ C か */
+            if (strcmp(eb->kind, ea->kind) != 0) continue; /* 同じ種類か */
+            if (eb->from == ea->from) continue;
+            /* 同じ段か (密着しているか) */
+            if (g->ring[ea->from] != g->ring[eb->from]) continue;
+
+            /* B が A 以外からも指されているなら畳めない。 */
+            int other = 0;
+            for (size_t k = 0; k < g->n_edges; k++) {
+                if (g->edges[k].to != eb->from) continue;
+                if (g->edges[k].from == eb->from) continue;
+                if (g->edges[k].from == ea->from) continue;
+                other = 1; break;
+            }
+            if (other) continue;
+
+            if (keep && folded < cap) keep[folded] = eb->from;
+            folded++;
+            break;   /* ea->from の兄弟は 1 つだけ畳む */
+        }
+    }
+    return folded;
+}
 
 /* 安い観測だけで門番を決める。ここは C++ を焼かない。 */
 static TraceGates trace_gates(const nx_tpl_graph_t *g) {
@@ -1642,6 +1882,16 @@ static TraceGates trace_gates(const nx_tpl_graph_t *g) {
             if (g->edges[k].to == g->edges[j].from &&
                 strcmp(g->edges[j].kind, "converges") == 0)
                 t.need_hidden = 1;
+
+    /* 密着した兄弟を 1 つに畳む。
+       A と B が同じ段 (ring が同じ) で、同じ種類の辺で同じ C に
+       収束しているなら、AC と BC は同じ形になる。両方を枝分かれさせると
+       同じ検査を 2 回やるだけで情報が増えない。片方だけ残す。
+
+       判定は事実だけ: ring[A]==ring[B] かつ 辺の種類と行き先が一致。
+       ring が違うなら A と B は別の段なので畳まない (畳むと本物の
+       隣接を消す)。 */
+    t.shadowed = tpl_shadow_siblings(g, NULL, 0);
     return t;
 }
 
@@ -1705,8 +1955,20 @@ static int cmd_trace(const char *dir, const char *keep_path, int show_only,
     TraceGates gates = trace_gates(&g);
     printf("=== trace: %s (nodes=%zu links=%zu) ===\n",
            g.graph[0] ? g.graph : "asset", g.n_nodes, g.n_edges);
-    printf("GATES ring=%d isolated=%d hidden=%d\n",
-           gates.need_ring, gates.need_isolated, gates.need_hidden);
+    printf("GATES ring=%d isolated=%d hidden=%d shadowed=%d\n",
+           gates.need_ring, gates.need_isolated, gates.need_hidden,
+           gates.shadowed);
+    /* 密着した兄弟をどれだけ畳んだかは、切ったことを隠さずに出す。
+       「見なかった」と「異常なし」を混ぜない。 */
+    if (gates.shadowed > 0) {
+        int shadow[64];
+        int ns = tpl_shadow_siblings(&g, shadow, 64);
+        printf("PRUNED overlapping-adjacent "
+               "(同じ ring で同じ相手に収束 → 片方だけ追う)\n");
+        for (int i = 0; i < ns && i < 64; i++)
+            printf("  folded %s (ring=%d)\n",
+                   g.nodes[shadow[i]].id, g.ring[shadow[i]]);
+    }
     if (!gates.need_ring && !gates.need_isolated && !gates.need_hidden) {
         printf("PRUNED all branches (走らせる価値のある分岐が無い)\n");
         printf("VERDICT=NO_DEFECT\n");
@@ -1736,6 +1998,8 @@ static int cmd_trace(const char *dir, const char *keep_path, int show_only,
     h = (h ^ (unsigned long long)gates.need_ring) * 1099511628211ULL;
     h = (h ^ (unsigned long long)gates.need_isolated) * 1099511628211ULL;
     h = (h ^ (unsigned long long)gates.need_hidden) * 1099511628211ULL;
+    /* 畳んだ兄弟も指紋に入れる。畳み方が変われば焼き直す。 */
+    h = (h ^ (unsigned long long)gates.shadowed) * 1099511628211ULL;
 
     const char *home = getenv("HOME");
     char cdir[4096];
@@ -3203,6 +3467,29 @@ extern "C" int nx_cli_dispatch_public(int argc, char **argv) {
             const char *st = state_or_default(flag(argc, argv, "--state"), "tabs");
             if (!st) return 1;
             dump_tabs_path(st);
+        } else if (strcmp(cmd, "dump") == 0) {
+            /* 解決された状態の生 JSON をそのまま出す。
+               「どの値が勝っているか」を見るための最小の道具。
+               plan は解釈後を出すので、生の形が必要なときに使う。
+               --key を渡すと任意の localStorage キーを稼働中ストアから
+               読む (タブ以外の復元元を調べるため)。 */
+            const char *st = state_or_default(flag(argc, argv, "--state"), "dump");
+            if (!st) return 1;
+            const char *want = flag(argc, argv, "--key");
+            char *js = NULL;
+            if (want && *want) {
+                js = read_live_state(want);
+                if (!js) {
+                    printf("ERROR: no live value for key '%s'\n", want);
+                    return 1;
+                }
+            } else {
+                js = nx_deepai_load_state(st);
+                if (!js) { printf("ERROR: no state at %s\n", st); return 1; }
+            }
+            fputs(js, stdout);
+            if (*js && js[strlen(js) - 1] != '\n') fputc('\n', stdout);
+            free(js);
         } else if (strcmp(cmd, "keys") == 0) {
             const char *st = state_or_default(flag(argc, argv, "--state"), "keys");
             if (!st) return 1;
@@ -3348,6 +3635,8 @@ extern "C" int nx_cli_dispatch_public(int argc, char **argv) {
             const char *f = flag(argc, argv, "--file");
             const char *g = flag(argc, argv, "--grep");
             const char *find = flag(argc, argv, "--find");
+            const char *extract = flag(argc, argv, "--extract");
+            const char *out = flag(argc, argv, "--out");
             const char *ctxs = flag(argc, argv, "--context");
             const char *lims = flag(argc, argv, "--limit");
             int ctx = ctxs ? atoi(ctxs) : 1;
@@ -3355,6 +3644,26 @@ extern "C" int nx_cli_dispatch_public(int argc, char **argv) {
             if (!f) { fprintf(stderr, "asar: --file required\n"); return 1; }
             nx_asar_t *a = nx_asar_open(f);
             if (!a) { printf("asar: not an archive: %s\n", f); return 1; }
+            if (extract && *extract) {
+                /* 1 エントリをファイルに取り出す。asar の中身を
+                   grep ではなく read で読み直すための最小の出口。 */
+                const nx_asar_entry_t *e = nx_asar_find(a, extract);
+                if (!e) { printf("asar: entry not found: %s\n", extract); nx_asar_free(a); return 1; }
+                char *txt = nx_asar_read_text(a, e);
+                if (!txt) { printf("asar: cannot read: %s\n", e->path); nx_asar_free(a); return 1; }
+                if (out && *out) {
+                    FILE *fp = fopen(out, "wb");
+                    if (!fp) { printf("asar: cannot write: %s\n", out); free(txt); nx_asar_free(a); return 1; }
+                    fwrite(txt, 1, e->size, fp);
+                    fclose(fp);
+                    printf("%s -> %s (%zu bytes)\n", e->path, out, e->size);
+                } else {
+                    fwrite(txt, 1, e->size, stdout);
+                }
+                free(txt);
+                nx_asar_free(a);
+                return 0;
+            }
             if (!find || !*find) {
                 printf("ENTRIES\t%zu\n", a->n_entries);
                 for (size_t i = 0; i < a->n_entries; i++) {
@@ -3548,12 +3857,30 @@ extern "C" int nx_cli_dispatch_public(int argc, char **argv) {
             free(js);
             return rc == 2 ? 1 : 0;
         } else if (strcmp(cmd, "fix") == 0) {
+            /* アプリ全体の一発修復。
+               --path APP : AE など。recipe を作り recipe-run まで進める。
+               --state/--app : DeepAI。clean (LevelDB 状態) を呼ぶ。
+               書き込みは --apply のときだけ。無指定は dry-run。 */
+            const char *path = flag(argc, argv, "--path");
+            if (path && *path) {
+                return nx_fix_app(path, flag(argc, argv, "--target"),
+                                  has_flag(argc, argv, "--apply"), stdout);
+            }
             const char *st = flag(argc, argv, "--state");
             st = state_or_default(st, "fix");
             if (!st) return 1;
-            return nx_deepai_fix_path(st, stdout);
+            nx_clean_opts_t o;
+            nx_clean_opts_default(&o);
+            o.live = has_flag(argc, argv, "--apply") &&
+                     !has_flag(argc, argv, "--no-live");
+            o.dry_run = !has_flag(argc, argv, "--apply") ||
+                        has_flag(argc, argv, "--dry-run");
+            o.app = flag(argc, argv, "--app");
+            o.store = flag(argc, argv, "--store");
+            o.key = flag(argc, argv, "--key");
+            return nx_clean_state(st, &o, stdout);
         } else if (strcmp(cmd, "clean") == 0) {
-            /* 残滓を状態から判定し、種類と安全度から呼ぶ手順を選んで消す。
+            /* LevelDB 状態だけを直す。アプリ全体 (AE / NGL / recipe) は fix。
                --dry-run で変更なし。--no-live で永続層だけ。 */
             const char *st = flag(argc, argv, "--state");
             st = state_or_default(st, "clean");
@@ -3601,7 +3928,7 @@ extern "C" int nx_cli_dispatch_public(int argc, char **argv) {
             const char *path = flag(argc, argv, "--dir");
             if (has_flag(argc, argv, "--list")) return nx_project_list(stdout);
 
-            if (flag(argc, argv, "--show")) {
+            if (has_flag(argc, argv, "--show")) {
                 return nx_project_show(path, stdout);
             }
 

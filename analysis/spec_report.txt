@@ -1,0 +1,26 @@
+===== workspace_tabs =====
+
+  === structure recognition (568 bytes) ===
+    [40%] json_state           family=persisted-state  persisted workspace state ({"state":{"tabs":...}})
+    prefix         : 0x7b (123)
+    [40%] json_persist         family=persisted-state  zustand persist envelope ({"state":...,"version":N})
+    [20%] pe_section_header    family=pe               PE section table entry (40 bytes)  (weak)
+    [16%] pe_file_header       family=pe               PE COFF file header  (weak)
+    [12%] lenprefixed_be       family=length-prefixed  big-endian 32-bit length followed by payload  (weak)
+===== right_panel =====
+
+  === structure recognition (1706 bytes) ===
+    [40%] right_panel_state    family=persisted-state  right panel surfaces per thread (t3code:right-panel-state:v2)
+    prefix         : 0x7b (123)
+    [40%] json_persist         family=persisted-state  zustand persist envelope ({"state":...,"version":N})
+    [20%] pe_section_header    family=pe               PE section table entry (40 bytes)  (weak)
+    [16%] pe_file_header       family=pe               PE COFF file header  (weak)
+    [12%] lenprefixed_be       family=length-prefixed  big-endian 32-bit length followed by payload  (weak)
+===== closed_views =====
+
+  === structure recognition (4057 bytes) ===
+    [40%] json_persist         family=persisted-state  zustand persist envelope ({"state":...,"version":N})
+    prefix         : 0x7b (123)
+    [20%] pe_section_header    family=pe               PE section table entry (40 bytes)  (weak)
+    [16%] pe_file_header       family=pe               PE COFF file header  (weak)
+    [12%] lenprefixed_be       family=length-prefixed  big-endian 32-bit length followed by payload  (weak)

@@ -49,6 +49,13 @@ int nx_state_list_keys(const char *dir, const char *key_hint,
    key_hint を指定するとその文字列を含む key だけを対象にする。 */
 unsigned long long nx_state_max_seq(const char *dir, const char *key_hint);
 
+/* キーを「生バイト」で指定して、そのキーだけの最大 seq を返す。
+   key_hint 版は C 文字列 (NUL 終端) なので、キーに NUL を含む
+   localStorage のキー ("_origin\x00\x01name") は途中で切れて
+   別のキーにも当たる。こちらの方が厳密。 */
+unsigned long long nx_state_max_seq_bytes(const char *dir, const char *key,
+                                          size_t klen);
+
 /* key_hint を含む key が「今も生きているか」を返す。
    削除レコード (kTypeDeletion) を最大 seq として尊重する。
    列挙 (nx_state_list_keys) は履歴を拾うので、生存判定には使えない。

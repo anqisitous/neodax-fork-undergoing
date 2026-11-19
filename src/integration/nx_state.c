@@ -260,6 +260,8 @@ int nx_state_list_keys(const char *dir, const char *key_hint,
 typedef struct {
     unsigned long long max_seq;
     const char        *hint;
+    const char        *exact;   /* 完全一致させるキー (生バイト) */
+    size_t             exact_len;
 } maxseq_ud_t;
 
 static void maxseq_cb(const char *key, size_t klen, const unsigned char *val,
@@ -267,16 +269,26 @@ static void maxseq_cb(const char *key, size_t klen, const unsigned char *val,
     (void)val; (void)vlen;
     maxseq_ud_t *u = (maxseq_ud_t *)ud;
     if (!key || !klen) return;
-    if (u->hint && !memfind(key, klen, u->hint, strlen(u->hint))) return;
+    if (u->exact) {
+        /* 生バイトで完全一致。NUL を含むキーでも切れない。 */
+        if (klen != u->exact_len) return;
+        if (memcmp(key, u->exact, klen) != 0) return;
+    } else if (u->hint) {
+        if (!memfind(key, klen, u->hint, strlen(u->hint))) return;
+    }
     if (seq > u->max_seq) u->max_seq = seq;
 }
 
-unsigned long long nx_state_max_seq(const char *dir, const char *key_hint) {
+/* 走査の共通部。exact が非 NULL ならそれだけ、さもなくば hint。 */
+static unsigned long long max_seq_scan(const char *dir, const char *hint,
+                                       const char *exact, size_t exact_len) {
     struct stat stt;
     if (!dir || stat(dir, &stt) != 0) return 0;
     maxseq_ud_t u;
     memset(&u, 0, sizeof(u));
-    u.hint = key_hint;
+    u.hint = hint;
+    u.exact = exact;
+    u.exact_len = exact_len;
 
     if (S_ISDIR(stt.st_mode)) {
         DIR *d = opendir(dir);
@@ -295,6 +307,16 @@ unsigned long long nx_state_max_seq(const char *dir, const char *key_hint) {
         nx_leveldb_scan_file(dir, maxseq_cb, &u);
     }
     return u.max_seq;
+}
+
+unsigned long long nx_state_max_seq_bytes(const char *dir, const char *key,
+                                          size_t klen) {
+    if (!key) return 0;
+    return max_seq_scan(dir, NULL, key, klen);
+}
+
+unsigned long long nx_state_max_seq(const char *dir, const char *key_hint) {
+    return max_seq_scan(dir, key_hint, NULL, 0);
 }
 
 char *nx_state_find_key(const char *dir, const char *key_hint,

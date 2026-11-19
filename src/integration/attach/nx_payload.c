@@ -190,12 +190,28 @@ char *nx_payload_build_stop_restore(const char *store_substr,
         snprintf(js + cur2, cap - cur2,
             "if(store&&store.persist&&store.persist.clearStorage){"
             "try{await store.persist.clearStorage();cleared=true;}catch(e){}}"
+            /* clearStorage は localStorage を消すだけ。zustand は保存値が無いと\n                rehydrate で現在の state を残すので、メモリ側を明示的に空にする。\n                これが無いと、次の操作で古い byThreadKey / tabs が書き戻される。 */
+            "if(store&&store.setState){const s=store.getState();const empty={};"
+            "for(const kk of Object.keys(s)){const v=s[kk];"
+            "if(typeof v==='function')continue;"
+            "if(Array.isArray(v))empty[kk]=[];"
+            "else if(v&&typeof v==='object')empty[kk]={};"
+            "else if(typeof v==='string')empty[kk]='';"
+            "else if(typeof v==='number')empty[kk]=0;"
+            "else if(typeof v==='boolean')empty[kk]=false;"
+            "else empty[kk]=v;}"
+            "store.setState(empty);}"
             "if(store&&store.persist&&store.persist.rehydrate){try{await store.persist.rehydrate();}catch(e){}}");
     }
 
     size_t cur = strlen(js);
     snprintf(js + cur, cap - cur,
-        "return JSON.stringify({ok:true,removed,cleared,prefix:'%s'});})()", pfx);
+        "const counts={};"
+        "if(store&&store.getState){const st=store.getState();"
+        "for(const kk of Object.keys(st)){const v=st[kk];"
+        "if(Array.isArray(v))counts[kk]=v.length;"
+        "else if(v&&typeof v==='object')counts[kk]=Object.keys(v).length;}}"
+        "return JSON.stringify({ok:true,removed,cleared,prefix:'%s',counts});})()", pfx);
     return js;
 }
 

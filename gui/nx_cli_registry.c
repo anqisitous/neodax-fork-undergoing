@@ -110,6 +110,7 @@ const nx_cli_cmd_t nx_cli_cmds[] = {
    (keys=全キー, tab-keys=タブが持つキー) ので別コマンドのまま。 */
 { "windows",   "ウィンドウ",  "観測", "",                       "画面上のウィンドウを列挙",                    NULL, NULL },
 { "tabs",      "タブ一覧",    "観測", "--state",                "永続層のタブを TSV で出す",                   NULL, NULL },
+{ "dump",      "生の状態",    "判定", "--state --key",         "解決された状態の生 JSON を出す (--key で任意キー)", NULL, NULL },
 { "keys",      "キー一覧",    "観測", "--state",                "KV のキー・seq・生存を C 側で列挙",            NULL, NULL },
 { "tab-keys",  "タブのキー",  "観測", "--state",                "タブが持つキーを列挙",                        NULL, NULL },
 { "threads",   "チャット台帳", "観測", "--db --list --deleted --within --apply", "チャットの重複を検出",               NULL, NULL },
@@ -140,17 +141,16 @@ const nx_cli_cmd_t nx_cli_cmds[] = {
 { "project",   "分析の保存",  "判定", "--dir --state --analysis --run --show --list --dry-run", "分析をプロジェクトに保存 (先に path、後で書き込み)", NULL, NULL },
 
 /* --- 修復: 書く ---
-   fix は「修復内容を作るだけ」で書かない。clean/heal/apply は書く。
-     apply = 1 通りだけ書く (stale surface 除去 or --id 指定)
-     clean = 種類と安全度からどの段を使うか選んで書く (apply の上位)
+   fix   = アプリ全体の一発入口。AE は recipe→recipe-run、DeepAI は clean。
+     clean = LevelDB 状態だけを直す (アプリ全体は fix)。
      heal  = 検出→書く→再水和 を一息でやる (clean の特殊形)
      repair= 4 往復して収束させる (clean と違って反復する)
    重なりが強いので、 heal は clean の別名にする
    (clean が selected=heal を出す。同じ経路を 2 回書かない)。
    repair は反復が本質なので独立のまま。 */
-{ "fix",       "修復内容",    "修復", "--state",                "修復内容を作る (ファイルに書くだけ)",          NULL, NULL },
+{ "fix",       "アプリ修復",  "修復", "--path --target --state --app --store --key --apply --no-live --dry-run", "AE は recipe→run、DeepAI は状態修復を 1 発で",  NULL, NULL },
 { "apply",     "適用",        "修復", "--state --attach --app --store --key --id --live", "永続層へ反映",   NULL, NULL },
-{ "clean",     "一括",        "修復", "--state --no-live --dry-run --app --store --key", "種類と安全度から段を選んで直す",  NULL, NULL },
+{ "clean",     "状態のみ",    "修復", "--state --no-live --dry-run --app --store --key", "LevelDB 状態だけを直す (アプリ全体は fix)",  NULL, NULL },
 { "delete",    "削除",        "修復", "--state --id --app --store --live --no-store-sync --force --all-stale --key", "1 件だけ消す (--all-stale でまとめて)",                     NULL, NULL },
 { "repair",    "修復実行",    "修復", "--state",                "観測 → 計画 → 実行 → 再観測 (4 往復)",        NULL, NULL },
 { "heal",      "復元",        "修復", "--state --app --key --dry-run", "検出→書き戻し→再水和 (clean と同じ)",  "clean", NULL },
@@ -164,13 +164,13 @@ const nx_cli_cmd_t nx_cli_cmds[] = {
      asar = asar の中を探す
    対象が違うので別のまま。 */
 { "seek",      "検索",        "解析", "--ignore-case --regex --binary --files --word --include --context --limit --time", "grep の代わり。範囲を切って探す", NULL, NULL },
-{ "asar",      "asar",        "解析", "--file --grep --find --context --limit", "asar の一覧・検索",             NULL, NULL },
+{ "asar",      "asar",        "解析", "--file --grep --find --context --limit --extract --out", "asar の一覧・検索・取り出し",  NULL, NULL },
 { "tpl-cpp",   "テンプレート", "解析", "--dir --svg --record --ng", "cpp テンプレートの構成・annulus・学習",  NULL, NULL },
 { "search",    "探索",        "解析", "--path --symbol --probe-ms --apply", "候補を探す",                               NULL, NULL },
 { "replay",    "再生",        "解析", "--state",                "記録を再生する",                              NULL, NULL },
 { "simulate",  "模擬",        "解析", "--state --asar",         "状態を模擬する",                              NULL, NULL },
-{ "spec",      "仕様",        "解析", "",                       "仕様を出す",                                  NULL, NULL },
-{ "gen",       "生成",        "解析", "",                       "C++ クラスを生成",                            NULL, NULL },
+{ "spec",      "仕様",        "解析", "--hex --file --ws",          "構造を認識する (magic/check 付き spec)",       NULL, NULL },
+{ "gen",       "cpp decoder", "解析", "--spec --class",             "spec から C++ デコーダクラスを生成",            NULL, NULL },
 { "pe",        "PE 解析",     "解析", "--file --disasm --limit",   "Windows PE の解析",                           NULL, NULL },
 { "pipeline",  "pipeline",    "解析", "--file --strategy --limit",   "decode+encode 戦略選択",                      NULL, NULL },
 

@@ -210,6 +210,27 @@ const nx_spec_t nx_spec_ls_record = {
     ls_record_fields, (int)(sizeof(ls_record_fields) / sizeof(ls_record_fields[0]))
 };
 
+/* ---- 汎用の zustand persist JSON ------------------------------- */
+/* `{"state":{...},"version":N}` なら、どのストアでも同じ封筒。
+   json_state は "tabs" まで要求するので workspace-tabs 専用になっていた。
+   ここでは封筒だけを見る (中身の解釈は decoder の利用側)。 */
+static int json_persist_check(const uint8_t *d, size_t n) {
+    size_t i = 0;
+    while (i < n && (d[i] == ' ' || d[i] == '\t' || d[i] == '\r' || d[i] == '\n')) i++;
+    if (i >= n || d[i] != '{') return 0;
+    return mem_contains(d, n, "\"state\"") &&
+           mem_contains(d, n, "\"version\"");
+}
+
+static const nx_field_t json_persist_fields[] = {
+    { "prefix", NX_F_ABS, NX_D_ASCII, 0, 8, 0, 0, 1, NULL, 0 },
+};
+const nx_spec_t nx_spec_json_persist = {
+    "json_persist", "persisted-state", "zustand persist envelope ({\"state\":...,\"version\":N})",
+    NULL, 0, 0, json_persist_check,
+    json_persist_fields, (int)(sizeof(json_persist_fields) / sizeof(json_persist_fields[0]))
+};
+
 void nx_specs_builtin_register(void) {
     nx_spec_register(&nx_spec_ws_frame);
     nx_spec_register(&nx_spec_lenprefixed_be);
@@ -222,6 +243,7 @@ void nx_specs_builtin_register(void) {
     nx_spec_register(&nx_spec_macho32);
     nx_spec_register(&nx_spec_macho_fat);
     nx_spec_register(&nx_spec_json_state);
+    nx_spec_register(&nx_spec_json_persist);
     nx_spec_register(&nx_spec_ls_record);
 }
 

@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="700" viewBox="0 0 900 700">
+<rect width="100%" height="100%" fill="#0f1115"/>
+<circle cx="450" cy="350" r="90" fill="none" stroke="#2a3140" stroke-width="1"/>
+<circle cx="450" cy="350" r="160" fill="none" stroke="#2a3140" stroke-width="1"/>
+<circle cx="450" cy="350" r="230" fill="none" stroke="#2a3140" stroke-width="1"/>
+<circle cx="450" cy="350" r="300" fill="none" stroke="#2a3140" stroke-width="1"/>
+<circle cx="450" cy="350" r="370" fill="none" stroke="#2a3140" stroke-width="1"/>
+<circle cx="450" cy="350" r="440" fill="none" stroke="#2a3140" stroke-width="1"/>
+<line x1="450" y1="-90" x2="450" y2="-20" stroke="#3f6d8f" stroke-width="1.2" data-from="audit.observe" data-to="audit.tabs" data-kind="converges"/><text x="450" y="-58" fill="#6b7a90" font-size="9">converges</text>
+<line x1="450" y1="-20" x2="450" y2="50" stroke="#3f6d8f" stroke-width="1.2" data-from="audit.tabs" data-to="audit.decode" data-kind="converges"/><text x="450" y="12" fill="#6b7a90" font-size="9">converges</text>
+<line x1="450" y1="50" x2="450" y2="120" stroke="#3f6d8f" stroke-width="1.2" data-from="audit.decode" data-to="audit.ledger" data-kind="converges"/><text x="450" y="82" fill="#6b7a90" font-size="9">converges</text>
+<line x1="450" y1="120" x2="450" y2="190" stroke="#3f6d8f" stroke-width="1.2" data-from="audit.ledger" data-to="audit.detect" data-kind="converges"/><text x="450" y="152" fill="#6b7a90" font-size="9">converges</text>
+<line x1="450" y1="190" x2="450" y2="260" stroke="#3f6d8f" stroke-width="1.2" data-from="audit.detect" data-to="audit.check" data-kind="converges"/><text x="450" y="222" fill="#6b7a90" font-size="9">converges</text>
+<line x1="450" y1="260" x2="464" y2="261" stroke="#3f6d8f" stroke-width="1.2" data-from="audit.check" data-to="audit.layout" data-kind="renders"/><text x="457" y="258" fill="#6b7a90" font-size="9">renders</text>
+<line x1="477" y1="264" x2="490" y2="269" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_diff_panel_state_v1" data-to="dead.t3code_diff_panel_state_v1.1" data-kind="owns"/><text x="484" y="264" fill="#6b7a90" font-size="9">owns</text>
+<line x1="477" y1="264" x2="502" y2="276" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_diff_panel_state_v1" data-to="dead.t3code_diff_panel_state_v1.2" data-kind="owns"/><text x="489" y="267" fill="#6b7a90" font-size="9">owns</text>
+<line x1="477" y1="264" x2="512" y2="285" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_diff_panel_state_v1" data-to="dead.t3code_diff_panel_state_v1.3" data-kind="owns"/><text x="495" y="272" fill="#6b7a90" font-size="9">owns</text>
+<line x1="477" y1="264" x2="522" y2="295" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_diff_panel_state_v1" data-to="dead.t3code_diff_panel_state_v1.4" data-kind="owns"/><text x="499" y="277" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="535" y2="320" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.5" data-kind="owns"/><text x="532" y="310" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="538" y2="333" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.6" data-kind="owns"/><text x="534" y="317" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="540" y2="347" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.7" data-kind="owns"/><text x="535" y="324" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="539" y2="360" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.8" data-kind="owns"/><text x="534" y="331" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="537" y2="374" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.9" data-kind="owns"/><text x="533" y="337" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="532" y2="387" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.10" data-kind="owns"/><text x="531" y="344" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="526" y2="399" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.11" data-kind="owns"/><text x="527" y="350" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="517" y2="410" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.12" data-kind="owns"/><text x="523" y="355" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="507" y2="419" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.13" data-kind="owns"/><text x="518" y="360" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="496" y2="427" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.14" data-kind="owns"/><text x="513" y="364" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="484" y2="433" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.15" data-kind="owns"/><text x="506" y="367" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="471" y2="438" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.16" data-kind="owns"/><text x="500" y="369" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="457" y2="440" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.17" data-kind="owns"/><text x="493" y="370" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="443" y2="440" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.18" data-kind="owns"/><text x="486" y="370" fill="#6b7a90" font-size="9">owns</text>
+<line x1="529" y1="307" x2="429" y2="438" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_composer_drafts_v1" data-to="dead.t3code_composer_drafts_v1.19" data-kind="owns"/><text x="479" y="369" fill="#6b7a90" font-size="9">owns</text>
+<line x1="404" y1="427" x2="393" y2="419" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_browser_favicons_v1" data-to="dead.t3code_browser_favicons_v1.20" data-kind="owns"/><text x="398" y="420" fill="#6b7a90" font-size="9">owns</text>
+<line x1="383" y1="410" x2="374" y2="399" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_closed_views_v2" data-to="dead.t3code_closed_views_v2.21" data-kind="owns"/><text x="379" y="401" fill="#6b7a90" font-size="9">owns</text>
+<line x1="383" y1="410" x2="368" y2="387" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_closed_views_v2" data-to="dead.t3code_closed_views_v2.22" data-kind="owns"/><text x="375" y="395" fill="#6b7a90" font-size="9">owns</text>
+<line x1="383" y1="410" x2="363" y2="374" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_closed_views_v2" data-to="dead.t3code_closed_views_v2.23" data-kind="owns"/><text x="373" y="389" fill="#6b7a90" font-size="9">owns</text>
+<line x1="388" y1="285" x2="398" y2="276" stroke="#3f6d8f" stroke-width="1.2" data-from="store.t3code_ui_state_v1" data-to="dead.t3code_ui_state_v1.24" data-kind="owns"/><text x="393" y="278" fill="#6b7a90" font-size="9">owns</text>
+<rect data-id="audit.observe" data-label="全 localStorage キーと seq を列挙" x="444" y="-96" width="12" height="12" fill="#4c9be8"/>
+<text x="459" y="-86" fill="#c8d2e0" font-size="10">audit.observe</text>
+<rect data-id="audit.tabs" data-label="表示中のタブと owner を読む" x="444" y="-26" width="12" height="12" fill="#4c9be8"/>
+<text x="459" y="-16" fill="#c8d2e0" font-size="10">audit.tabs</text>
+<rect data-id="audit.decode" data-label="全ストアを型付きで読む" x="444" y="44" width="12" height="12" fill="#4c9be8"/>
+<text x="459" y="54" fill="#c8d2e0" font-size="10">audit.decode</text>
+<rect data-id="audit.ledger" data-label="生存 thread 台帳を読む" x="444" y="114" width="12" height="12" fill="#4c9be8"/>
+<text x="459" y="124" fill="#c8d2e0" font-size="10">audit.ledger</text>
+<rect data-id="audit.detect" data-label="owner の無い参照 / 死んだ threadRef を数える" x="444" y="184" width="12" height="12" fill="#4c9be8"/>
+<text x="459" y="194" fill="#c8d2e0" font-size="10">audit.detect</text>
+<rect data-id="audit.check" data-label="観測 TSV を Checker に渡す" x="444" y="254" width="12" height="12" fill="#4c9be8"/>
+<text x="459" y="264" fill="#c8d2e0" font-size="10">audit.check</text>
+<rect data-id="audit.layout" data-label="アプリのタブ表示 (置き換えない)" x="458" y="255" width="12" height="12" fill="#c9a227"/>
+<text x="473" y="265" fill="#c8d2e0" font-size="10">audit.layout</text>
+<rect data-id="store.t3code_diff_panel_state_v1" data-label="&quot;t3code:diff-panel-state:v1&quot;" x="471" y="258" width="12" height="12" fill="#4c9be8"/>
+<text x="486" y="268" fill="#c8d2e0" font-size="10">store.t3code_diff_panel_state_v1</text>
+<rect data-id="dead.t3code_diff_panel_state_v1.1" data-label="&quot;28b4c9f1-1b76-47f0-8572-a5148135faa6:336748f1-2242-408f-9119-2e63b69501c6 DEAD thread=336748f1-2242-408f-9119-2e63b69501c6 byThreadKey&quot;" x="484" y="263" width="12" height="12" fill="#4c9be8"/>
+<text x="499" y="273" fill="#c8d2e0" font-size="10">dead.t3code_diff_panel_state_v1.1</text>
+<rect data-id="dead.t3code_diff_panel_state_v1.2" data-label="&quot;28b4c9f1-1b76-47f0-8572-a5148135faa6:8112363b-95fa-4d84-8a28-d0679bd2bd6b DEAD thread=8112363b-95fa-4d84-8a28-d0679bd2bd6b byThreadKey&quot;" x="496" y="270" width="12" height="12" fill="#4c9be8"/>
+<text x="511" y="280" fill="#c8d2e0" font-size="10">dead.t3code_diff_panel_state_v1.2</text>
+<rect data-id="dead.t3code_diff_panel_state_v1.3" data-label="&quot;d3d0c88e-4bd4-46ef-ad24-1fac103a9fbe:0a3ad361-5c9e-4ba8-b516-f65d90e2a565 DEAD thread=0a3ad361-5c9e-4ba8-b516-f65d90e2a565 byThreadKey&quot;" x="506" y="279" width="12" height="12" fill="#4c9be8"/>
+<text x="521" y="289" fill="#c8d2e0" font-size="10">dead.t3code_diff_panel_state_v1.3</text>
+<rect data-id="dead.t3code_diff_panel_state_v1.4" data-label="&quot;d3d0c88e-4bd4-46ef-ad24-1fac103a9fbe:0a3ad361-5c9e-4ba8-b516-f65d90e2a565 DEAD thread=0a3ad361-5c9e-4ba8-b516-f65d90e2a565 branchBaseRefByThreadKey&quot;" x="516" y="289" width="12" height="12" fill="#4c9be8"/>
+<text x="531" y="299" fill="#c8d2e0" font-size="10">dead.t3code_diff_panel_state_v1.4</text>
+<rect data-id="store.t3code_composer_drafts_v1" data-label="&quot;t3code:composer-drafts:v1&quot;" x="523" y="301" width="12" height="12" fill="#4c9be8"/>
+<text x="538" y="311" fill="#c8d2e0" font-size="10">store.t3code_composer_drafts_v1</text>
+<rect data-id="dead.t3code_composer_drafts_v1.5" data-label="&quot;28b4c9f1-1b76-47f0-8572-a5148135faa6:2561e026-d1fd-4f92-a455-c1438f796628 DEAD thread=2561e026-d1fd-4f92-a455-c1438f796628 draftsByThreadKey&quot;" x="529" y="314" width="12" height="12" fill="#4c9be8"/>
+<text x="544" y="324" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.5</text>
+<rect data-id="dead.t3code_composer_drafts_v1.6" data-label="&quot;28b4c9f1-1b76-47f0-8572-a5148135faa6:88d6eb15-f02f-4cc3-a771-42c97b5f6430 DEAD thread=88d6eb15-f02f-4cc3-a771-42c97b5f6430 draftsByThreadKey&quot;" x="532" y="327" width="12" height="12" fill="#4c9be8"/>
+<text x="547" y="337" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.6</text>
+<rect data-id="dead.t3code_composer_drafts_v1.7" data-label="&quot;28b4c9f1-1b76-47f0-8572-a5148135faa6:6cf6b459-31da-4b78-a498-361b589aceab DEAD thread=6cf6b459-31da-4b78-a498-361b589aceab draftsByThreadKey&quot;" x="534" y="341" width="12" height="12" fill="#4c9be8"/>
+<text x="549" y="351" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.7</text>
+<rect data-id="dead.t3code_composer_drafts_v1.8" data-label="&quot;28b4c9f1-1b76-47f0-8572-a5148135faa6:771b9c8e-63c0-41a7-8f44-625eeeaa6673 DEAD thread=771b9c8e-63c0-41a7-8f44-625eeeaa6673 draftsByThreadKey&quot;" x="533" y="354" width="12" height="12" fill="#4c9be8"/>
+<text x="548" y="364" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.8</text>
+<rect data-id="dead.t3code_composer_drafts_v1.9" data-label="&quot;28b4c9f1-1b76-47f0-8572-a5148135faa6:77d5856c-4fc6-4eac-8c0b-3e369384bb4f DEAD thread=77d5856c-4fc6-4eac-8c0b-3e369384bb4f draftsByThreadKey&quot;" x="531" y="368" width="12" height="12" fill="#4c9be8"/>
+<text x="546" y="378" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.9</text>
+<rect data-id="dead.t3code_composer_drafts_v1.10" data-label="&quot;bdfba710-f83f-45ec-8b90-47d63c8f4176 DEAD thread=bdfba710-f83f-45ec-8b90-47d63c8f4176 draftsByThreadKey&quot;" x="526" y="381" width="12" height="12" fill="#4c9be8"/>
+<text x="541" y="391" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.10</text>
+<rect data-id="dead.t3code_composer_drafts_v1.11" data-label="&quot;a14f71ab-409a-4115-b811-26100195a5dc DEAD thread=a14f71ab-409a-4115-b811-26100195a5dc draftsByThreadKey&quot;" x="520" y="393" width="12" height="12" fill="#4c9be8"/>
+<text x="535" y="403" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.11</text>
+<rect data-id="dead.t3code_composer_drafts_v1.12" data-label="&quot;832a587e-6b61-475b-8cf5-0dba74a77b94 DEAD thread=832a587e-6b61-475b-8cf5-0dba74a77b94 draftsByThreadKey&quot;" x="511" y="404" width="12" height="12" fill="#4c9be8"/>
+<text x="526" y="414" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.12</text>
+<rect data-id="dead.t3code_composer_drafts_v1.13" data-label="&quot;74319268-2228-4924-bf7d-c79f740700b9 DEAD thread=74319268-2228-4924-bf7d-c79f740700b9 draftsByThreadKey&quot;" x="501" y="413" width="12" height="12" fill="#4c9be8"/>
+<text x="516" y="423" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.13</text>
+<rect data-id="dead.t3code_composer_drafts_v1.14" data-label="&quot;d3d0c88e-4bd4-46ef-ad24-1fac103a9fbe:5fa8c8c4-4f6a-481b-b32a-8fb17d6a8769 DEAD thread=5fa8c8c4-4f6a-481b-b32a-8fb17d6a8769 draftsByThreadKey&quot;" x="490" y="421" width="12" height="12" fill="#4c9be8"/>
+<text x="505" y="431" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.14</text>
+<rect data-id="dead.t3code_composer_drafts_v1.15" data-label="&quot;0fbc08fa-a2bb-481a-87c1-16925dcff77f DEAD thread=0fbc08fa-a2bb-481a-87c1-16925dcff77f draftsByThreadKey&quot;" x="478" y="427" width="12" height="12" fill="#4c9be8"/>
+<text x="493" y="437" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.15</text>
+<rect data-id="dead.t3code_composer_drafts_v1.16" data-label="&quot;d3d0c88e-4bd4-46ef-ad24-1fac103a9fbe:a66c70a5-472c-4e71-9dfc-0b5806a9bd3a DEAD thread=a66c70a5-472c-4e71-9dfc-0b5806a9bd3a draftsByThreadKey&quot;" x="465" y="432" width="12" height="12" fill="#4c9be8"/>
+<text x="480" y="442" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.16</text>
+<rect data-id="dead.t3code_composer_drafts_v1.17" data-label="&quot;14fde373-5b3f-4963-833d-bd9e5579bf94 DEAD thread=14fde373-5b3f-4963-833d-bd9e5579bf94 draftsByThreadKey&quot;" x="451" y="434" width="12" height="12" fill="#4c9be8"/>
+<text x="466" y="444" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.17</text>
+<rect data-id="dead.t3code_composer_drafts_v1.18" data-label="&quot;fb3ebfa4-3da9-427c-b974-7d41f1484ecc DEAD thread=fb3ebfa4-3da9-427c-b974-7d41f1484ecc draftsByThreadKey&quot;" x="437" y="434" width="12" height="12" fill="#4c9be8"/>
+<text x="452" y="444" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.18</text>
+<rect data-id="dead.t3code_composer_drafts_v1.19" data-label="&quot;db6e7093-bcc9-46ac-848b-4208067336bb DEAD thread=db6e7093-bcc9-46ac-848b-4208067336bb draftsByThreadKey&quot;" x="423" y="432" width="12" height="12" fill="#4c9be8"/>
+<text x="438" y="442" fill="#c8d2e0" font-size="10">dead.t3code_composer_drafts_v1.19</text>
+<rect data-id="store.t3code_last_editor" data-label="&quot;t3code:last-editor&quot;" x="410" y="427" width="12" height="12" fill="#4c9be8"/>
+<text x="425" y="437" fill="#c8d2e0" font-size="10">store.t3code_last_editor</text>
+<rect data-id="store.t3code_browser_favicons_v1" data-label="&quot;t3code:browser-favicons:v1&quot;" x="398" y="421" width="12" height="12" fill="#4c9be8"/>
+<text x="413" y="431" fill="#c8d2e0" font-size="10">store.t3code_browser_favicons_v1</text>
+<rect data-id="dead.t3code_browser_favicons_v1.20" data-label="&quot;28b4c9f1-1b76-47f0-8572-a5148135faa6:06501a70-1fa6-456e-908d-0e5c76eda6cf https://www.youtube.com:443 DEAD thread=06501a70-1fa6-456e-908d-0e5c76eda6cf byKey&quot;" x="387" y="413" width="12" height="12" fill="#4c9be8"/>
+<text x="402" y="423" fill="#c8d2e0" font-size="10">dead.t3code_browser_favicons_v1.20</text>
+<rect data-id="store.t3code_closed_views_v2" data-label="&quot;t3code:closed-views:v2&quot;" x="377" y="404" width="12" height="12" fill="#4c9be8"/>
+<text x="392" y="414" fill="#c8d2e0" font-size="10">store.t3code_closed_views_v2</text>
+<rect data-id="dead.t3code_closed_views_v2.21" data-label="&quot;9e585da3-e31d-4591-a854-d50f05e33dc3 DEAD thread=122c195c-9f45-4ddc-b884-7b552cfad331 chat&quot;" x="368" y="393" width="12" height="12" fill="#4c9be8"/>
+<text x="383" y="403" fill="#c8d2e0" font-size="10">dead.t3code_closed_views_v2.21</text>
+<rect data-id="dead.t3code_closed_views_v2.22" data-label="&quot;6c3b71a0-1498-4916-955c-ccef64b3809f DEAD thread=6f5029b6-e3a8-40a0-bd76-62508e288b77 new-tab&quot;" x="362" y="381" width="12" height="12" fill="#4c9be8"/>
+<text x="377" y="391" fill="#c8d2e0" font-size="10">dead.t3code_closed_views_v2.22</text>
+<rect data-id="dead.t3code_closed_views_v2.23" data-label="&quot;647d6217-e101-49ea-8690-6d26d903c32e DEAD thread=8198717a-afc9-4702-9075-590373ccf385 chat&quot;" x="357" y="368" width="12" height="12" fill="#4c9be8"/>
+<text x="372" y="378" fill="#c8d2e0" font-size="10">dead.t3code_closed_views_v2.23</text>
+<rect data-id="store.t3_backgroundActivity_clientId" data-label="&quot;t3.backgroundActivity.clientId&quot;" x="355" y="354" width="12" height="12" fill="#4c9be8"/>
+<text x="370" y="364" fill="#c8d2e0" font-size="10">store.t3_backgroundActivity_clientId</text>
+<rect data-id="store.t3code_provider_update_dismissals_v1" data-label="&quot;t3code:provider-update-dismissals:v1&quot;" x="354" y="341" width="12" height="12" fill="#4c9be8"/>
+<text x="369" y="351" fill="#c8d2e0" font-size="10">store.t3code_provider_update_dismissals_v1</text>
+<rect data-id="store.deepai_code_workspace_tabs_v1" data-label="&quot;deepai-code:workspace-tabs:v1&quot;" x="356" y="327" width="12" height="12" fill="#4c9be8"/>
+<text x="371" y="337" fill="#c8d2e0" font-size="10">store.deepai_code_workspace_tabs_v1</text>
+<rect data-id="store.t3code_renderMarkdown" data-label="&quot;t3code.renderMarkdown&quot;" x="359" y="314" width="12" height="12" fill="#4c9be8"/>
+<text x="374" y="324" fill="#c8d2e0" font-size="10">store.t3code_renderMarkdown</text>
+<rect data-id="store.t3code_diffFileTreeOpen" data-label="&quot;t3code.diffFileTreeOpen&quot;" x="365" y="301" width="12" height="12" fill="#4c9be8"/>
+<text x="380" y="311" fill="#c8d2e0" font-size="10">store.t3code_diffFileTreeOpen</text>
+<rect data-id="store.t3code_terminal_state_v1" data-label="&quot;t3code:terminal-state:v1&quot;" x="372" y="289" width="12" height="12" fill="#4c9be8"/>
+<text x="387" y="299" fill="#c8d2e0" font-size="10">store.t3code_terminal_state_v1</text>
+<rect data-id="store.t3code_ui_state_v1" data-label="&quot;t3code:ui-state:v1&quot;" x="382" y="279" width="12" height="12" fill="#4c9be8"/>
+<text x="397" y="289" fill="#c8d2e0" font-size="10">store.t3code_ui_state_v1</text>
+<rect data-id="dead.t3code_ui_state_v1.24" data-label="&quot;d3d0c88e-4bd4-46ef-ad24-1fac103a9fbe:79608a47-186e-423a-8925-4c27b2e22ee6 DEAD thread=79608a47-186e-423a-8925-4c27b2e22ee6 threadChangedFilesExpandedById&quot;" x="392" y="270" width="12" height="12" fill="#4c9be8"/>
+<text x="407" y="280" fill="#c8d2e0" font-size="10">dead.t3code_ui_state_v1.24</text>
+<rect data-id="store.t3code_right_panel_state_v2" data-label="&quot;t3code:right-panel-state:v2&quot;" x="404" y="263" width="12" height="12" fill="#4c9be8"/>
+<text x="419" y="273" fill="#c8d2e0" font-size="10">store.t3code_right_panel_state_v2</text>
+<rect data-id="store.deepai_code_workspace_tabs_v1_nx_backup" data-label="&quot;deepai-code:workspace-tabs:v1.nx-backup&quot;" x="417" y="258" width="12" height="12" fill="#4c9be8"/>
+<text x="432" y="268" fill="#c8d2e0" font-size="10">store.deepai_code_workspace_tabs_v1_nx_backup</text>
+<rect data-id="store.t3code_fileExplorerOpen" data-label="&quot;t3code.fileExplorerOpen&quot;" x="430" y="255" width="12" height="12" fill="#4c9be8"/>
+<text x="445" y="265" fill="#c8d2e0" font-size="10">store.t3code_fileExplorerOpen</text>
+<text x="16" y="24" fill="#c8d2e0" font-size="14">tab-restore.audit</text>
+</svg>
