@@ -48,28 +48,176 @@ export STATE="$HOME/Library/Application Support/deepai-code-v2/Local Storage/lev
 
 ---
 
-## 2. 最初に覚える 3 つ
+# 2. コマンド解説
+##fixコマンドこれしかいらない
+`./bin/neodax-ui fix --path "some.app" --apply`
 
-### ① 書き込み先は 3 層ある
 
-| 層 | 中身 | 触るコマンド |
+--file　データを見る
+```./bin/neodax-ui asar        --file app.asar --find "text"
+./bin/neodax-ui spec        --file data.json
+./bin/neodax-ui pe          --file app.exe
+./bin/neodax-ui pipeline    --file app.exe
+./bin/neodax-ui recipe-show --file ~/.neodax/recipes/fix-AE\ Fork.app.nxrecipe
+./bin/neodax-ui recipe-run  --file ~/.neodax/recipes/fix-AE\ Fork.app.nxrecipe --apply
+```
+
+## 日常で使う入口
+
+```sh
+./bin/neodax-ui help        # 全コマンド
+./bin/neodax-ui --selftest  # 健康診断
+```
+
+## 修復
+
+```sh
+# アプリ全体を一発で直す（作業コピー <app>.neodax-work を作る）
+./bin/neodax-ui fix --path "/Applications/Some.app" --apply
+./bin/neodax-ui fix --path "/Applications/Some.app" --target NglController --apply
+
+# なんらかのアプリ例:Some.app の現在の状態を一発で直す
+./bin/neodax-ui fix --app "Some.app" --apply
+
+# 状態だけを直す（LevelDB 専用）
+./bin/neodax-ui clean --state "<leveldb>" --dry-run
+./bin/neodax-ui clean --state "<leveldb>" --apply
+
+# 1 件だけ消す
+./bin/neodax-ui delete --state "<leveldb>" --id "<ID>" --live --force
+
+# 観測→計画→実行→再観測
+./bin/neodax-ui repair --state "<leveldb>"
+
+# 永続層へ反映 / 稼働中ストアへ反映
+./bin/neodax-ui apply --state "<leveldb>" --live
+./bin/neodax-ui apply --attach --app "DeepAI Code"
+
+# 復元を止める / 基準状態に置き換える
+./bin/neodax-ui stop --key "t3code:right-panel-state:v2"
+./bin/neodax-ui baseline --key "t3code:right-panel-state:v2"
+```
+
+## 観測・判定
+
+```sh
+./bin/neodax-ui tabs      --state "<leveldb>"
+./bin/neodax-ui keys      --state "<leveldb>"
+./bin/neodax-ui tab-keys  --state "<leveldb>"
+./bin/neodax-ui advise    --state "<leveldb>"
+./bin/neodax-ui advise --id "<ID>"
+./bin/neodax-ui plan      --state "<leveldb>"
+./bin/neodax-ui check     --state "<leveldb>"
+./bin/neodax-ui splice    --state "<leveldb>"
+./bin/neodax-ui dump      --key "t3code:right-panel-state:v2"
+./bin/neodax-ui threads   --list
+./bin/neodax-ui probe     --app "DeepAI Code"
+./bin/neodax-ui windows
+./bin/neodax-ui capture   --app "DeepAI Code" -o shot.png
+```
+
+## 解析・プロジェクト
+
+```sh
+# 全ストア+コードのノード監査（読むだけ）
+./bin/neodax-ui tpl-cpp --dir analysis/tab_restore.cpp
+./bin/neodax-ui trace   --dir analysis/tab_restore.cpp
+
+# プロジェクト（今は空の置き場。必要時だけ手で保存）
+./bin/neodax-ui project --dir analysis/project --show
+./bin/neodax-ui project --dir analysis/project --analysis "$(cat analysis/PROJECT_ANALYSIS.tsv)"
+
+# 案件ごとの自発解析
+./bin/neodax-ui case --path "/Applications/DeepAI Code.app" --kind app
+./bin/neodax-ui best --path "/Applications/Some.app" --kind app
+./bin/neodax-ui app-analyze --path "/Applications/Some.app"
+
+# 構造認識・C++ decoder 生成
+./bin/neodax-ui spec --file data.json
+./bin/neodax-ui gen  --spec all -o decoders.cpp
+
+# 手順（recipe）
+./bin/neodax-ui recipe      --path "/Applications/Some.app" --target NglController
+./bin/neodax-ui recipe-show --file ~/.neodax/recipes/fix-Some.app.nxrecipe
+./bin/neodax-ui recipe-run  --file ~/.neodax/recipes/fix-Some.app.nxrecipe --apply
+
+# 検索・asar
+./bin/neodax-ui seek "pattern" src --regex
+./bin/neodax-ui asar --file "/Applications/DeepAI Code.app/Contents/Resources/app.asar" --find "text"
+```
+
+## NGL（AE）
+
+`neodax-ui` ではなく単体 CLI 側です。
+
+```sh
+./bin/neodax --ngl-reset --apply   # NGL 状態を退避
+./bin/neodax --ngl-reset           # 退避内容の確認のみ
+./bin/neodax --predict-login       # ログインダイアログを静的に予測
+```
+
+## 迷ったとき
+
+```sh
+./bin/neodax-ui advise --state "<leveldb>"   # 壊れているか
+./bin/neodax-ui plan   --state "<leveldb>"   # 何をどの順で直すか
+./bin/neodax-ui fix    --app "DeepAI Code" --apply
+```
+
+--kind　観測したデータの表示オプション
+### `dir` = 構造を観測する
+
+「この資産はどのノードがどのノードを要求しているか」を、ファイルと辺から組み立てます。
+
+- `node:` / `link:` の並び
+- `requires` / `converges` の向き
+- ring（同時に入れ替え可能なまとまり）
+- 孤立・隠れ・影
+### `state` = 順序を観測する
+
+
+- どのプロセスが生きているか
+- seq がいくつか
+##
+
+### `app` = 因果を観測する
+
+「このアプリが終了するのは、どの関数がどの関数を呼んでいるからか」を、バイナリの事実から組み立てます。
+
+- `NglController` があるか
+- `ShouldCheckLicense` がどのアドレスか
+- どの BL 命令がそれを呼ぶか
+
+だから `app` の事実は**シンボルとアドレスに必ず紐づく**。紐づかない推測は事実にしません。`nx_recipe_locate_symbol` / `nx_recipe_find_callers` がそのための観測器です。
+
+
+
+
+## `--regex`
+
+**`seek` 専用の真偽フラグ**。パターンを正規表現として扱う。
+`seek --regex` の実体は `src/integration/track/search.cpp` の `TextQuery`
+`src/integration/track/search.hpp` … `SeekOptions` の上限値
+```
+./bin/neodax-ui seek "a|b" . --regex
+#                       ↑  ↑  ↑
+#                  PATTERN ROOT FLAG
+```
+
+| 添字 | 値 | 意味 |
 |---|---|---|
-| **永続層**（LevelDB のファイル） | ディスク上のタブ状態。アプリを終了しても残る | `apply` `delete` `clean` `heal` `repair` `advise-proc --apply` |
-| **稼働中ストア**（起動中のアプリが見ている値） | 次回 persist で永続層に書き戻される | `apply --attach` `attach` `stop` `baseline` `delete`（既定） `clean`（live-sync 段） `heal` `repair` |
-| **アプリ本体**（.app のコード） | 起動時の挙動・ライセンス判定 | `cut` `best` `search` `recipe-run --apply` `app-analyze --fix` |
+| `argv[0]` | `./bin/neodax-ui` | プログラム |
+| `argv[1]` | `seek` | コマンド |
+| `argv[2]` | `a|b` | PATTERN |
+| `argv[3]` | `.` | ROOT |
+| `argv[4]` | `--regex` | オプション |
+### --seekオプション
 
-**永続層だけ直しても、稼働中ストアが古い値を持つと次の persist で戻ります。**
-「消したのに復活する」の正体はこれです。既定の修復コマンドは両方を直します。
+`--context N`あり一致行の前後 N 行も出す`--limit N`あり一致行の上限（既定 1000、`0` で無制限）`--time MS`あり走査時間の上限（既定 15000）
+## asarコマンド
+./bin/neodax-ui asar --file "/Applications/Some.app/Contents/Resources/app.asar" \
+  --find "t3code:right-panel-state:v2"
 
-### ② 反映は状態を書き換えて行う（reload しない）
-
-reload / 再起動 / kill で反映させません。永続層を正しい値にすれば、次に
-アプリが読んだときに正しく復元されます。
-
-### ③ 状態の読み書きは C 側で行う
-
-LevelDB はバイナリです。`tabs` / `keys` / `advise` / `check` / `plan` が
-状態を解釈して出します。**テキスト走査の代わりは `seek`**（次章）。
 
 ---
 
@@ -81,6 +229,7 @@ LevelDB はバイナリです。`tabs` / `keys` / `advise` / `check` / `plan` �
 ```sh
 ./bin/neodax-ui seek PATTERN [ROOT]
 ```
+
 
 理由は 3 つあります。
 
@@ -230,36 +379,6 @@ observe → tree → emit → bake → run
 ./bin/neodax-ui splice --run    # キャッシュ済みバイナリで実行
 ```
 
-戻る原因は 3 つあり、1 つずつ潰します。
-
-| 原因 | 見分け方 | 対処 |
-|---|---|---|
-| 稼働中ストアが古い値を持っている | `splice` の出力と `tabs` が食い違う | `apply --attach` / `clean` |
-| 退避キーが解決先になっている | `keys` の `RESOLVED_IS_BACKUP=1`、`splice` の `FINDING` | `clean` / `delete` |
-| 起動時に古い状態を復元している | 起動直後に戻る | `stop` / `baseline` |
-
-`VERDICT=HEALTHY` にならないときだけ、次のどれかを選びます。
-
-| 症状 | コマンド | 何が起きるか |
-|---|---|---|
-| 残滓が残る | `clean` | 残滓の種類と危険度から段を選んで消す |
-| 1 件だけ消したい | `delete --id "<ID>"` | そのタブだけ消す |
-| 消えたタブがまた戻る | `delete --all-stale --live` | 壊れているタブを **1 回でまとめて** 消す |
-| 何が起きているか知りたい | `plan` / `advise` / `splice` | 判定と根拠を出す（変更しない） |
-| 実行前に内容を見たい | `clean --dry-run` / `heal --dry-run` | 何をするかだけ表示 |
-
-#### なぜ `--all-stale` か
-
-1 件ずつ `delete` を呼ぶと、chat ごとに 1 回書き込むことになり、
-その合間で復元経路が走って戻ることがあります。`--all-stale` は
-状態を 1 回だけ読み、対象を全部集めて 1 回で書きます。
-
-#### 退避キーを作らない理由
-
-消すための経路（`baseline`）は `<key>.nx-backup` を**作りません**。
-退避を残すと、本体を消しても次回の復元がそこから読んで戻ります。
-これが「消しても毎回復活する」の発生源でした（`nx_payload.c` の
-`localStorage.setItem('<key>.nx-backup', ...)` を `backup=0` で抑止）。
 
 ### 4.2 迷ったら「壊す前に見る」
 
@@ -277,35 +396,6 @@ observe → tree → emit → bake → run
 `--dry-run` を付ければ `clean` / `heal` も変更しません。
 `fix` / `close` は `.fixed.json` というファイルを書くだけで、アプリの状態は
 触りません。
-
-### 4.3 1 件だけ消す
-
-```sh
-./bin/neodax-ui advise --id "<ID>"          # removable=yes を確認
-./bin/neodax-ui delete --id "<ID>" --live   # 消す
-./bin/neodax-ui tabs                        # 消えたか確認
-```
-
-`<ID>` は `tabs` の `ID` 列をそのまま貼ります。
-`removable=no` のときは、そのタブは壊れていません（アプリが自分で閉じられます）。
-それでも消すなら `--force` を付けますが、まず理由を読んでください。
-
-### 4.4 アプリ本体を直す
-
-```sh
-./bin/neodax-ui best --path "/path/AE.app"             # 問題を 1 個に絞る（表示のみ）
-./bin/neodax-ui best --path "/path/AE.app" --apply     # 作業コピー APP.neodax-work を作る
-```
-
-原版は変更されません。変更は `APP.neodax-work` に起きます。
-詳細に手順を確かめたいときは `recipe` → `recipe-run`、1 段ずつ進めたいときは
-`cut --step` を使います。
-
-### 4.5 やってはいけないこと
-
-- アプリを reload / 再起動 / kill して状態を反映させる。
-- 状態を消すために JavaScript を書いて注入する。
-- `grep` / `rg` / `sed` / `awk` で状態やソースを走査する（→ `seek`）。
 
 ---
 
@@ -338,51 +428,6 @@ observe → tree → emit → bake → run
 **`PATTERN` は `seek` の直後**に置きます。末尾の `[limit ...]` / `[time ...]` が
 出たら**見ていない範囲がある**ので、`--limit` / `--time` を上げるか
 `--include` で範囲を絞って再実行します。
-
-### 5.3 直す順番
-
-```sh
-./bin/neodax-ui repair                 # 観測 → 計画 → 実行 → 再観測
-./bin/neodax-ui tabs                   # 再確認
-./bin/neodax-ui plan                   # VERDICT=HEALTHY を確認
-```
-
-`repair` で直らないときだけ `clean` / `delete` に降ります。
-**検証までが 1 組です。** 直した後に `tabs` と `plan` を再実行し、
-`VERDICT=HEALTHY` と `  [check] stuck surface tabs: 0` を確認してください。
-
-### 5.4 状態を消す手順（規約）
-
-1. 事実確認（ネイティブのみ）: `./bin/neodax-ui tabs`
-2. 削除可否の確認: `./bin/neodax-ui advise --id "<ID>"`
-3. 修復内容の作成（ファイルに書くだけ）: `./bin/neodax-ui fix`
-4. 永続層への反映: `./bin/neodax-ui apply --live`
-
-1 件だけなら 2 の後に `delete --id "<ID>" --live`。どちらの経路も LevelDB の
-seq を実測最大 + 1 で書きます。
-
-### 5.5 絶対禁止
-
-- **対象アプリを reload / 再起動しない。** `location.reload()`、
-  `app.relaunch()`、`open -a` による再起動、プロセス kill を「状態を反映させる
-  ため」に使わない。反映は状態そのものを書き換えて行います。
-- **消えてほしい状態を JS で parse / 走査しない。** `performance.getEntriesByType`
-  の列挙や `await import()` による探索、JS での JSON 組み立ては禁止。解析と判定は
-  C 側（`nx_deepai` / `nx_state` / `nx_leveldb` / `nx_json`）で行います。
-- **ad-hoc な JS を注入して済ませない。** 変更は `gui/neodax-ui.mm` と
-  `src/integration/**` に入れ、`bin/neodax-ui` をビルドし直し、そのバイナリの
-  サブコマンドとして実行します。
-- **頼まれていないコードを書き換えない。** 特に `append_store_resolve` のような
-  共通部品。
-
-reload が禁止なのは、ユーザーの作業セッションを壊すからです。永続層を直せば
-再起動時に正しく復元されるので、reload は不要です。
-localStorage だけ消してメモリに残すと、次の persist で復活します。
-
-### 5.6 ツールとして足りないものがあるとき
-
-「一覧が欲しい」と思ったら、ad-hoc なシェル走査で代用せず、neodax に
-サブコマンドを足して C 側で出します。
 
 ---
 
