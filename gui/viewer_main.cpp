@@ -11,10 +11,11 @@
 //       -lpthread -lm -o bin/neodax-viewer
 //
 // 使い方:
-//   neodax-viewer <mach-o> [-o out.svg] [--ascii]
+//   neodax-viewer <mach-o> [-o out.svg] [--cpp FILE] [--hex FILE] [--node FILE] [--emit DIR]
 
 #include "model/nx_graph.hpp"
 #include "model/nx_render.hpp"
+#include "model/nx_emit.hpp"
 #include "model/nx_uilayout.hpp"
 
 extern "C" {
@@ -23,6 +24,7 @@ extern "C" {
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -57,11 +59,19 @@ std::vector<uint8_t> read_file(const char *path, bool *ok) {
 int main(int argc, char **argv) {
     const char *path = nullptr;
     const char *out_path = nullptr;
+    const char *cpp_path = nullptr;
+    const char *hex_path = nullptr;
+    const char *node_path = nullptr;
+    const char *emit_dir = nullptr;
     bool ascii = false;
     bool ui_mode = false;
 
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "-o") && i + 1 < argc) out_path = argv[++i];
+        else if (!std::strcmp(argv[i], "--cpp") && i + 1 < argc) cpp_path = argv[++i];
+        else if (!std::strcmp(argv[i], "--hex") && i + 1 < argc) hex_path = argv[++i];
+        else if (!std::strcmp(argv[i], "--node") && i + 1 < argc) node_path = argv[++i];
+        else if (!std::strcmp(argv[i], "--emit") && i + 1 < argc) emit_dir = argv[++i];
         else if (!std::strcmp(argv[i], "--ascii")) ascii = true;
         else if (!std::strcmp(argv[i], "--ui")) ui_mode = true;
         else if (argv[i][0] != '-') path = argv[i];
@@ -98,7 +108,7 @@ int main(int argc, char **argv) {
     }
     if (!path) {
         std::fprintf(stderr,
-            "usage: %s <mach-o> [-o out.svg] [--ascii]\n"
+            "usage: %s <mach-o> [-o out.svg] [--cpp FILE] [--hex FILE] [--node FILE] [--emit DIR]\n"
             "  role(1) -> annulus(2) -> function(3) の 3 階層を描く。\n"
             "  状態依存の環が同じ role に複数あるときは仮想ノードを 2 階層目に出す。\n",
             argv[0]);
@@ -145,6 +155,39 @@ int main(int argc, char **argv) {
     }
     g.build_hierarchy();
     g.layout();
+
+    std::string emit_base, cpp_out, hex_out, node_out, svg_out;
+    if (emit_dir) {
+        std::error_code ec;
+        std::filesystem::create_directories(emit_dir, ec);
+        std::filesystem::path p(path);
+        emit_base = (std::filesystem::path(emit_dir) / p.stem()).string();
+        if (!cpp_path) { cpp_out = emit_base + ".cpp"; cpp_path = cpp_out.c_str(); }
+        if (!hex_path) { hex_out = emit_base + ".hex"; hex_path = hex_out.c_str(); }
+        if (!node_path) { node_out = emit_base + ".node"; node_path = node_out.c_str(); }
+        if (!out_path) { svg_out = emit_base + ".svg"; out_path = svg_out.c_str(); }
+    }
+
+    nx::EmitOptions eo;
+    std::string emit_err;
+    if (cpp_path && !nx::write_cpp(*bin, g, cpp_path, eo, &emit_err)) {
+        std::fprintf(stderr, "%s\n", emit_err.c_str());
+        neodax_bridge_free(&ibin);
+        return 1;
+    }
+    if (cpp_path) std::fprintf(stderr, "wrote %s (cpp)\n", cpp_path);
+    if (hex_path && !nx::write_hex(*bin, hex_path, eo, &emit_err)) {
+        std::fprintf(stderr, "%s\n", emit_err.c_str());
+        neodax_bridge_free(&ibin);
+        return 1;
+    }
+    if (hex_path) std::fprintf(stderr, "wrote %s (hex)\n", hex_path);
+    if (node_path && !nx::write_nodes(*bin, g, node_path, eo, &emit_err)) {
+        std::fprintf(stderr, "%s\n", emit_err.c_str());
+        neodax_bridge_free(&ibin);
+        return 1;
+    }
+    if (node_path) std::fprintf(stderr, "wrote %s (node)\n", node_path);
 
     // ---- 描画 (多相) ----
     std::unique_ptr<nx::Renderer> renderer;

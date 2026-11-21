@@ -19,7 +19,7 @@ OBJS="src/macho.o src/arm64_decode.o src/x86_decode.o \
 
 clang++ -std=c++17 -O2 \
     -I src -I include -I gui \
-    gui/viewer_main.cpp gui/model/nx_graph.cpp gui/model/nx_render.cpp gui/model/nx_uilayout.cpp \
+    gui/viewer_main.cpp gui/model/nx_graph.cpp gui/model/nx_render.cpp gui/model/nx_emit.cpp gui/model/nx_uilayout.cpp \
     $OBJS -lpthread -lm \
     -o bin/neodax-viewer
 echo "built: bin/neodax-viewer"

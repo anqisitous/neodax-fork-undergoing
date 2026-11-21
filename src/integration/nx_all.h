@@ -65,6 +65,9 @@
 /* --- テンプレート = C++ ファイル (構成はヘッダとして cpp 内に逆順で) --- */
 #include "plan/nx_tplcpp.hpp"
 
+/* --- UI 挙動の静的抽出 (asar/JS -> action/command/state/persist) --- */
+#include "plan/nx_ui.hpp"
+
 /* --- チャット (thread) 台帳: 重複検出と恒久削除 --- */
 #include "nx_threads.h"
 

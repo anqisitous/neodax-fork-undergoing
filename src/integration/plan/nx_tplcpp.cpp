@@ -20,7 +20,7 @@ namespace fs = std::filesystem;
 namespace {
 
 struct RawNode {
-    std::string name, label, run, layout, annulus;
+    std::string name, label, run, layout, annulus, element, action;
     std::string file;
     int line = 0;
 };
@@ -61,13 +61,15 @@ void parse_node(const std::string &v, RawNode &n) {
     while (is >> tok) {
         std::string val;
         bool ok = false;
-        const char *keys[] = {"run:", "layout:", "annulus:"};
+        const char *keys[] = {"run:", "layout:", "annulus:", "element:", "action:"};
         for (const char *k : keys) {
             if (starts_with(tok, k)) {
                 val = tok.substr(std::strlen(k));
                 if (val.empty() && is >> val) {}
                 if (starts_with(tok, "run:")) n.run = val;
                 else if (starts_with(tok, "layout:")) n.layout = val;
+                else if (starts_with(tok, "element:")) n.element = val;
+                else if (starts_with(tok, "action:")) n.action = val;
                 else n.annulus = val;
                 ok = true;
                 break;
@@ -307,6 +309,8 @@ static int build_graph(std::vector<RawTpl> &tpls, const std::string &graph_name,
             std::snprintf(nn.target, sizeof(nn.target), "%s", t.target.c_str());
             std::snprintf(nn.label, sizeof(nn.label), "%s", n.label.c_str());
             std::snprintf(nn.run, sizeof(nn.run), "%s", n.run.c_str());
+            std::snprintf(nn.element, sizeof(nn.element), "%s", n.element.c_str());
+            std::snprintf(nn.action, sizeof(nn.action), "%s", n.action.c_str());
             std::snprintf(nn.file, sizeof(nn.file), "%s", n.file.c_str());
             nn.line = n.line;
             /* 同名ノードは 1 つに寄せる (部分資産が同じ persist を
@@ -438,6 +442,7 @@ extern "C" const char *nx_tplcpp_kind_name(nx_tpl_src_kind_t k) {
         case NX_TPL_SRC_CPP:  return "cpp";
         case NX_TPL_SRC_SVG:  return "svg";
         case NX_TPL_SRC_NODE: return "node";
+        case NX_TPL_SRC_HEX:  return "hex";
         default:              return "none";
     }
 }
@@ -451,6 +456,7 @@ static nx_tpl_src_kind_t kind_by_ext(const std::string &s) {
     if (ends(".cpp") || ends(".cc") || ends(".hpp")) return NX_TPL_SRC_CPP;
     if (ends(".svg")) return NX_TPL_SRC_SVG;
     if (ends(".tsv") || ends(".txt") || ends(".node")) return NX_TPL_SRC_NODE;
+    if (ends(".hex")) return NX_TPL_SRC_HEX;
     return NX_TPL_SRC_NONE;
 }
 
@@ -463,6 +469,8 @@ static nx_tpl_src_kind_t kind_by_content(const std::string &s) {
         return NX_TPL_SRC_NODE;
     if (s.find("link ") != std::string::npos || s.find("link\t") != std::string::npos)
         return NX_TPL_SRC_NODE;
+    if (s.find("# function ") != std::string::npos)
+        return NX_TPL_SRC_HEX;
     return NX_TPL_SRC_NONE;
 }
 
@@ -502,6 +510,8 @@ static void parse_svg(const std::string &s, RawTpl &t) {
             if (id.empty()) id = attr(ln, "id");
             if (!id.empty()) {
                 RawNode n; n.name = id; n.label = attr(ln, "data-label");
+                n.element = attr(ln, "data-element");
+                n.action = attr(ln, "data-action");
                 t.nodes.push_back(n);
             }
         } else if (ln.find("<line") != std::string::npos) {
@@ -528,15 +538,56 @@ static void parse_node_lines(const std::string &s, RawTpl &t) {
         std::string kw; ls >> kw;
         if (kw == "node") {
             RawNode n;
-            ls >> n.name;
-            std::string rest, w;
-            while (ls >> w) rest += (rest.empty() ? "" : " ") + w;
-            n.label = rest;
+            parse_node(c.substr(5), n);
             if (!n.name.empty()) t.nodes.push_back(n);
         } else if (kw == "link") {
             RawLink l;
             if (ls >> l.a >> l.kind >> l.b) t.links.push_back(l);
         }
+    }
+}
+
+static void parse_hex(const std::string &s, RawTpl &t) {
+    std::istringstream is(s);
+    std::string ln, prev;
+    std::set<std::string> seen;
+    bool has_functions = false;
+    auto add = [&](const std::string &name, const std::string &label) {
+        if (name.empty() || !seen.insert(name).second) return;
+        RawNode n; n.name = name; n.label = label;
+        t.nodes.push_back(n);
+        if (!prev.empty()) {
+            RawLink l; l.a = prev; l.kind = "next"; l.b = name;
+            t.links.push_back(l);
+        }
+        prev = name;
+    };
+    while (std::getline(is, ln)) {
+        std::string c = trim(ln);
+        if (c.empty()) continue;
+        if (starts_with(c, "# function ")) {
+            has_functions = true;
+            std::istringstream ls(c.substr(11));
+            std::string addr, name;
+            ls >> addr >> name;
+            std::string id = "fn_" + addr;
+            for (char &ch : id) if (!std::isalnum((unsigned char)ch)) ch = '_';
+            add(id, c.substr(2));
+            continue;
+        }
+        if (c[0] == '#') continue;
+        std::istringstream ls(c);
+        std::string addr;
+        ls >> addr;
+        if (addr.size() < 4) continue;
+        if (addr.back() == ':') addr.pop_back();
+        bool hex = addr.rfind("0x", 0) == 0 || addr.rfind("0X", 0) == 0;
+        for (char ch : addr) if (std::isxdigit((unsigned char)ch)) hex = true;
+        if (!hex) continue;
+        if (has_functions) continue;
+        std::string id = "hex_" + addr;
+        for (char &ch : id) if (!std::isalnum((unsigned char)ch)) ch = '_';
+        add(id, c);
     }
 }
 
@@ -585,6 +636,11 @@ extern "C" int nx_tplcpp_open(const char *src, nx_tpl_graph_t *out,
         if (t.nodes.empty()) return -1;
         if (t.id.empty()) t.id = "node";
         tpls.push_back(t);
+    } else if (k == NX_TPL_SRC_HEX) {
+        parse_hex(body, t);
+        if (t.nodes.empty()) return -1;
+        if (t.id.empty()) t.id = "hex";
+        tpls.push_back(t);
     } else {
         return -1;
     }
@@ -608,8 +664,9 @@ extern "C" int nx_tplcpp_dump(const nx_tpl_graph_t *g, FILE *out) {
     std::fprintf(out, "\n");
     for (size_t i = 0; i < g->n_nodes; i++) {
         const nx_tpl_node_t &n = g->nodes[i];
-        std::fprintf(out, "  %-18s ring=%d kind=%-8s run=%-10s %s\n",
-                     n.id, g->ring ? g->ring[i] : -1, n.kind, n.run, n.label);
+        std::fprintf(out, "  %-18s ring=%d kind=%-8s run=%-10s element=%-12s action=%-12s %s\n",
+                     n.id, g->ring ? g->ring[i] : -1, n.kind, n.run,
+                     n.element[0] ? n.element : "-", n.action[0] ? n.action : "-", n.label);
     }
     for (size_t i = 0; i < g->n_edges; i++) {
         const nx_tpl_edge_t &e = g->edges[i];
@@ -673,9 +730,11 @@ extern "C" int nx_tplcpp_svg(const nx_tpl_graph_t *g, const char *path, FILE *ou
     for (size_t i = 0; i < g->n_nodes; i++) {
         const nx_tpl_node_t &n = g->nodes[i];
         bool layout = std::strstr(n.kind, "layout") != nullptr;
-        std::fprintf(f, "<rect data-id=\"%s\" data-label=\"%s\" x=\"%.0f\" y=\"%.0f\" "
+        std::fprintf(f, "<rect data-id=\"%s\" data-label=\"%s\" data-element=\"%s\" "
+                        "data-action=\"%s\" x=\"%.0f\" y=\"%.0f\" "
                         "width=\"12\" height=\"12\" fill=\"%s\"/>\n",
                      esc(n.id).c_str(), esc(n.label).c_str(),
+                     esc(n.element).c_str(), esc(n.action).c_str(),
                      nx[i] - 6, ny[i] - 6,
                      layout ? "#c9a227" : "#4c9be8");
         std::fprintf(f, "<text x=\"%.0f\" y=\"%.0f\" fill=\"#c8d2e0\" font-size=\"10\">%s</text>\n",

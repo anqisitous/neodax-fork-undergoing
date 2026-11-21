@@ -48,6 +48,8 @@ typedef struct {
     char target[240];
     char label[200];
     char run[200];       /* 実行に使う既存コマンド名 (空なら表示のみ) */
+    char element[96];    /* 対応する UI 要素 (カンマ区切り) */
+    char action[96];     /* その要素で起きること */
     char file[512];
     int  line;
 } nx_tpl_node_t;
@@ -92,6 +94,7 @@ typedef enum {
     NX_TPL_SRC_CPP,
     NX_TPL_SRC_SVG,
     NX_TPL_SRC_NODE,
+    NX_TPL_SRC_HEX,
     NX_TPL_SRC_NONE
 } nx_tpl_src_kind_t;
 
