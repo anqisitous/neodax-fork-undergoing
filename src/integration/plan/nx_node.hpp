@@ -27,6 +27,7 @@
  *   「どのコマンドがあるか」は nx_cli_registry が持っている。
  */
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -56,6 +57,12 @@ std::vector<std::string> lines(const std::string &s);
 
 /* "KEY\tVALUE" から KEY を探して VALUE を返す。無ければ def。 */
 std::string field(const std::string &out, const char *key, const char *def = "");
+
+/* 読み取り専用コマンドの結果キャッシュを捨てる / 件数を見る。
+   状態を書き換えるコマンドを呼ぶと自動で捨てる。
+   NX_NODE_CACHE=0 でキャッシュを無効にできる。 */
+void cache_clear();
+std::size_t cache_size();
 
 } // namespace node
 } // namespace nx

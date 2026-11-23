@@ -231,15 +231,10 @@ public:
 
     void analyze(const std::vector<Signal> &signals,
                  std::vector<Finding> &out) const override {
-        auto val = [&](const char *id) -> std::string {
-            for (const auto &s : signals)
-                if (s.observed && s.id == id) return s.value;
-            return "";
-        };
-        auto seen = [&](const char *id) {
-            for (const auto &s : signals) if (s.observed && s.id == id) return true;
-            return false;
-        };
+        // 根拠 id は「事実の一覧」ではなく索引で引く。
+        SignalIndex idx(signals);
+        auto val = [&](const char *id) { return idx.value(id); };
+        auto seen = [&](const char *id) { return idx.observed(id); };
 
         // (a) トークンが取れずサインインを要求している
         {

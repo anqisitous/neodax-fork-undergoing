@@ -39,7 +39,38 @@ std::map<std::string, int> index_of(const std::vector<Step> &steps) {
 
 Model::Model(std::string subject) : subject_(std::move(subject)) {}
 
-void Model::add_signal(Signal s) { signals_.push_back(std::move(s)); }
+SignalIndex::SignalIndex(const std::vector<Signal> &signals) {
+    by_id_.reserve(signals.size());
+    for (const auto &s : signals) by_id_[s.id] = &s;
+}
+
+const Signal *SignalIndex::find(const std::string &id) const {
+    auto it = by_id_.find(id);
+    return it == by_id_.end() ? nullptr : it->second;
+}
+
+bool SignalIndex::observed(const std::string &id) const {
+    const Signal *s = find(id);
+    return s && s->observed;
+}
+
+std::string SignalIndex::value(const std::string &id,
+                               const std::string &fallback) const {
+    const Signal *s = find(id);
+    return s ? s->value : fallback;
+}
+
+void Model::add_signal(Signal s) {
+    // 同じ id は「更新」であって「追加」ではない。
+    // 追記にすると再観測のたびに信号が増え、後段の走査だけが重くなる。
+    auto it = signal_pos_.find(s.id);
+    if (it != signal_pos_.end()) {
+        signals_[it->second] = std::move(s);
+        return;
+    }
+    signal_pos_.emplace(s.id, signals_.size());
+    signals_.push_back(std::move(s));
+}
 
 void Model::use_case(std::shared_ptr<Case> c, std::shared_ptr<CaseTarget> t) {
     case_ = std::move(c);
@@ -50,7 +81,13 @@ void Model::collect() {
     // 案件があるなら、観測はその案件に任せる。
     // 案件が無い場合は外から add_signal された事実だけを使う
     // (モデルが事実を作らないことを保証する)。
-    if (case_ && case_target_) case_->collect(*case_target_, signals_);
+    if (!case_ || !case_target_) return;
+
+    // 案件は「今回の観測」だけを返す。モデル側で id ごとに置き換える。
+    // 直接 signals_ へ追記させると、collect のたびに同じ事実が増える。
+    std::vector<Signal> fresh;
+    case_->collect(*case_target_, fresh);
+    for (auto &s : fresh) add_signal(std::move(s));
 }
 
 // ------------------------------------------------------------------
@@ -357,12 +394,13 @@ void Model::verify() {
     }
 
     // 1) 根拠の充足率: finding の evidence が観測済みか
+    //    索引を 1 回作り、根拠 id を直接引く。
+    SignalIndex index(signals_);
     int ev_total = 0, ev_seen = 0;
     for (const auto &f : findings_) {
         for (const auto &e : f.evidence) {
             ev_total++;
-            for (const auto &s : signals_)
-                if (s.id == e && s.observed) { ev_seen++; break; }
+            if (index.observed(e)) ev_seen++;
         }
     }
     conf_.evidence_coverage = ev_total ? (double)ev_seen / ev_total : 0.0;
