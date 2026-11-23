@@ -34,7 +34,6 @@
 #endif
 
 #include "../nx_deepai.h"
-#include "../nx_leveldb.h"
 #include "../nx_state.h"
 #include "../attach/nx_appfix.h"
 
@@ -594,49 +593,13 @@ extern "C" int nx_clean_state(const char *state_path, const nx_clean_opts_t *in_
         std::fprintf(out, "\n  [stage] %s (%s)\n", st.id, st.cmd);
         int rc = -1;
         if (std::strcmp(st.id, "persist") == 0 || std::strcmp(st.id, "repair-seq") == 0) {
-            size_t klen = 0;
-            char *key = nx_state_find_key(dir, "workspace-tabs", &klen);
-            if (!key) {
-                std::fprintf(out, "    no key containing 'workspace-tabs' in %s\n", dir);
-            } else {
-                /* seq は実測最大+1。桁違いの値は書かない (以後の書き込みを殺すため)。 */
-                unsigned long long seq = nx_state_max_seq(dir, "workspace-tabs") + 1;
-                rc = nx_leveldb_append_kv(dir, key, klen,
-                                          (const unsigned char *)pruned,
-                                          std::strlen(pruned), seq, nullptr, out);
-                std::fprintf(out, "    wrote %zu bytes (seq=%llu) rc=%d\n",
-                             std::strlen(pruned), seq, rc);
-                std::free(key);
-                /* 書いたつもりを成功と呼ばない: 解決し直して中身を比べる。 */
-                char *back = nx_deepai_load_state(dir);
-                nx_residual_map_t after;
-                int ok = back && nx_residual_collect(back, &after) == 0;
-                if (ok) {
-                    int *s2 = nullptr;
-                    int n2 = nx_residual_stale_indices(&after, &s2);
-                    ok = (n2 == 0);
-                    std::fprintf(out, "    verify: stale=%d -> %s\n", n2,
-                                 ok ? "clean" : "still dirty");
-                    std::free(s2);
-                    nx_residual_free(&after);
-                }
-                std::free(back);
-                if (rc == 0 && ok) persist_ok = 1;
-                else rc = -1;
-            }
+            /* KV ストアへの書き戻しは削除した。 */
+            std::fprintf(out, "    永続層への書き戻しは削除 (KV リーダ/ライタ無し)\n");
+            rc = -1;
         } else if (std::strcmp(st.id, "purge-backup") == 0) {
-            char **keys = nullptr;
-            size_t *lens = nullptr;
-            int nb = nx_state_list_keys(dir, "nx-backup", &keys, &lens, 16);
-            unsigned long long seq = nx_state_max_seq(dir, nullptr) + 1;
-            rc = 0;
-            for (int i = 0; i < nb; i++)
-                if (nx_leveldb_append_delete(dir, keys[i], lens[i], seq++, nullptr, out) != 0)
-                    rc = -1;
-            for (int i = 0; i < nb; i++) std::free(keys[i]);
-            std::free(keys);
-            std::free(lens);
-            std::fprintf(out, "    tombstoned %d backup key(s) rc=%d\n", nb, rc);
+            /* KV のキー列挙 / tombstone も削除した。 */
+            std::fprintf(out, "    退避キーの tombstone は削除 (未対応)\n");
+            rc = -1;
         } else if (std::strcmp(st.id, "live-sync") == 0) {
             /* 稼働中ストアは既存の heal 経路 (nx_appfix) に任せる。 */
             nx_appfix_profile_t prof = *nx_appfix_default_profile();

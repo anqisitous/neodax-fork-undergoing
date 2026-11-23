@@ -46,7 +46,6 @@ INTEGRATION_SRCS = \
 	integration/nx_provider_macho.c \
 	integration/nx_provider_dax.c \
 	integration/nx_json.c \
-	integration/nx_leveldb.c \
 	integration/nx_state.c \
 	integration/nx_deepai.c \
 	integration/attach/nx_inspect.c \
@@ -88,7 +87,7 @@ CAT_CORE = \
 	$(LIB_DIR)/core_macho.o $(LIB_DIR)/core_macho_static.o $(LIB_DIR)/core_nx_decode.o \
 	$(LIB_DIR)/core_nx_update.o $(LIB_DIR)/core_nx_asar_patch.o \
 	$(LIB_DIR)/core_x86_decode.o $(LIB_DIR)/core_arm64_decode.o \
-	$(LIB_DIR)/core_nx_json.o $(LIB_DIR)/core_nx_leveldb.o $(LIB_DIR)/core_nx_state.o \
+	$(LIB_DIR)/core_nx_json.o $(LIB_DIR)/core_nx_state.o \
 	$(LIB_DIR)/core_nx_deepai.o $(LIB_DIR)/core_nx_sim.o \
 	$(LIB_DIR)/core_nx_threads.o $(LIB_DIR)/core_chained_style.o
 # 整形器 (chained_style) も同じ分類に置く。ヘッダは src/analysis にある。

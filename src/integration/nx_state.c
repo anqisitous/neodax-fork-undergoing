@@ -1,11 +1,9 @@
 #include "nx_state.h"
 #include "nx_json.h"
-#include "nx_leveldb.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 #include <sys/stat.h>
 #include <dirent.h>
 
@@ -29,17 +27,6 @@ static void *memfind(const void *hay, size_t hlen, const void *needle, size_t nl
             memcmp(h + i, needle, nlen) == 0)
             return (void *)(h + i);
     return NULL;
-}
-
-static int ends_with(const char *s, const char *suf) {
-    size_t a = strlen(s), b = strlen(suf);
-    return a >= b && strcmp(s + a - b, suf) == 0;
-}
-
-/* NUL を含む KV キー用の後方一致 (strlen はキーの途中で止まるため使えない)。 */
-static int key_ends_with_n(const char *key, size_t klen, const char *suf) {
-    size_t sl = strlen(suf);
-    return klen >= sl && memcmp(key + klen - sl, suf, sl) == 0;
 }
 
 static unsigned char *read_entire(const char *path, size_t *out_size) {
@@ -122,233 +109,18 @@ static void scan_json_objs(const unsigned char *b, size_t n, const char *origin,
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* LevelDB / KV ストア                                                 */
-/* ------------------------------------------------------------------ */
-
-typedef struct {
-    const char *hint;
-    const char *origin;
-    cand_t     *c;
-    /* key 記録用 */
-    unsigned long long best_seq;
-    char              *best_key;
-    size_t             best_keylen;
-    int                want_key;
-} kv_ud_t;
-
-static void kv_cb(const char *key, size_t klen, const unsigned char *val, size_t vlen,
-                  unsigned long long seq, void *ud) {
-    kv_ud_t *u = (kv_ud_t *)ud;
-
-    /* `.nx-backup` は派生の退避キー。本体の解決には使わない。
-     *
-     * 退避キーの seq が本体より新しいだけで、読み書きの相手が退避側へ
-     * すり替わる。すると修復結果は退避側に書かれ、本体は孤児のまま残り、
-     * 次に本体が書かれた瞬間に孤児が「復活」する。ここで退避を除外し、
-     * 解決先を常に本体 (正準キー) に固定する。 */
-    if (key && klen && key_ends_with_n(key, klen, ".nx-backup")) return;
-
-    if (u->want_key && key && klen) {
-        if (!u->hint || memfind(key, klen, u->hint, strlen(u->hint))) {
-            if (seq >= u->best_seq) {
-                char *kc = (char *)malloc(klen + 1);
-                if (kc) {
-                    memcpy(kc, key, klen);
-                    kc[klen] = '\0';
-                    free(u->best_key);
-                    u->best_key = kc;
-                    u->best_keylen = klen;
-                    u->best_seq = seq;
-                }
-            }
-        }
-    }
-    if (!val || vlen == 0) return;
-    if (u->hint && !memfind(key, klen, u->hint, strlen(u->hint))) return;
-    scan_json_objs(val, vlen, u->origin, seq, u->c);
-}
-
-static int looks_like_leveldb(const unsigned char *buf, size_t size) {
-    if (size < 48) return 0;
-    uint64_t magic = (uint64_t)buf[size - 8] | ((uint64_t)buf[size - 7] << 8) |
-                     ((uint64_t)buf[size - 6] << 16) | ((uint64_t)buf[size - 5] << 24) |
-                     ((uint64_t)buf[size - 4] << 32) | ((uint64_t)buf[size - 3] << 40) |
-                     ((uint64_t)buf[size - 2] << 48) | ((uint64_t)buf[size - 1] << 56);
-    return magic == 0xdb4775248b80fb57ULL;
-}
-
-static void scan_file(const char *path, const char *hint, cand_t *raw, cand_t *ldb) {
+/* 1 ファイルを raw 走査する。KV ブロックの展開は行わない。 */
+static void scan_file(const char *path, cand_t *c) {
     size_t size = 0;
     unsigned char *buf = read_entire(path, &size);
     if (!buf) return;
     if (size > 0 && size < (16u * 1024 * 1024)) {
-        int is_ldb = ends_with(path, ".ldb") || ends_with(path, ".log") ||
-                     looks_like_leveldb(buf, size);
-        if (is_ldb) {
-            kv_ud_t u = { hint, path, ldb };
-            nx_leveldb_scan_file(path, kv_cb, &u);
-        }
-        /* 非圧縮ストア (JSON / SQLite / plist / 生ログ) は raw scan で拾う */
         struct stat stt;
         unsigned long long mt = 0;
         if (stat(path, &stt) == 0) mt = (unsigned long long)stt.st_mtime;
-        scan_json_objs(buf, size, path, mt, raw);
+        scan_json_objs(buf, size, path, mt, c);
     }
     free(buf);
-}
-
-typedef struct {
-    const char *hint;
-    char      **keys;
-    size_t     *lens;
-    int         n;
-    int         cap;
-    int         max;
-} listkey_ud_t;
-
-static void listkey_cb(const char *key, size_t klen, const unsigned char *val,
-                       size_t vlen, unsigned long long seq, void *ud) {
-    (void)val; (void)vlen; (void)seq;
-    listkey_ud_t *u = (listkey_ud_t *)ud;
-    if (!key || !klen) return;
-    if (u->hint && !memfind(key, klen, u->hint, strlen(u->hint))) return;
-    for (int i = 0; i < u->n; i++)
-        if (u->lens[i] == klen && memcmp(u->keys[i], key, klen) == 0) return;
-    if (u->n >= u->max) return;
-    char *kc = (char *)malloc(klen + 1);
-    if (!kc) return;
-    memcpy(kc, key, klen); kc[klen] = '\0';
-    u->keys[u->n] = kc; u->lens[u->n] = klen; u->n++;
-}
-
-int nx_state_list_keys(const char *dir, const char *key_hint,
-                       char ***out_keys, size_t **out_lens, int max) {
-    if (out_keys) *out_keys = NULL;
-    if (out_lens) *out_lens = NULL;
-    struct stat stt;
-    if (!dir || stat(dir, &stt) != 0) return 0;
-    listkey_ud_t u; memset(&u, 0, sizeof(u));
-    u.hint = key_hint; u.max = max > 0 ? max : 64;
-    u.keys = (char **)calloc(u.max, sizeof(char *));
-    u.lens = (size_t *)calloc(u.max, sizeof(size_t));
-    if (!u.keys || !u.lens) { free(u.keys); free(u.lens); return 0; }
-
-    if (S_ISDIR(stt.st_mode)) {
-        DIR *d = opendir(dir);
-        if (d) {
-            struct dirent *e;
-            while ((e = readdir(d)) != NULL) {
-                if (e->d_name[0] == '.') continue;
-                if (!ends_with(e->d_name, ".ldb") && !ends_with(e->d_name, ".log"))
-                    continue;
-                char fp[4096];
-                snprintf(fp, sizeof(fp), "%s/%s", dir, e->d_name);
-                nx_leveldb_scan_file(fp, listkey_cb, &u);
-            }
-            closedir(d);
-        }
-    } else if (ends_with(dir, ".ldb") || ends_with(dir, ".log")) {
-        nx_leveldb_scan_file(dir, listkey_cb, &u);
-    }
-    if (out_keys) *out_keys = u.keys; else { for (int i=0;i<u.n;i++) free(u.keys[i]); free(u.keys); }
-    if (out_lens) *out_lens = u.lens; else free(u.lens);
-    return u.n;
-}
-
-/* ストア全体で観測された最大 seq (key_hint で絞り込み可)。 */
-typedef struct {
-    unsigned long long max_seq;
-    const char        *hint;
-    const char        *exact;   /* 完全一致させるキー (生バイト) */
-    size_t             exact_len;
-} maxseq_ud_t;
-
-static void maxseq_cb(const char *key, size_t klen, const unsigned char *val,
-                      size_t vlen, unsigned long long seq, void *ud) {
-    (void)val; (void)vlen;
-    maxseq_ud_t *u = (maxseq_ud_t *)ud;
-    if (!key || !klen) return;
-    if (u->exact) {
-        /* 生バイトで完全一致。NUL を含むキーでも切れない。 */
-        if (klen != u->exact_len) return;
-        if (memcmp(key, u->exact, klen) != 0) return;
-    } else if (u->hint) {
-        if (!memfind(key, klen, u->hint, strlen(u->hint))) return;
-    }
-    if (seq > u->max_seq) u->max_seq = seq;
-}
-
-/* 走査の共通部。exact が非 NULL ならそれだけ、さもなくば hint。 */
-static unsigned long long max_seq_scan(const char *dir, const char *hint,
-                                       const char *exact, size_t exact_len) {
-    struct stat stt;
-    if (!dir || stat(dir, &stt) != 0) return 0;
-    maxseq_ud_t u;
-    memset(&u, 0, sizeof(u));
-    u.hint = hint;
-    u.exact = exact;
-    u.exact_len = exact_len;
-
-    if (S_ISDIR(stt.st_mode)) {
-        DIR *d = opendir(dir);
-        if (!d) return 0;
-        struct dirent *e;
-        while ((e = readdir(d)) != NULL) {
-            if (e->d_name[0] == '.') continue;
-            if (!ends_with(e->d_name, ".ldb") && !ends_with(e->d_name, ".log"))
-                continue;
-            char fp[4096];
-            snprintf(fp, sizeof(fp), "%s/%s", dir, e->d_name);
-            nx_leveldb_scan_file(fp, maxseq_cb, &u);
-        }
-        closedir(d);
-    } else if (ends_with(dir, ".ldb") || ends_with(dir, ".log")) {
-        nx_leveldb_scan_file(dir, maxseq_cb, &u);
-    }
-    return u.max_seq;
-}
-
-unsigned long long nx_state_max_seq_bytes(const char *dir, const char *key,
-                                          size_t klen) {
-    if (!key) return 0;
-    return max_seq_scan(dir, NULL, key, klen);
-}
-
-unsigned long long nx_state_max_seq(const char *dir, const char *key_hint) {
-    return max_seq_scan(dir, key_hint, NULL, 0);
-}
-
-char *nx_state_find_key(const char *dir, const char *key_hint,
-                        size_t *out_key_len) {
-    if (out_key_len) *out_key_len = 0;
-    struct stat stt;
-    if (!dir || stat(dir, &stt) != 0) return NULL;
-    kv_ud_t u; memset(&u, 0, sizeof(u));
-    u.hint = key_hint; u.origin = dir; u.want_key = 1;
-    cand_t dummy;
-    dummy.best = NULL; dummy.origin = NULL; dummy.best_seq = 0;
-    u.c = &dummy;
-
-    if (S_ISDIR(stt.st_mode)) {
-        DIR *d = opendir(dir);
-        if (!d) return NULL;
-        struct dirent *e;
-        while ((e = readdir(d)) != NULL) {
-            if (e->d_name[0] == '.') continue;
-            if (!ends_with(e->d_name, ".ldb") && !ends_with(e->d_name, ".log"))
-                continue;
-            char fp[4096];
-            snprintf(fp, sizeof(fp), "%s/%s", dir, e->d_name);
-            nx_leveldb_scan_file(fp, kv_cb, &u);
-        }
-        closedir(d);
-    } else if (ends_with(dir, ".ldb") || ends_with(dir, ".log")) {
-        nx_leveldb_scan_file(dir, kv_cb, &u);
-    }
-    free(dummy.best); free(dummy.origin);
-    if (out_key_len) *out_key_len = u.best_keylen;
-    return u.best_key;
 }
 
 /* ------------------------------------------------------------------ */
@@ -357,13 +129,13 @@ char *nx_state_find_key(const char *dir, const char *key_hint,
 
 char *nx_state_find_tabs_json(const char *path, const char *key_hint,
                               char **out_origin) {
+    (void)key_hint;
     if (out_origin) *out_origin = NULL;
     struct stat stt;
     if (!path || stat(path, &stt) != 0) return NULL;
 
-    cand_t raw, ldb;
-    memset(&raw, 0, sizeof(raw));
-    memset(&ldb, 0, sizeof(ldb));
+    cand_t c;
+    memset(&c, 0, sizeof(c));
 
     if (S_ISDIR(stt.st_mode)) {
         DIR *d = opendir(path);
@@ -375,72 +147,52 @@ char *nx_state_find_tabs_json(const char *path, const char *key_hint,
                 strcmp(ent->d_name, "CURRENT") == 0) continue;
             char fp[4096];
             snprintf(fp, sizeof(fp), "%s/%s", path, ent->d_name);
-            scan_file(fp, key_hint, &raw, &ldb);
+            scan_file(fp, &c);
         }
         closedir(d);
     } else {
-        scan_file(path, key_hint, &raw, &ldb);
+        scan_file(path, &c);
     }
 
-    /* KV ストアで見つかればそれを優先 (アプリの一次ストア)。
-       無ければ任意バイナリ/JSON からの raw 発見を使う。 */
-    cand_t *win = ldb.best ? &ldb : &raw;
-    char *result = win->best;
-    if (out_origin) *out_origin = win->origin;
-    else free(win->origin);
-
-    if (win != &ldb) free(ldb.best), free(ldb.origin);
-    if (win != &raw) free(raw.best), free(raw.origin);
-    return result;
+    if (out_origin) *out_origin = c.origin;
+    else free(c.origin);
+    return c.best;
 }
 
-/* key_hint を含む key が今も生きているか (削除レコードを尊重) */
-typedef struct {
-    const char        *hint;
-    unsigned long long best_seq;
-    int                best_deleted;
-    int                seen;
-} live_ud_t;
+/* ------------------------------------------------------------------ */
+/* KV ストアのキー / seq / 生存                                        */
+/*                                                                    */
+/* LevelDB リーダと共に削除した。呼び側は 0 / NULL を「未対応」として   */
+/* 扱う (推測で seq を進めたり、存在しないキーへ書いたりしない)。       */
+/* ------------------------------------------------------------------ */
 
-static void live_cb(const char *key, size_t klen, const unsigned char *val,
-                    size_t vlen, unsigned long long seq, void *ud) {
-    live_ud_t *u = (live_ud_t *)ud;
-    if (!key || !klen) return;
-    if (u->hint && !memfind(key, klen, u->hint, strlen(u->hint))) return;
-    /* 退避キー (.nx-backup) は、hint が「nx-backup」を名指した時だけ見る。
-     * "workspace-tabs" のような広い hint で退避の削除レコードを拾うと、
-     * 本体が生きていても「死んでいる」と誤判定するため。 */
-    if (u->hint && !memfind(u->hint, strlen(u->hint), "nx-backup", 9) &&
-        key_ends_with_n(key, klen, ".nx-backup"))
-        return;
-    if (!u->seen || seq >= u->best_seq) {
-        u->seen = 1;
-        u->best_seq = seq;
-        u->best_deleted = (val == NULL || vlen == 0);
-    }
+int nx_state_list_keys(const char *dir, const char *key_hint,
+                       char ***out_keys, size_t **out_lens, int max) {
+    (void)dir; (void)key_hint; (void)max;
+    if (out_keys) *out_keys = NULL;
+    if (out_lens) *out_lens = NULL;
+    return 0;
+}
+
+unsigned long long nx_state_max_seq_bytes(const char *dir, const char *key,
+                                          size_t klen) {
+    (void)dir; (void)key; (void)klen;
+    return 0;
+}
+
+unsigned long long nx_state_max_seq(const char *dir, const char *key_hint) {
+    (void)dir; (void)key_hint;
+    return 0;
+}
+
+char *nx_state_find_key(const char *dir, const char *key_hint,
+                        size_t *out_key_len) {
+    (void)dir; (void)key_hint;
+    if (out_key_len) *out_key_len = 0;
+    return NULL;
 }
 
 int nx_state_key_is_live(const char *dir, const char *key_hint) {
-    struct stat stt;
-    if (!dir || stat(dir, &stt) != 0) return 0;
-    live_ud_t u;
-    memset(&u, 0, sizeof(u));
-    u.hint = key_hint;
-    if (S_ISDIR(stt.st_mode)) {
-        DIR *d = opendir(dir);
-        if (!d) return 0;
-        struct dirent *e;
-        while ((e = readdir(d)) != NULL) {
-            if (e->d_name[0] == '.') continue;
-            if (!ends_with(e->d_name, ".ldb") && !ends_with(e->d_name, ".log"))
-                continue;
-            char fp[4096];
-            snprintf(fp, sizeof(fp), "%s/%s", dir, e->d_name);
-            nx_leveldb_scan_file(fp, live_cb, &u);
-        }
-        closedir(d);
-    } else if (ends_with(dir, ".ldb") || ends_with(dir, ".log")) {
-        nx_leveldb_scan_file(dir, live_cb, &u);
-    }
-    return (u.seen && !u.best_deleted) ? 1 : 0;
+    (void)dir; (void)key_hint;
+    return 0;
 }
