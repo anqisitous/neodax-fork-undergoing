@@ -4,17 +4,14 @@
 /*
  * nx_state — アプリの永続状態を「形式に依存せず」見つける汎用ロケータ。
  *
- * LevelDB 専用ではない。次のような任意のストアを対象にする:
- *   - JSON ファイル (タブ配列を直接含む)
- *   - LevelDB   (.ldb / .log; Snappy 展開は nx_leveldb が担当)
- *   - 任意バイナリ (JSON 断片の raw scan)
- *   - SQLite / plist などは同じ raw scan でタブ状 JSON を拾える
+ * 対象は JSON ファイルと、任意バイナリ中のタブ状 JSON。
  *
  * 「タブ状 JSON」の判定は形式ではなく内容で行う:
  *   - {"tabs":[...]}  または  {"state":{"tabs":[...]}}
  * これにより、どのアプリのどのストアでも、タブ状態を見つけられる。
  *
- * 形式ごとの抽出器は nx_state_adapter として登録でき、後から追加できる。
+ * KV ストア (LevelDB) のキー列挙・seq・生存判定・書き戻しは削除した。
+ * 該当 API は互換のため残しているが、常に 0 / NULL を返す。
  */
 
 #include <stddef.h>
@@ -31,35 +28,26 @@ char *nx_state_find_tabs_json(const char *path, const char *key_hint,
                               char **out_origin);
 
 /* LevelDB の書き込みに必要な「正準キー」を自動判別する。
-   key_hint を含む user key (例 "_deepai-code://app\x00\x01deepai-code:workspace-tabs:v1")
-   のうち、最も新しい seq のものを返す (malloc 済み, 呼び出し側 free)。
-   out_key_len にバイト長 (NUL を含みうるので長さ必須) を返す。 */
+   KV 書き戻しの削除に伴い未対応。常に NULL を返す。 */
 char *nx_state_find_key(const char *dir, const char *key_hint,
                         size_t *out_key_len);
 
 /* key_hint を含む全 user key を列挙する (診断用, 重複除去, 最大 max 件)。
-   各要素は malloc 済み。戻り値は件数。 */
+   KV 列挙の削除に伴い未対応。常に 0 を返す。 */
 int nx_state_list_keys(const char *dir, const char *key_hint,
                        char ***out_keys, size_t **out_lens, int max);
 
-/* ストア内で観測された最大 seq を返す。書き戻し時は「この値より大きい」seq を
-   使う必要がある。LevelDB は key ごとに最大 seq を持つため、実 seq より
-   極端に大きい値を書くと、以降アプリ側の書き込みが「古い」と判定されて
-   無視される (sed 汚染)。見つからなければ 0。
-   key_hint を指定するとその文字列を含む key だけを対象にする。 */
+/* ストア内で観測された最大 seq を返す。
+   KV 読み取りの削除に伴い未対応。常に 0 を返す。 */
 unsigned long long nx_state_max_seq(const char *dir, const char *key_hint);
 
 /* キーを「生バイト」で指定して、そのキーだけの最大 seq を返す。
-   key_hint 版は C 文字列 (NUL 終端) なので、キーに NUL を含む
-   localStorage のキー ("_origin\x00\x01name") は途中で切れて
-   別のキーにも当たる。こちらの方が厳密。 */
+   KV 読み取りの削除に伴い未対応。常に 0 を返す。 */
 unsigned long long nx_state_max_seq_bytes(const char *dir, const char *key,
                                           size_t klen);
 
 /* key_hint を含む key が「今も生きているか」を返す。
-   削除レコード (kTypeDeletion) を最大 seq として尊重する。
-   列挙 (nx_state_list_keys) は履歴を拾うので、生存判定には使えない。
-   戻り値: 1 = 生きている値あり, 0 = 削除済み/無し */
+   KV 読み取りの削除に伴い未対応。常に 0 を返す。 */
 int nx_state_key_is_live(const char *dir, const char *key_hint);
 
 #ifdef __cplusplus

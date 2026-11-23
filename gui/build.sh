@@ -13,7 +13,7 @@ OBJS="src/macho.o src/arm64_decode.o src/x86_decode.o \
       src/tracking/state_tracking.o \
       src/integration/nx_engine.o src/integration/nx_decode.o \
       src/integration/nx_provider_macho.o src/integration/nx_provider_dax.o \
-      src/integration/nx_json.o src/integration/nx_leveldb.o \
+      src/integration/nx_json.o \
       src/integration/nx_state.o src/integration/nx_deepai.o \
       src/integration/neodax_bridge.o"
 

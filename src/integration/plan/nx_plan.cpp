@@ -523,7 +523,6 @@ static std::string nx_now_iso() { return nx::now_iso(); }
 #include "../nx_deepai.h"
 #include "../nx_state.h"
 #include "../attach/nx_appfix.h"
-#include "../nx_leveldb.h"
 
 namespace {
 
@@ -787,44 +786,14 @@ namespace {
 // 計画の実行に必要な最小限のプリミティブ。
 // 書き込みは必ず「ストアに読み直して一致を確かめる」ところまでを含める。
 int persist_value(const char *dir, const char *json, FILE *out) {
-    size_t klen = 0;
-    char *key = nx_state_find_key(dir, "workspace-tabs", &klen);
-    if (!key) { std::fprintf(out, "      no key in %s\n", dir); return -1; }
-    unsigned long long seq = nx_state_max_seq(dir, "workspace-tabs") + 1;
-    int rc = nx_leveldb_append_kv(dir, key, klen,
-                                  (const unsigned char *)json, strlen(json),
-                                  seq, NULL, out);
-    free(key);
-    if (rc != 0) return rc;
-    char *back = nx_deepai_load_state(dir);
-    // 期待は今回書いた JSON の内容 (キー順の正規化はしないので、
-    // タブ集合が一致するかで確かめる)。
-    int ok = 0;
-    if (back) {
-        auto want = parse_tabs(json);
-        auto got = parse_tabs(back);
-        ok = (want.size() == got.size());
-        for (size_t i = 0; ok && i < want.size(); i++)
-            if (want[i].id != got[i].id) ok = 0;
-    }
-    if (ok) std::fprintf(out, "      verified: %zu tabs resolved\n",
-                         parse_tabs(json).size());
-    else std::fprintf(out, "      VERIFY FAILED\n");
-    free(back);
-    return ok ? 0 : -1;
+    (void)dir; (void)json;
+    std::fprintf(out, "      KV 書き戻しは削除 (未対応)\n");
+    return -1;
 }
 
 int append_delete_key(const char *dir, const char *hint, FILE *out) {
-    // 既に消えているなら何もしない (毎ラウンド同じ削除を書かない)。
-    if (!nx_state_key_is_live(dir, hint)) return 0;
-    char **keys = NULL; size_t *lens = NULL;
-    int nb = nx_state_list_keys(dir, hint, &keys, &lens, 16);
-    if (nb <= 0) { free(keys); free(lens); return -1; }
-    unsigned long long seq = nx_state_max_seq(dir, NULL) + 1;
-    int rc = 0;
-    for (int i = 0; i < nb; i++)
-        if (nx_leveldb_append_delete(dir, keys[i], lens[i], seq++, NULL, out) != 0) rc = -1;
-    return rc;
+    (void)dir; (void)hint; (void)out;
+    return 0;
 }
 
 // 稼働中ストアへ JSON をそのまま反映する (nx_plan 内の live-sync 用)。

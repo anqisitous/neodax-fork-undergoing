@@ -1,6 +1,5 @@
 #include "nx_deepai.h"
 #include "nx_json.h"
-#include "nx_leveldb.h"
 #include "nx_state.h"
 
 #include <stdlib.h>
@@ -21,18 +20,6 @@ static char *x_strdup(const char *s) {
     char *p = (char *)malloc(n);
     if (p) memcpy(p, s, n);
     return p;
-}
-
-static void *mem_find(const void *hay, size_t haylen,
-                      const void *needle, size_t nlen) {
-    if (!hay || !needle || nlen == 0 || haylen < nlen) return NULL;
-    const unsigned char *h = (const unsigned char *)hay;
-    const unsigned char *e = h + (haylen - nlen) + 1;
-    for (; h < e; h++)
-        if (h[0] == ((const unsigned char *)needle)[0] &&
-            memcmp(h, needle, nlen) == 0)
-            return (void *)h;
-    return NULL;
 }
 
 static unsigned char *read_entire(const char *path, size_t *out_size) {
@@ -679,7 +666,7 @@ int nx_deepai_fix_json(const char *json, size_t len,
 }
 
 /* ================================================================== */
-/* leveldb からの状態抽出                                              */
+/* 任意バイナリからの状態抽出                                          */
 /* ================================================================== */
 
 /* バイト列中から {\"state\":...} を探して、JSON として妥当なものを返す。
@@ -728,104 +715,16 @@ static char *extract_state_blob(const unsigned char *b, size_t n) {
     return find_state_json(b, n);
 }
 
-/* ---- leveldb (.ldb/.log) 経由の読み出し ---- */
-typedef struct {
-    unsigned long long best_seq;
-    char              *best;
-} ldb_collect_t;
-
-static void ldb_collect_cb(const char *key, size_t klen,
-                           const unsigned char *val, size_t vlen,
-                           unsigned long long seq, void *ud) {
-    ldb_collect_t *c = (ldb_collect_t *)ud;
-    if (!key || !val || vlen == 0) return;
-    if (!mem_find(key, klen, "workspace-tabs:v1", 17)) return;
-    char *j = find_state_json(val, vlen);
-    if (!j) return;
-    if (seq >= c->best_seq) {
-        free(c->best);
-        c->best = j;
-        c->best_seq = seq;
-    } else {
-        free(j);
-    }
-}
-
-static int has_suffix(const char *s, const char *suf);
-
-static char *extract_state_leveldb(const char *path, int is_dir) {
-    ldb_collect_t c;
-    memset(&c, 0, sizeof(c));
-    if (!is_dir) {
-        nx_leveldb_scan_file(path, ldb_collect_cb, &c);
-        return c.best;
-    }
-    DIR *d = opendir(path);
-    if (!d) return NULL;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (!has_suffix(ent->d_name, ".log") && !has_suffix(ent->d_name, ".ldb"))
-            continue;
-        char fp[4096];
-        snprintf(fp, sizeof(fp), "%s/%s", path, ent->d_name);
-        nx_leveldb_scan_file(fp, ldb_collect_cb, &c);
-    }
-    closedir(d);
-    return c.best;
-}
-
-static int has_suffix(const char *s, const char *suf) {
-    size_t a = strlen(s), b = strlen(suf);
-    return a >= b && strcmp(s + a - b, suf) == 0;
-}
-
-/* ディレクトリ内の leveldb から最新らしき状態を得る */
-static char *extract_state_dir(const char *dir) {
-    DIR *d = opendir(dir);
-    if (!d) return NULL;
-    char *best = NULL;
-    time_t best_mtime = 0;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (!has_suffix(ent->d_name, ".log") && !has_suffix(ent->d_name, ".ldb"))
-            continue;
-        char path[4096];
-        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
-        struct stat stt;
-        if (stat(path, &stt) != 0) continue;
-        size_t sz = 0;
-        unsigned char *blob = read_entire(path, &sz);
-        if (!blob) continue;
-        char *cand = extract_state_blob(blob, sz);
-        free(blob);
-        if (cand && stt.st_mtime >= best_mtime) {
-            free(best);
-            best = cand;
-            best_mtime = stt.st_mtime;
-        } else {
-            free(cand);
-        }
-    }
-    closedir(d);
-    return best;
-}
+/* ---- KV ストアのバイナリ展開は削除 ---- */
 
 char *nx_deepai_load_state(const char *path) {
-    /* 汎用ロケータ: 形式 (LevelDB/JSON/任意バイナリ) を問わずタブ状 JSON を探す */
+    /* 汎用ロケータ: 任意バイナリ中のタブ状 JSON を探す */
     char *found = nx_state_find_tabs_json(path, "workspace-tabs", NULL);
     if (found) return found;
     /* fallback: 旧来の個別抽出 */
     struct stat stt;
     if (!path || stat(path, &stt) != 0) return NULL;
-    if (S_ISDIR(stt.st_mode)) {
-        char *s = extract_state_leveldb(path, 1);
-        return s ? s : extract_state_dir(path);
-    }
-    const char *dot = strrchr(path, '.');
-    if (dot && (strcmp(dot, ".ldb") == 0 || strcmp(dot, ".log") == 0)) {
-        char *s = extract_state_leveldb(path, 0);
-        if (s) return s;
-    }
+    if (S_ISDIR(stt.st_mode)) return NULL;
     size_t sz = 0;
     unsigned char *blob = read_entire(path, &sz);
     if (!blob) return NULL;
@@ -889,7 +788,7 @@ int nx_deepai_fix_path(const char *path, FILE *out) {
         if (fixed) fwrite(fixed, 1, strlen(fixed), fp);
         fclose(fp);
         fprintf(out, "  fixed state written: %s\n", fixed_path);
-        fprintf(out, "  apply: quit DeepAI Code, then replace the leveldb value "
+        fprintf(out, "  apply: quit DeepAI Code, then replace the persisted value "
                      "for key 'deepai-code:workspace-tabs:v1' with this JSON "
                      "(or run: localStorage.setItem('deepai-code:workspace-tabs:v1', <json>) "
                      "in DevTools and reload).\n");

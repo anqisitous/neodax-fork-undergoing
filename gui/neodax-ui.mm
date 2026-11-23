@@ -476,83 +476,23 @@ static int render_layout_png(const nx_ui_layout_t *l, const char *path) {
     return rc;
 }
 
-/* 修復済み JSON を LevelDB へ書き戻す。キーは neodax 自身が自動判別する。 */
+/* 修復済み JSON を永続層へ書き戻す。
+   KV ストア (LevelDB) のリーダ/ライタは削除したため、
+   ここでは修復済み JSON をファイルに書くだけに留める (ストアには触らない)。 */
 static int write_fixed_to_leveldb(const char *state_path, const char *key_hint,
                                   const char *fixed, int live) {
-    /* 書き込み先のレベルDBディレクトリを決める */
-    char dir[4096];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    BOOL isDir = NO;
-    [fm fileExistsAtPath:[NSString stringWithUTF8String:state_path] isDirectory:&isDir];
-    if (isDir) {
-        snprintf(dir, sizeof(dir), "%s", state_path);
-    } else {
-        snprintf(dir, sizeof(dir), "%s", state_path);
-        char *slash = strrchr(dir, '/');
-        if (slash) *slash = '\0';
-    }
-
-    /* 正準キーを自動判別 (key_hint を含む最新 user key) */
-    if (!key_hint) key_hint = "workspace-tabs";
-    size_t klen = 0;
-    char *key = nx_state_find_key(dir, key_hint, &klen);
-    if (!key) {
-        printf("  [apply] key containing '%s' not found in %s\n", key_hint, dir);
+    (void)key_hint; (void)live;
+    char out[4200];
+    snprintf(out, sizeof(out), "%s.fixed.json", state_path);
+    FILE *fp = fopen(out, "wb");
+    if (!fp) {
+        printf("  [apply] cannot write %s\n", out);
         return -1;
     }
-    printf("  [apply] discovered key (%zu bytes): ", klen);
-    for (size_t i = 0; i < klen; i++) {
-        unsigned char c = (unsigned char)key[i];
-        if (c >= 32 && c < 127) putchar(c); else printf("\\x%02x", c);
-    }
-    printf("\n");
-
-    /* 既存最大 seq より「1 だけ大きい」seq を選ぶ。
-       以前は 1000000000 固定だったが、LevelDB は key ごとに最大 seq を
-       保持するため、実 seq (数千) より桁違いに大きい値を書くと、以降
-       アプリ自身の書き込みが「古い」と判定されて無視される。
-       その状態では neodax の値が永久に勝ち続け、アプリ側の変更が
-       一切永続化されなくなる。 */
-    size_t vlen = strlen(fixed);
-    /* seq は「キーごとの最大」ではなく「ストア全体の最大」の次を使う。
-       Chromium は seq をストア全体で共有しており、キーごとの最大を
-       使うと、直前に別キー (退避の tombstone / META) が使った seq と
-       衝突する。同じ seq の 2 レコードはどちらが勝つか決まらず、
-       書いたはずの値が解決されないことがある。 */
-    unsigned long long observed = nx_state_max_seq(dir, NULL);
-    unsigned long long seq = observed + 1;
-    printf("  [apply] seq: observed max=%llu -> writing %llu\n", observed, seq);
-    int rc = live
-        ? nx_leveldb_append_kv(dir, key, klen, (const unsigned char *)fixed, vlen,
-                               seq, NULL, stdout)
-        : nx_leveldb_write_kv(dir, key, klen, (const unsigned char *)fixed, vlen,
-                              seq, "000999_nxfix.log", stdout);
-    if (rc != 0) {
-        printf("  [apply] write failed%s\n", live ? " (WAL not writable?)" : " (leveldb locked?)");
-        free(key);
-        return rc;
-    }
-    printf("  [apply] done.%s\n", live ? " (live WAL append)" : " (offline write)");
-
-    /* 書いただけで成功とみなさない。ストアを読み直して、
-       意図した値が実際に解決されることを確かめる。
-       以前はここを確認していなかったため、壊れた追記でも
-       「persisted」と表示してしまうことがあった。 */
-    char *verify = nx_deepai_load_state(dir);
-    int ok = verify && strcmp(verify, fixed) == 0;
-    if (ok) {
-        printf("  [apply] verified: store now resolves to the written value\n");
-    } else if (verify) {
-        printf("  [apply] VERIFY FAILED: store resolves to a different value "
-               "(len %zu vs written %zu)\n", strlen(verify), vlen);
-        rc = -1;
-    } else {
-        printf("  [apply] VERIFY FAILED: store no longer resolves at all\n");
-        rc = -1;
-    }
-    free(verify);
-    free(key);
-    return rc;
+    fwrite(fixed, 1, strlen(fixed), fp);
+    fclose(fp);
+    printf("  [apply] KV 書き戻しは削除。修復済み JSON: %s\n", out);
+    return -1;
 }
 
 /* 修復した state を LevelDB へ書き戻す。 */
@@ -877,34 +817,8 @@ static void cmd_delete(const char *state_path, const char *tab_id,
     int rc = -1;
     if (fixed) rc = write_fixed_to_leveldb(state_path, key, fixed, live);
 
-    /* 1b) 退避コピー (<key>.nx-backup) を tombstone で消す。
-            古いタブを抱えたまま残っていると、復元経路によっては
-            そこから戻る。これも「消したのに復活する」の一因。 */
-    {
-        char dir[4096];
-        snprintf(dir, sizeof(dir), "%s", state_path);
-        NSFileManager *fm2 = [NSFileManager defaultManager];
-        BOOL d2 = NO;
-        [fm2 fileExistsAtPath:[NSString stringWithUTF8String:state_path] isDirectory:&d2];
-        if (!d2) {
-            char *sl = strrchr(dir, '/');
-            if (sl) *sl = '\0';
-        }
-        char **bkeys = NULL;
-        size_t *blens = NULL;
-        int nb = nx_state_list_keys(dir, "nx-backup", &bkeys, &blens, 16);
-        if (nb > 0) {
-            unsigned long long bseq = nx_state_max_seq(dir, NULL) + 1;
-            for (int i = 0; i < nb; i++) {
-                if (nx_leveldb_append_delete(dir, bkeys[i], blens[i], bseq++, NULL,
-                                             stdout) == 0)
-                    printf("  [delete] purged backup copy (key #%d)\n", i);
-            }
-        }
-        for (int i = 0; i < nb; i++) free(bkeys[i]);
-        free(bkeys);
-        free(blens);
-    }
+    /* 1b) 退避コピー (<key>.nx-backup) の tombstone 掃除は
+           KV 書き戻しの削除に伴い行わない。 */
 
     /* 2) 稼働中ストア (reload せず、メモリ側も同じ値にする)。
           これをしないと次の persist で復活する。 */

@@ -28,9 +28,8 @@
 #ifndef NX_ALL_H
 #define NX_ALL_H
 
-/* --- 基盤 (状態の観測・JSON・LevelDB) --- */
+/* --- 基盤 (状態の観測・JSON) --- */
 #include "nx_json.h"
-#include "nx_leveldb.h"
 #include "nx_state.h"
 #include "nx_deepai.h"
 #include "nx_sim.h"
