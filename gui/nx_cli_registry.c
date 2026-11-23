@@ -89,6 +89,7 @@ const nx_cli_cmd_t nx_cli_cmds[] = {
 { "baseline",  "基準",        "修復", "--app --key",            "基準状態を取る",                              NULL, NULL },
 { "stop",      "停止",        "修復", "--app --key",            "止める",                                      NULL, NULL },
 
+{ "style",     "整形",        "解析", "--check --diff --write --mode --markers --outside", "連続する行を }{ で詰める。既定は全体、//[ //] は --mode で選ぶ", NULL, NULL },
 { "seek",      "検索",        "解析", "--ignore-case --regex --binary --files --word --include --context --limit --time", "grep の代わり。範囲を切って探す", NULL, NULL },
 { "asar",      "asar",        "解析", "--file --grep --find --context --limit --extract --out", "asar の一覧・検索・取り出し",  NULL, NULL },
 { "tpl-cpp",   "テンプレート", "解析", "--dir --svg --record --ng", "cpp テンプレートの構成・annulus・学習",  NULL, NULL },

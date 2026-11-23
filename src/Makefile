@@ -90,7 +90,8 @@ CAT_CORE = \
 	$(LIB_DIR)/core_x86_decode.o $(LIB_DIR)/core_arm64_decode.o \
 	$(LIB_DIR)/core_nx_json.o $(LIB_DIR)/core_nx_leveldb.o $(LIB_DIR)/core_nx_state.o \
 	$(LIB_DIR)/core_nx_deepai.o $(LIB_DIR)/core_nx_sim.o \
-	$(LIB_DIR)/core_nx_threads.o
+	$(LIB_DIR)/core_nx_threads.o $(LIB_DIR)/core_chained_style.o
+# 整形器 (chained_style) も同じ分類に置く。ヘッダは src/analysis にある。
 CAT_ATTACH = $(patsubst %.c,$(LIB_DIR)/attach_%.o,$(notdir $(wildcard integration/attach/*.c)))
 CAT_SPEC = $(patsubst %.c,$(LIB_DIR)/spec_%.o,$(notdir $(wildcard integration/spec/*.c)))
 CAT_PLAN = $(patsubst %.cpp,$(LIB_DIR)/plan_%.o,$(notdir $(wildcard integration/plan/*.cpp)))
@@ -120,7 +121,7 @@ LIB_ARCHIVES = $(LIB_DIR)/libnxc_core.a $(LIB_DIR)/libnxc_attach.a \
 CAT_CXXFLAGS = -std=c++17 -O2
 # 分類の中身を「分類名なし」で include できるようにする (ヘッダを増やさない)。
 CAT_INCLUDES = -I. -I../include -Iintegration -Iintegration/attach \
-	-Iintegration/plan -I$(OS_DIR)
+	-Iintegration/plan -I$(OS_DIR) -Ianalysis
 
 # All source files
 ALL_SRCS = $(CORE_SRCS) $(LEGACY_SRCS) $(ANALYSIS_SRCS) $(FLOW_SRCS) $(TRACKING_SRCS) $(INTEGRATION_SRCS) $(MAIN_SRCS)
@@ -197,6 +198,13 @@ $(LIB_DIR)/core_%.o: %.c | $(LIB_DIR)
 	$(CC) $(CFLAGS) $(CAT_INCLUDES) -c $< -o $@
 $(LIB_DIR)/core_macho_static.o: core/macho_static.c | $(LIB_DIR)
 	$(CC) $(CFLAGS) $(CAT_INCLUDES) -c $< -o $@
+$(LIB_DIR)/core_chained_style.o: analysis/chained_style.c | $(LIB_DIR)
+	$(CC) $(CFLAGS) $(CAT_INCLUDES) -c $< -o $@
+
+# 単体 CLI (bin/neodax-style)。main はライブラリに入れないので別ファイル。
+$(BUILD_DIR)/neodax-style: analysis/chained_style.c analysis/chained_style_main.c analysis/chained_style.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CAT_INCLUDES) -o $@ analysis/chained_style.c analysis/chained_style_main.c
 $(LIB_DIR)/core_nx_%.o: integration/nx_%.c | $(LIB_DIR)
 	$(CC) $(CFLAGS) $(CAT_INCLUDES) -c $< -o $@
 $(LIB_DIR)/attach_%.o: integration/attach/%.c | $(LIB_DIR)
