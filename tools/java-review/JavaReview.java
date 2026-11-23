@@ -212,15 +212,10 @@ public final class JavaReview {
             }
         }
 
-        // スタブ判定。
+        // テスト期待値を、そのテストメソッド内で new している型のメソッドへ配る。
+        // スタブ判定より先に配ることで、「期待値は非中立なのに本体は 0 を返す」
+        // という材料を判定側が使える。
         for (MethodInfo mi : methods) {
-            mi.stub = stubScore(mi);
-            if (mi.stub > 0) mi.marker = markerOf(mi.bodySource);
-        }
-
-        // テスト期待値を、そのテストメソッド内で new している型のスタブへ配る。
-        for (MethodInfo mi : methods) {
-            if (mi.stub <= 0) continue;
             for (Expect e : collector.expects) {
                 if (e.callerSource == null) continue;
                 if (!actualMentions(e.actual, mi.element.getSimpleName().toString())) continue;
@@ -228,6 +223,12 @@ public final class JavaReview {
                 if (mi.expects.size() >= 8) break;
                 mi.expects.add(e);
             }
+        }
+
+        // スタブ判定。マーカーが無くても、契約・本体の形・期待値から決める。
+        for (MethodInfo mi : methods) {
+            mi.stub = stubScore(mi);
+            if (mi.stub > 0) mi.marker = markerOf(mi.bodySource);
         }
 
         List<MethodInfo> stubs = methods.stream()
@@ -241,6 +242,10 @@ public final class JavaReview {
             })
             .collect(Collectors.toList());
 
+        List<Diagnostic<? extends JavaFileObject>> errors = diagnostics.getDiagnostics().stream()
+            .filter(d -> d.getKind() == Diagnostic.Kind.ERROR)
+            .collect(Collectors.toList());
+
         printHeader(root, files.size(), methods.size(), stubs.size(), analyzed);
         printDiagnostics(diagnostics, root);
 
@@ -249,8 +254,10 @@ public final class JavaReview {
         } else if (mapOnly) {
             printFixMap(stubs, trees);
         } else {
-            printFixMap(stubs, trees);
+            if (!stubs.isEmpty()) printFixMap(stubs, trees);
+            printPlan(stubs, errors, root, elements, types, trees);
             for (MethodInfo mi : stubs) printStub(mi, elements, types, trees);
+            printVerify(stubs, errors);
         }
 
         fm.close();
@@ -466,36 +473,108 @@ public final class JavaReview {
         return n;
     }
 
+    static boolean neutralExpr(String expr) {
+        if (expr == null) return false;
+        String s = expr.trim();
+        // return new ... は材料を使っているので中立にしない。
+        return NEUTRAL.matcher(s).matches()
+            || s.matches("[A-Za-z_$][\\w$]*\\.(zero|empty|none)\\s*\\(.*\\)");
+    }
+
+    static String singleReturn(MethodInfo mi) {
+        if (mi.tree.getBody() == null) return null;
+        List<? extends StatementTree> stmts = mi.tree.getBody().getStatements();
+        if (stmts.size() != 1 || !(stmts.get(0) instanceof ReturnTree ret) || ret.getExpression() == null)
+            return null;
+        return ret.getExpression().toString();
+    }
+
+    static boolean usesParams(MethodInfo mi) {
+        String body = mi.bodySource == null ? "" : mi.bodySource;
+        for (VariableTree p : mi.tree.getParameters()) {
+            if (Pattern.compile("\\b" + Pattern.quote(p.getName().toString()) + "\\b")
+                .matcher(body).find()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean testConflict(MethodInfo mi) {
+        for (Expect e : mi.expects) {
+            if (!neutralExpr(e.expected)) return true;
+        }
+        return false;
+    }
+
+    // ここが「自動判定」の本体。名前や task 番号ではなく、
+    // 契約 (override/interface)・本体の形・パラメータ利用・テスト期待値を見る。
     static double stubScore(MethodInfo mi) {
         if (mi.element.getKind() == ElementKind.CONSTRUCTOR) return 0.0;
         if (mi.tree.getBody() == null) return 0.0;
-        String body = mi.bodySource == null ? "" : mi.bodySource;
-        if (MARKER.matcher(body).find()) return 0.95;
-        if (body.contains("UnsupportedOperationException")) return 0.90;
 
-        List<? extends StatementTree> stmts = mi.tree.getBody().getStatements();
-        // 空本体は、契約 (override / interface) があるときだけ候補にする。
-        // テスト用の空ヘルパーまで拾わないため。
-        if (stmts.isEmpty()) return mi.contracts.isEmpty() ? 0.0 : 0.75;
-        if (stmts.size() == 1 && stmts.get(0) instanceof ReturnTree ret && ret.getExpression() != null) {
-            String expr = ret.getExpression().toString();
-            // 「new ...」で包んだものは材料を使う実装なので、スタブ扱いしない。
-            // zero/empty/none を直接返す場合だけ中立とみなす。
-            boolean neutral = NEUTRAL.matcher(expr).matches()
-                || expr.matches("[A-Za-z_$][\\w$]*\\.(zero|empty|none)\\s*\\(.*\\)");
-            if (!neutral) return 0.0;
-            boolean usesParams = false;
-            for (VariableTree p : mi.tree.getParameters()) {
-                if (Pattern.compile("\\b" + Pattern.quote(p.getName().toString()) + "\\b")
-                    .matcher(body).find()) {
-                    usesParams = true;
-                    break;
-                }
+        String body = mi.bodySource == null ? "" : mi.bodySource;
+        boolean marker = MARKER.matcher(body).find();
+        boolean unsupported = body.contains("UnsupportedOperationException");
+        boolean empty = mi.tree.getBody().getStatements().isEmpty();
+        boolean contract = !mi.contracts.isEmpty();
+        String ret = singleReturn(mi);
+        boolean neutral = neutralExpr(ret);
+        boolean used = usesParams(mi);
+        boolean conflict = testConflict(mi);
+
+        double score = 0.0;
+        if (marker) score = Math.max(score, 0.95);
+        if (unsupported) score = Math.max(score, 0.90);
+        if (empty) score = Math.max(score, contract ? 0.80 : 0.0);
+
+        if (neutral) {
+            if (conflict) {
+                // テストは非中立な値を期待しているのに、本体は 0/null を返す。
+                score = Math.max(score, 0.85);
+            } else if (contract) {
+                score = Math.max(score, 0.65);
+            } else if (!used) {
+                // 引数も読まずに 0 を返す。弱い候補として残す。
+                score = Math.max(score, 0.40);
             }
-            // マーカーが無い中立 return は弱い候補。
-            return usesParams ? 0.45 : 0.50;
+            // 引数を使って 0 を返すなら、計算結果かもしれないので候補にしない。
         }
-        return 0.0;
+        return score;
+    }
+
+    static String confidence(double score) {
+        return score >= 0.80 ? "high" : score >= 0.60 ? "medium" : "low";
+    }
+
+    static List<String> evidence(MethodInfo mi, Trees trees) {
+        List<String> out = new ArrayList<>();
+        if (!mi.marker.isEmpty()) out.add("marker: " + mi.marker);
+        if (mi.tree.getBody() == null) return out;
+
+        boolean empty = mi.tree.getBody().getStatements().isEmpty();
+        if (empty) out.add("empty body" + (mi.contracts.isEmpty() ? "" : " with contract"));
+        if (mi.bodySource != null && mi.bodySource.contains("UnsupportedOperationException"))
+            out.add("throws UnsupportedOperationException");
+
+        String ret = singleReturn(mi);
+        if (neutralExpr(ret)) out.add("returns neutral value: " + ret);
+        if (neutralExpr(ret) && !usesParams(mi)) out.add("does not read any parameter");
+
+        if (!mi.contracts.isEmpty()) {
+            ExecutableElement c = mi.contracts.get(0);
+            out.add("contract: " + c.getEnclosingElement().getSimpleName() + "."
+                + c.getSimpleName() + " " + elementLocation(c, trees));
+        }
+
+        for (Expect e : mi.expects) {
+            if (!neutralExpr(e.expected)) {
+                out.add("test expects " + e.expected + " at " + e.where);
+                break;
+            }
+        }
+        if (!mi.calls.isEmpty()) out.add("called from " + mi.calls.size() + " place(s)");
+        return out;
     }
 
     static String markerOf(String body) {
@@ -546,8 +625,8 @@ public final class JavaReview {
         System.out.println("## next");
         int n = 1;
         for (MethodInfo mi : stubs.stream().limit(10).collect(Collectors.toList())) {
-            System.out.printf("%d\t%.2f\t%s\t%s:%d\t%s%n",
-                n++, mi.stub, mi.qualifiedName(), mi.file, mi.line, mi.signature());
+            System.out.printf("%d\t%.2f\t%s\t%s\t%s:%d\t%s%n",
+                n++, mi.stub, confidence(mi.stub), mi.qualifiedName(), mi.file, mi.line, mi.signature());
         }
     }
 
@@ -564,7 +643,7 @@ public final class JavaReview {
     // 「元のコードの名前」と「直す場所」を 1 行で対応させる。
     static void printFixMap(List<MethodInfo> stubs, Trees trees) {
         System.out.println("## fix map");
-        System.out.println("key\tname\twhere\tbody\tcontract\texpect");
+        System.out.println("key\tname\twhere\tbody\tcontract\texpect\tconf");
 
         List<MethodInfo> map = new ArrayList<>(stubs);
         map.sort(Comparator.comparingInt(JavaReview::taskNumber)
@@ -585,7 +664,7 @@ public final class JavaReview {
             String body = mi.bodyLine > 0 ? mi.bodyLine + "-" + mi.bodyEndLine : "-";
             System.out.println(fixKey(mi) + "\t" + mi.qualifiedName() + "\t"
                 + mi.file + ":" + mi.line + ":" + mi.column + "\t" + body
-                + "\t" + contract + "\t" + expects);
+                + "\t" + contract + "\t" + expects + "\t" + confidence(mi.stub));
         }
         System.out.println();
     }
@@ -603,12 +682,141 @@ public final class JavaReview {
         if (lines.length > limit) System.out.println("  ...");
     }
 
+    static String diagWhere(Diagnostic<? extends JavaFileObject> d, Path root) {
+        if (d.getSource() == null) return "?";
+        Path p = Paths.get(d.getSource().toUri()).toAbsolutePath().normalize();
+        String file;
+        try { file = root.relativize(p).toString(); }
+        catch (IllegalArgumentException ex) { file = p.toString(); }
+        return file + ":" + d.getLineNumber() + ":" + d.getColumnNumber();
+    }
+
+    static String joinInts(List<Integer> v) {
+        return v.stream().map(String::valueOf).collect(Collectors.joining(","));
+    }
+
+    static String shortMaterial(MethodInfo mi, Elements elements, Types types, Trees trees) {
+        // 1 つの型だけに偏らないよう、型ごとに 3 つまで拾う。
+        List<String> out = new ArrayList<>();
+        int perType = 0;
+        for (String s : material(mi, elements, types, trees)) {
+            if (s.startsWith("[")) {
+                perType = 0;
+                continue;
+            }
+            if (perType >= 3) continue;
+            out.add(s.split("\t")[0]);
+            perType++;
+            if (out.size() >= 9) break;
+        }
+        return String.join(", ", out);
+    }
+
+    static String expectWhere(MethodInfo mi) {
+        String s = mi.expects.stream().map(e -> e.where).distinct().collect(Collectors.joining(","));
+        return s.isEmpty() ? "-" : s;
+    }
+
+    static String planConfidence(List<MethodInfo> stubs, List<Diagnostic<? extends JavaFileObject>> errors) {
+        if (!errors.isEmpty()) return "low";
+        if (stubs.isEmpty()) return "high";
+        double min = stubs.stream().mapToDouble(m -> m.stub).min().orElse(1.0);
+        return confidence(min);
+    }
+
+    // neodax の「観測 → 問題 → 計画 → 検証」に合わせた手順。
+    // 問題が無ければ step は出さない。
+    static void printPlan(List<MethodInfo> stubs,
+                          List<Diagnostic<? extends JavaFileObject>> errors,
+                          Path root, Elements elements, Types types, Trees trees) {
+        System.out.println("## plan");
+        if (stubs.isEmpty() && errors.isEmpty()) {
+            System.out.println("verdict\tHEALTHY");
+            System.out.println("steps\t0");
+            System.out.println("(直すべき実装箇所は検出されなかった)");
+            System.out.println();
+            return;
+        }
+
+        System.out.println("verdict\tNEEDS_FIX");
+        System.out.println("findings\t" + (errors.size() + stubs.size()));
+
+        int step = 0;
+        List<Integer> blockers = new ArrayList<>();
+        for (var d : errors) {
+            step++;
+            blockers.add(step);
+            System.out.println("step " + step + "\tfix-compile");
+            System.out.println("  where\t" + diagWhere(d, root));
+            System.out.println("  action\t" + d.getMessage(Locale.ROOT).replace('\n', ' '));
+        }
+
+        List<MethodInfo> ordered = new ArrayList<>(stubs);
+        ordered.sort(Comparator.comparingInt(JavaReview::taskNumber)
+            .thenComparing((a, b) -> Double.compare(b.stub, a.stub))
+            .thenComparing(MethodInfo::qualifiedName));
+
+        List<Integer> verifications = new ArrayList<>();
+        for (MethodInfo mi : ordered) {
+            step++;
+            int impl = step;
+            System.out.println("step " + step + "\timplement\t" + fixKey(mi) + " " + mi.qualifiedName());
+            System.out.println("  where\t" + mi.file + ":" + mi.line + ":" + mi.column);
+            if (mi.bodyLine > 0)
+                System.out.println("  body\t" + mi.bodyLine + "-" + mi.bodyEndLine);
+            System.out.println("  action\t" + (mi.marker.isEmpty()
+                ? "契約と期待値を満たす本体を書く"
+                : mi.marker.replaceFirst("^//\\s*", "")));
+            if (!mi.contracts.isEmpty()) {
+                ExecutableElement c = mi.contracts.get(0);
+                System.out.println("  contract\t" + c.getEnclosingElement().getSimpleName()
+                    + "." + c.getSimpleName() + " " + elementLocation(c, trees));
+            }
+            String uses = shortMaterial(mi, elements, types, trees);
+            if (!uses.isEmpty()) System.out.println("  uses\t" + uses);
+            if (!blockers.isEmpty()) System.out.println("  requires\t" + joinInts(blockers));
+
+            step++;
+            verifications.add(step);
+            System.out.println("step " + step + "\tverify\t" + fixKey(mi));
+            System.out.println("  requires\t" + impl);
+            String expects = expectWhere(mi);
+            if (!"-".equals(expects)) {
+                System.out.println("  action\t" + expects + " の期待値を確認");
+            } else {
+                System.out.println("  action\tこのメソッドがスタブ判定から外れることを確認");
+            }
+        }
+
+        step++;
+        System.out.println("step " + step + "\tre-review");
+        List<Integer> req = verifications.isEmpty() ? blockers : verifications;
+        if (!req.isEmpty()) System.out.println("  requires\t" + joinInts(req));
+        System.out.println("  action\tneodax-java-review " + root);
+        System.out.println("  expect\tstubs=0 errors=0");
+        System.out.println("steps\t" + step);
+        System.out.println("confidence\t" + planConfidence(stubs, errors));
+        System.out.println();
+    }
+
+    static void printVerify(List<MethodInfo> stubs,
+                            List<Diagnostic<? extends JavaFileObject>> errors) {
+        System.out.println("## verify");
+        System.out.println("result\t" + ((stubs.isEmpty() && errors.isEmpty()) ? "HEALTHY" : "NEEDS_FIX"));
+        System.out.println("expected\tstubs=0 errors=0");
+        System.out.println("confidence\t" + planConfidence(stubs, errors));
+        if (stubs.isEmpty() && errors.isEmpty())
+            System.out.println("(バグは検出されなかった。直す手順は出さない)");
+    }
+
     static void printStub(MethodInfo mi, Elements elements, Types types, Trees trees) {
         System.out.println("## " + mi.qualifiedName());
         System.out.println("where\t" + mi.file + ":" + mi.line + ":" + mi.column);
         System.out.println("stub\t" + String.format("%.2f", mi.stub));
+        System.out.println("confidence\t" + confidence(mi.stub));
         System.out.println("signature\t" + mi.signature());
         if (!mi.marker.isEmpty()) System.out.println("marker\t" + mi.marker);
+        for (String why : evidence(mi, trees)) System.out.println("why\t" + why);
 
         for (ExecutableElement c : mi.contracts) {
             String loc = elementLocation(c, trees);
