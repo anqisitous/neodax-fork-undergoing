@@ -1,0 +1,18 @@
+#!/bin/sh
+# neodax-java-review — JDK の javac (Compiler Tree API) を使う Java reviewer。
+#
+# ビルド依存ではない。Java を解析するときだけ JDK が要る。
+set -eu
+
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if ! command -v java >/dev/null 2>&1; then
+    echo "neodax-java-review: java が見つかりません (JDK が必要)" >&2
+    exit 2
+fi
+if ! command -v javac >/dev/null 2>&1; then
+    echo "neodax-java-review: javac が見つかりません (JRE では解析できません。JDK を入れてください)" >&2
+    exit 2
+fi
+
+exec java "$DIR/JavaReview.java" "$@"
