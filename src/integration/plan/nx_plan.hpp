@@ -24,6 +24,7 @@
 
 #include <cstdio>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace nx {
@@ -38,6 +39,24 @@ struct Signal {
     Persistence persistence = Persistence::Durable;
     bool observed = false;
     bool informs_verdict = true;
+};
+
+// 信号の索引。id から事実を直接引く。
+//
+// 解析のたびに vector を線形走査すると、問題数 × 根拠数 × 信号数になる。
+// 索引は 1 回だけ作り、同じ id は後から来た観測で上書きする
+// (Model::add_signal の upsert と同じ規則)。
+class SignalIndex {
+public:
+    explicit SignalIndex(const std::vector<Signal> &signals);
+
+    const Signal *find(const std::string &id) const;
+    bool observed(const std::string &id) const;
+    std::string value(const std::string &id,
+                      const std::string &fallback = std::string()) const;
+
+private:
+    std::unordered_map<std::string, const Signal *> by_id_;
 };
 
 // ---- 問題 ----
@@ -128,6 +147,7 @@ public:
 private:
     std::string subject_;
     std::vector<Signal> signals_;
+    std::unordered_map<std::string, std::size_t> signal_pos_;
     std::vector<Finding> findings_;
     Plan plan_;
     Confidence conf_;
