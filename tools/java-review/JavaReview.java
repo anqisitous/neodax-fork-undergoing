@@ -60,6 +60,9 @@ public final class JavaReview {
         String file;
         int line;
         int column;
+        int startLine;
+        int bodyLine;
+        int bodyEndLine;
         long start;
         long end;
         String source;
@@ -103,12 +106,13 @@ public final class JavaReview {
 
     public static void main(String[] args) throws Exception {
         if (args.length == 0 || args[0].equals("-h") || args[0].equals("--help")) {
-            System.err.println("usage: java JavaReview.java <dir> [--next]");
+            System.err.println("usage: java JavaReview.java <dir> [--next|--map]");
             System.exit(2);
         }
         Path root = Paths.get(args[0]).toAbsolutePath().normalize();
         ROOT = root;
         boolean nextOnly = Arrays.asList(args).contains("--next");
+        boolean mapOnly = Arrays.asList(args).contains("--map");
         if (!Files.isDirectory(root)) {
             System.err.println("not a directory: " + root);
             System.exit(2);
@@ -242,7 +246,10 @@ public final class JavaReview {
 
         if (nextOnly) {
             printNext(stubs);
+        } else if (mapOnly) {
+            printFixMap(stubs, trees);
         } else {
+            printFixMap(stubs, trees);
             for (MethodInfo mi : stubs) printStub(mi, elements, types, trees);
         }
 
@@ -303,14 +310,18 @@ public final class JavaReview {
                 }
                 mi.line = (int) lm.getLineNumber(declStart);
                 mi.column = (int) lm.getColumnNumber(declStart);
+                mi.startLine = (int) lm.getLineNumber(mi.start);
                 String src = source(mi.cu);
                 if (mi.start >= 0 && mi.end >= mi.start && mi.end <= src.length())
                     mi.source = src.substring((int) mi.start, (int) mi.end);
                 if (tree.getBody() != null) {
                     long bs = sp.getStartPosition(mi.cu, tree.getBody());
                     long be = sp.getEndPosition(mi.cu, tree.getBody());
-                    if (bs >= 0 && be >= bs && be <= src.length())
+                    if (bs >= 0 && be >= bs && be <= src.length()) {
                         mi.bodySource = src.substring((int) bs, (int) be);
+                        mi.bodyLine = (int) lm.getLineNumber(bs);
+                        mi.bodyEndLine = (int) lm.getLineNumber(be);
+                    }
                 }
                 methods.put(ee, mi);
             }
@@ -540,6 +551,58 @@ public final class JavaReview {
         }
     }
 
+    static int taskNumber(MethodInfo mi) {
+        var m = Pattern.compile("(?i)task\\s*(\\d+)").matcher(mi.marker);
+        return m.find() ? Integer.parseInt(m.group(1)) : 999;
+    }
+
+    static String fixKey(MethodInfo mi) {
+        int n = taskNumber(mi);
+        return n == 999 ? "stub" : "task" + n;
+    }
+
+    // 「元のコードの名前」と「直す場所」を 1 行で対応させる。
+    static void printFixMap(List<MethodInfo> stubs, Trees trees) {
+        System.out.println("## fix map");
+        System.out.println("key\tname\twhere\tbody\tcontract\texpect");
+
+        List<MethodInfo> map = new ArrayList<>(stubs);
+        map.sort(Comparator.comparingInt(JavaReview::taskNumber)
+            .thenComparing(MethodInfo::qualifiedName));
+
+        for (MethodInfo mi : map) {
+            String contract = "-";
+            if (!mi.contracts.isEmpty()) {
+                ExecutableElement c = mi.contracts.get(0);
+                contract = c.getEnclosingElement().getSimpleName() + "." + c.getSimpleName()
+                    + " " + elementLocation(c, trees);
+            }
+            String expects = mi.expects.stream()
+                .map(e -> e.where)
+                .distinct()
+                .collect(Collectors.joining(","));
+            if (expects.isEmpty()) expects = "-";
+            String body = mi.bodyLine > 0 ? mi.bodyLine + "-" + mi.bodyEndLine : "-";
+            System.out.println(fixKey(mi) + "\t" + mi.qualifiedName() + "\t"
+                + mi.file + ":" + mi.line + ":" + mi.column + "\t" + body
+                + "\t" + contract + "\t" + expects);
+        }
+        System.out.println();
+    }
+
+    // 元のコードをそのまま行番号つきで出す。どこを置き換えるかが分かる。
+    static void printOriginal(MethodInfo mi) {
+        if (mi.source == null || mi.startLine <= 0) return;
+        System.out.println("original");
+        String[] lines = mi.source.split("\\R", -1);
+        int n = mi.startLine;
+        int limit = Math.min(lines.length, 30);
+        for (int i = 0; i < limit; i++) {
+            System.out.printf("  %4d  %s%n", n + i, lines[i]);
+        }
+        if (lines.length > limit) System.out.println("  ...");
+    }
+
     static void printStub(MethodInfo mi, Elements elements, Types types, Trees trees) {
         System.out.println("## " + mi.qualifiedName());
         System.out.println("where\t" + mi.file + ":" + mi.line + ":" + mi.column);
@@ -567,6 +630,8 @@ public final class JavaReview {
 
         System.out.println("material");
         for (String m : material(mi, elements, types, trees)) System.out.println("  " + m);
+
+        printOriginal(mi);
 
         System.out.println("skeleton");
         String ret = mi.tree.getReturnType() == null ? "void" : mi.tree.getReturnType().toString();
