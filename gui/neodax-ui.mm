@@ -2556,7 +2556,9 @@ static int nx_gui_exec(const char *line, char **out) {
 @property (nonatomic, strong) NSButton *runButton;
 @property (nonatomic, strong) NSMutableArray<NSString *> *rows;
 @property (nonatomic, strong) NSMutableArray<NSNumber *> *rowIndex;
+#if !NX_REVIEWER
 @property (nonatomic, strong) id emulator;   /* 別フレーム。混ぜない */
+#endif
 @property (nonatomic, strong) id appPanel;
 @end
 
@@ -2706,12 +2708,14 @@ static int nx_gui_exec(const char *line, char **out) {
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
     [self buildWindow];
 
+#if !NX_REVIEWER
     /* AE エミュレータは neodax パネルとは別フレームに置く。混ぜない。 */
     Class emu = NSClassFromString(@"NxEmulatorController");
     if (emu) {
         self.emulator = [[emu alloc] init];
         [self.emulator performSelector:@selector(build)];
     }
+#endif
 
     Class appc = NSClassFromString(@"NxAppController");
     if (appc) {
@@ -2726,6 +2730,7 @@ static int nx_gui_exec(const char *line, char **out) {
 
 @end
 
+#if !NX_REVIEWER
 /* ================================================================
  * AE エミュレータ (neodax パネルとは別フレーム)
  *
@@ -3176,6 +3181,8 @@ static NSPoint nx_node_pos(int i, NSRect b) {
 }
 
 @end
+
+#endif
 
 /* ================================================================
  * 最近の app から選んで分析するパネル (neodax 側)

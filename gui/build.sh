@@ -50,7 +50,7 @@ done
 # gui/neodax-ui.mm が include したヘッダで決まる。
 # ここに個別の .o を並べない (コードとビルドで同じことを 2 回書かない)。
 make -s -C src nx-categories
-clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 \
+clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 -DNX_REVIEWER=1 \
     -I src -I include \
     -framework Cocoa -framework CoreGraphics -framework ImageIO -framework CoreFoundation \
     -framework ApplicationServices \
@@ -58,13 +58,25 @@ clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 \
     -o bin/neodax-ui
 echo "built: bin/neodax-ui"
 
+# --- necessary-node editor (reviewer app のメイン画面) ---
+# standalone の editor を別バイナリとして作り、.app の実行ファイルにする。
+# 従来の neodax-ui は同じ .app 内に残す (editor のメニューから起動できる)。
+clang++ -std=c++17 -ObjC++ -fobjc-arc -O2 -Wall \
+    -I gui/editor \
+    gui/editor/neodax_editor.mm gui/editor/nx_editor_model.cpp \
+    -framework Cocoa -o bin/neodax-editor
+echo "built: bin/neodax-editor"
+
 # --- .app バンドル化 ---
 # 既存のバイナリ群を 1 つの .app にまとめ、解析用フォルダを中に置く。
 # 解析成果物 (SVG / display モデル / パッチ控え) の置き場所を
 # リポジトリの外へ散らかさないための入れ物。
 APP="bin/NeoDAX.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/Analysis"
-for t in neodax neodax-ui neodax-viewer neodax-screen neodax-artifact; do
+mkdir -p "$APP/Contents/Resources/java-review"
+cp -f tools/java-review/JavaReview.java tools/java-review/neodax-java-review \
+      "$APP/Contents/Resources/java-review/" 2>/dev/null || true
+for t in neodax neodax-ui neodax-viewer neodax-screen neodax-artifact neodax-editor; do
     [ -x "bin/$t" ] && cp -f "bin/$t" "$APP/Contents/MacOS/"
 done
 
@@ -100,7 +112,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>NeoDAX</string>
   <key>CFBundleDisplayName</key><string>NeoDAX</string>
   <key>CFBundleIdentifier</key><string>org.neodax.tool</string>
-  <key>CFBundleExecutable</key><string>neodax-ui</string>
+  <key>CFBundleExecutable</key><string>neodax-editor</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>

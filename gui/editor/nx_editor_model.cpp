@@ -305,11 +305,13 @@ bool Project::load_map_text(const std::string &text, std::string &err) {
 }
 
 std::string Project::run_review_map(std::string &err) const {
-    std::vector<std::string> candidates = {
-        "tools/java-review/neodax-java-review",
-        "../tools/java-review/neodax-java-review",
-        "../../tools/java-review/neodax-java-review"
-    };
+    std::vector<std::string> candidates;
+    if (const char *env = std::getenv("NX_JAVA_REVIEW")) {
+        if (*env) candidates.push_back(env);
+    }
+    candidates.push_back("tools/java-review/neodax-java-review");
+    candidates.push_back("../tools/java-review/neodax-java-review");
+    candidates.push_back("../../tools/java-review/neodax-java-review");
     std::string tool;
     for (const auto &c : candidates) {
         std::error_code ec;

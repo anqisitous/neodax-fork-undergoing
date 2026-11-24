@@ -680,7 +680,11 @@ typedef NS_ENUM(NSInteger, NxCellKind) {
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     [self buildWindow];
-    [self loadProject];
+    if (self.rootPath.length) {
+        [self loadProject];
+    } else {
+        [self openFolderAction:nil];
+    }
     [NSApp activateIgnoringOtherApps:YES];
 }
 
@@ -843,7 +847,46 @@ typedef NS_ENUM(NSInteger, NxCellKind) {
     [self.window makeKeyAndOrderFront:nil];
 }
 
+- (void)openFolderAction:(id)s {
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    p.canChooseFiles = NO;
+    p.canChooseDirectories = YES;
+    p.allowsMultipleSelection = NO;
+    p.message = @"解析するソースのフォルダを選ぶ";
+    if ([p runModal] == NSModalResponseOK && p.URL) {
+        self.rootPath = p.URL.path;
+        self.mapPath = nil;
+        [self resetProject];
+    }
+}
+
+- (void)resetProject {
+    for (NxCellView *v in [self.stack.cellViews copy]) [self.stack removeCellView:v];
+    [self.cells removeAllObjects];
+    _nodeAlive.clear();
+    _visibleNodeIndexes.clear();
+    delete _project;
+    _project = nullptr;
+    [self loadProject];
+}
+
+- (void)launchLegacy:(id)s {
+    NSString *exe = [[NSBundle mainBundle] executablePath];
+    NSString *ui = [[exe stringByDeletingLastPathComponent]
+                    stringByAppendingPathComponent:@"neodax-ui"];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:ui]) {
+        self.status.stringValue = @"neodax-ui が見つかりません";
+        return;
+    }
+    NSTask *t = [[NSTask alloc] init];
+    t.executableURL = [NSURL fileURLWithPath:ui];
+    t.arguments = @[];
+    @try { [t launch]; }
+    @catch (NSException *e) { self.status.stringValue = e.reason ?: @"起動できません"; }
+}
+
 - (void)loadProject {
+    delete _project;
     _project = new nxedit::Project();
     _nodeAlive.clear();
     self.cells = [NSMutableArray array];
@@ -1283,7 +1326,9 @@ static void build_menu(NxEditorController *ctl) {
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
     [bar addItem:appItem];
     NSMenu *appMenu = [[NSMenu alloc] init];
+    [appMenu addItemWithTitle:@"フォルダを開く…" action:@selector(openFolderAction:) keyEquivalent:@"o"].target = ctl;
     [appMenu addItemWithTitle:@"保存" action:@selector(saveAllAction:) keyEquivalent:@"s"].target = ctl;
+    [appMenu addItemWithTitle:@"従来の NeoDAX" action:@selector(launchLegacy:) keyEquivalent:@"N"].target = ctl;
     [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItemWithTitle:@"終了" action:@selector(terminate:) keyEquivalent:@"q"].target = NSApp;
     appItem.submenu = appMenu;
@@ -1308,6 +1353,11 @@ int main(int argc, char **argv) {
         // Finder 起動でも reviewer を見つけられるように、実行ファイルから
         // リポジトリ根を探して cwd を合わせる。見つからなければ現状維持。
         NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *exeDir = [[[NSBundle mainBundle] executablePath] stringByDeletingLastPathComponent];
+        NSString *resReviewer = [exeDir stringByAppendingPathComponent:
+            @"../Resources/java-review/neodax-java-review"];
+        if ([fm fileExistsAtPath:resReviewer])
+            setenv("NX_JAVA_REVIEW", resReviewer.UTF8String, 1);
         if (![fm fileExistsAtPath:@"tools/java-review/neodax-java-review"]) {
             NSString *d = [[[NSBundle mainBundle] executablePath] stringByDeletingLastPathComponent];
             for (int i = 0; i < 6 && d.length > 1; i++) {
