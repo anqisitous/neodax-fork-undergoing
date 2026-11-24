@@ -79,6 +79,10 @@ public:
     // 名前の端 (直前/直後) は含めない。要求の「隣接している輪郭を含めない」に対応。
     const Symbol *symbol_at(const std::string &file, int line, int column) const;
 
+    // 位置の識別子 (関数呼び出し・型名を含む) を定義に解決する。
+    // 同じファイルを優先し、無ければ同名の定義を探す。
+    const Symbol *symbol_for_position(const std::string &file, int line, int column) const;
+
     // ノードを表示するときの範囲。body が無ければ宣言行から symbol を探す。
     void node_range(const Node &n, int &start_line, int &end_line) const;
 

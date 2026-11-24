@@ -425,6 +425,30 @@ const Symbol *Project::symbol_at(const std::string &file, int line, int column) 
     return nullptr;
 }
 
+const Symbol *Project::symbol_for_position(const std::string &file, int line, int column) const {
+    const SourceFile *f = file_by_path(file);
+    if (!f || line < 1 || line > (int)f->lines.size()) return nullptr;
+    const std::string &ln = f->lines[(size_t)line - 1];
+    int i = column - 1;
+    if (i < 0 || i >= (int)ln.size()) return nullptr;
+    auto word = [](char c) { return std::isalnum((unsigned char)c) || c == '_' || c == '$'; };
+    if (!word(ln[(size_t)i])) return nullptr;
+    int a = i, b = i + 1;
+    while (a > 0 && word(ln[(size_t)a - 1])) a--;
+    while (b < (int)ln.size() && word(ln[(size_t)b])) b++;
+    // 端は含めない。
+    if (!(column > a + 1 && column < b + 1)) return nullptr;
+    std::string name = ln.substr((size_t)a, (size_t)(b - a));
+
+    const Symbol *fallback = nullptr;
+    for (const auto &s : symbols_) {
+        if (s.name != name) continue;
+        if (s.file == file) return &s;
+        if (!fallback) fallback = &s;
+    }
+    return fallback;
+}
+
 void Project::node_range(const Node &n, int &start_line, int &end_line) const {
     start_line = n.body_start > 0 ? n.body_start : n.line;
     end_line = n.body_end >= start_line ? n.body_end : start_line;
