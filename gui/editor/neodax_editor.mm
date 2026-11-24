@@ -354,7 +354,7 @@ typedef NS_ENUM(NSInteger, NxCellKind) {
     NSInteger lineInCell = NxLineIndex(self.string, loc);
     NSInteger col = (NSInteger)(loc - NxLineStart(self.string, lineInCell)) + 1;
     NSInteger line = self.cell.startLine + lineInCell;
-    const nxedit::Symbol *s = self.controller.project->symbol_at(
+    const nxedit::Symbol *s = self.controller.project->symbol_for_position(
         self.cell.file.UTF8String, (int)line, (int)col);
     self.semanticNameActive = (s != nullptr);
 }
@@ -903,6 +903,10 @@ typedef NS_ENUM(NSInteger, NxCellKind) {
     [self saveAll];
 }
 
+- (void)saveAllAction:(id)s {
+    [self saveAll];
+}
+
 - (void)searchChanged:(id)s {
     [self reloadNodeTable];
 }
@@ -1099,7 +1103,7 @@ typedef NS_ENUM(NSInteger, NxCellKind) {
     NSInteger lineInCell = NxLineIndex(tv.string, sel.location);
     NSInteger col = (NSInteger)(sel.location - NxLineStart(tv.string, lineInCell)) + 1;
     NSInteger line = tv.cell.startLine + lineInCell;
-    const nxedit::Symbol *s = _project->symbol_at(tv.cell.file.UTF8String, (int)line, (int)col);
+    const nxedit::Symbol *s = _project->symbol_for_position(tv.cell.file.UTF8String, (int)line, (int)col);
     if (!s) return;
 
     NxEditorCell *c = [[NxEditorCell alloc] init];
@@ -1274,6 +1278,24 @@ typedef NS_ENUM(NSInteger, NxCellKind) {
 // ==================================================================
 // main
 // ==================================================================
+static void build_menu(NxEditorController *ctl) {
+    NSMenu *bar = [[NSMenu alloc] init];
+    NSMenuItem *appItem = [[NSMenuItem alloc] init];
+    [bar addItem:appItem];
+    NSMenu *appMenu = [[NSMenu alloc] init];
+    [appMenu addItemWithTitle:@"保存" action:@selector(saveAllAction:) keyEquivalent:@"s"].target = ctl;
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    [appMenu addItemWithTitle:@"終了" action:@selector(terminate:) keyEquivalent:@"q"].target = NSApp;
+    appItem.submenu = appMenu;
+
+    NSMenuItem *winItem = [[NSMenuItem alloc] init];
+    [bar addItem:winItem];
+    NSMenu *winMenu = [[NSMenu alloc] initWithTitle:@"ウィンドウ"];
+    [winMenu addItemWithTitle:@"閉じる" action:@selector(performClose:) keyEquivalent:@"w"].target = nil;
+    winItem.submenu = winMenu;
+    NSApp.mainMenu = bar;
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         NSString *root = nil, *map = nil;
@@ -1301,6 +1323,7 @@ int main(int argc, char **argv) {
 
         NSApplication *app = [NSApplication sharedApplication];
         [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+        build_menu(ctl);
         app.delegate = ctl;
         [app run];
     }
