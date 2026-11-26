@@ -120,7 +120,7 @@ static void usage(void) {
           "  --write  その場で整形 (同じ inode に書き戻す)\n"
           "  --diff   差分を表示\n"
           "  --mode   整形の範囲 (既定 all)\n"
-          "             all     : ファイル全体。//[ //] は無視して中も整形\n"
+          "             all     : ファイル全体。マーカーが無ければ整形後に //[ //] を付ける\n"
           "             outside : マーカー外だけ整形。//[ //] の中はそのまま\n"
           "             markers : マーカー内だけ整形 (従来モード)\n"
           "  --markers  --mode markers の別名\n"

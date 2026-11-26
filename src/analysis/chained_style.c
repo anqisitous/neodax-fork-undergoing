@@ -14,6 +14,7 @@
  *
  * 適用範囲 (既定はファイル全体):
  *   //[  …  //]   この中だけ整形しない (そのまま無視する)。
+ *   マーカーが無いファイルは、整形結果全体を //[ … //] で囲む。
  *   --markers     従来どおりマーカー内だけを整形する。
  *
  * バイナリの扱い:
@@ -704,11 +705,33 @@ int nx_style_skip_bom(const char *s, int n) {
 
 /* [5] マーカーの次の位置 (行頭)。 */
 
-/* [6] ファイル全体を整形する (マーカーは無視して、内側も含めて全部)。 */
+/* マーカーが 1 つでもあるか。無ければ整形時に付ける。 */
+static int has_marker(const char *s, int n) {
+    NxMarker m;
+    return next_marker(s, n, 0, &m);
+}
+
+static int has_nonspace(const char *s, int a, int b) {
+    for (int i = a; i < b; i++)
+        if (s[i] != ' ' && s[i] != '\t' && s[i] != '\r' && s[i] != '\n') return 1;
+    return 0;
+}
+
+/* [6] ファイル全体を整形する。
+ * まだ //[ //] が無いファイルは、整形結果全体を //[ ... //] で囲む。
+ * 既にマーカーがあるファイルは、二重に付けず中身だけ整形する。 */
 void nx_style_all(const char *s, int n, Buf *out) {
     int a = nx_style_skip_bom(s, n);
+    if (has_marker(s, n) || !has_nonspace(s, a, n)) {
+        buf_put(out, s, (size_t)a);
+        nx_style_span_auto(s, a, n, out);
+        return;
+    }
     buf_put(out, s, (size_t)a);
+    buf_put(out, "//[\n", 4);
     nx_style_span_auto(s, a, n, out);
+    if (out->n == 0 || out->p[out->n - 1] != '\n') buf_ch(out, '\n');
+    buf_put(out, "//]\n", 4);
 }
 
 /* [7] マーカー内だけを整形する (従来モード)。外側はバイト単位で無改造。 */
@@ -738,6 +761,8 @@ void nx_style_markers(const char *s, int n, Buf *out) {
 /* [8] マーカー内はそのまま残し、マーカー外だけを整形する。
  * マーカーが 1 つも無ければ nx_style_all と同じ結果になる。 */
 void nx_style_outside(const char *s, int n, Buf *out) {
+    /* マーカーが無いファイルは「整形してマーカーを付ける」に回す。 */
+    if (!has_marker(s, n)) { nx_style_all(s, n, out); return; }
     int copied = nx_style_skip_bom(s, n); /* 整形区間の先頭 */
     int inside = 0;                      /* 1 = マーカー内 (無改造) */
     NxMarker m;

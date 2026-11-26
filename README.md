@@ -431,6 +431,34 @@ observe → tree → emit → bake → run
 
 ---
 
+## 5.5 push 前の整形 (`//[` / `//]`)
+
+`neodax-style` は `}{` 連結スタイルに整形し、まだマーカーが無いファイルには
+整形結果全体を `//[` … `//]` で囲みます。
+
+```sh
+# 単体で整形
+./bin/neodax-style --mode outside --write $(git ls-files '*.c' '*.h' '*.cpp' '*.mm' '*.java')
+
+# push 前に自動整形するリポジトリ
+cd /path/to/target-repo
+sh /path/to/neodax/tools/install-style-hook.sh
+git config neodax.styleOnPush all   # 全ソース / true なら変更ファイルだけ
+```
+
+`git-push-token.sh` はトークンを `GIT_PUSH_TOKEN` → `<git-dir>/neodax-token` →
+`~/.config/neodax/github-token` → keychain の順で自動使用します。
+
+```sh
+# トークンをリポジトリ専用に置く場合 (コミットされない)
+printf '%s\n' "$TOKEN" > .git/neodax-token
+chmod 600 .git/neodax-token
+
+/path/to/neodax/git-push-token.sh main
+```
+
+---
+
 ## 6. コマンド一覧
 
 ### 6.1 状態を見る（変更しない）
