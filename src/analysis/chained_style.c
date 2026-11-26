@@ -431,7 +431,8 @@ static void render_block(Ctx *c, const Unit *u, int indent) {
     }
     buf_ch(o, '{');
     buf_ch(o, '\n');
-    render_units(c, u->body, u->nbody, indent + INDENT, 0);
+    /* クラス本体・関数本体の中でも `}xxx{` を探す。 */
+    render_units(c, u->body, u->nbody, indent + INDENT, 1);
     put_indent(o, indent);
     buf_ch(o, '}');
     append_tail(c, u, indent);
@@ -495,7 +496,7 @@ static void bounce_else_body(Ctx *c, const Unit *u, int open_at, int indent) {
         buf_ch(c->out, (char)0x7d);
     } else {
         buf_ch(c->out, '\n');
-        render_units(&sub, inner.v, inner.n, indent + INDENT, u->one_liner ? 0 : 0);
+        render_units(&sub, inner.v, inner.n, indent + INDENT, 1);
         put_indent(c->out, indent);
         buf_ch(c->out, '}');
     }
@@ -503,10 +504,20 @@ static void bounce_else_body(Ctx *c, const Unit *u, int open_at, int indent) {
     free(inner.v);
 }
 
-/* 連結対象: ブロック単位で、本体が単純文 1 個、かつ元が複数行。 */
+/* 連結対象: `}xxx{` の xxx に { も } も含まれないブロック。
+ * xxx には ( [ < などのヘッダ記号を含めてよい。
+ * 本体にコメントやプリプロセッサがあると 1 行に畳んだとき壊れるので外す。 */
+static int flattenable(const Unit *u) {
+    for (int i = 0; i < u->nbody; i++) {
+        const Unit *b = &u->body[i];
+        if (b->kind == U_COMMENT || b->kind == U_PP) return 0;
+        if (b->kind == U_BLOCK && !flattenable(b)) return 0;
+    }
+    return 1;
+}
+
 static int chainable(const Unit *u) {
-    return u->kind == U_BLOCK && !u->one_liner && u->nbody == 1 && u->body[0].kind == U_SIMPLE &&
-           u->tail < 0;
+    return u->kind == U_BLOCK && u->tail < 0 && flattenable(u);
 }
 
 /* 本体の描画。桁を depth==0 で 0 にするのは連結列の最後だけ。 */
@@ -734,54 +745,65 @@ void nx_style_all(const char *s, int n, Buf *out) {
     buf_put(out, "//]\n", 4);
 }
 
+/* 整形した 1 区間を出す。mark=1 なら `//[` / `//]` で囲む。
+ * 空行だけの区間はマーカーを付けない。 */
+static void emit_segment(const char *s, int a, int b,
+                         int format, int mark, Buf *out) {
+    if (!format) {
+        buf_put(out, s + a, (size_t)(b - a));
+        return;
+    }
+    if (mark && has_nonspace(s, a, b)) {
+        buf_put(out, "//[\n", 4);
+        nx_style_span_auto(s, a, b, out);
+        if (out->n == 0 || out->p[out->n - 1] != '\n') buf_ch(out, '\n');
+        buf_put(out, "//]\n", 4);
+        return;
+    }
+    nx_style_span_auto(s, a, b, out);
+}
+
+/* [7] //[ //] と通常ブロックは交互に現れる前提で、再帰的に処理する。
+ * format_inside=1: マーカー内を整形 / 0: マーカー外を整形。
+ * mark=1: 整形した区間を `//[` / `//]` で囲む。
+ * マーカー行自体は常にそのまま通す。 */
+static void style_walk(const char *s, int n, int from, int inside,
+                       int format_inside, int mark, Buf *out) {
+    NxMarker m;
+    if (!next_marker(s, n, from, &m)) {
+        emit_segment(s, from, n, inside == format_inside, mark, out);
+        return;
+    }
+
+    int after = after_marker(s, n, m.mark);
+    int toggles = (m.is_open && !inside) || (!m.is_open && inside);
+    if (!toggles) {
+        /* 対応しないマーカーは 1 行そのまま通し、状態を変えない。 */
+        buf_put(out, s + from, (size_t)(after - from));
+        style_walk(s, n, after, inside, format_inside, mark, out);
+        return;
+    }
+
+    emit_segment(s, from, m.mark, inside == format_inside, mark, out);
+    buf_put(out, s + m.mark, (size_t)(after - m.mark)); /* `//[` / `//]` 行 */
+    style_walk(s, n, after, !inside, format_inside, mark, out);
+}
+
 /* [7] マーカー内だけを整形する (従来モード)。外側はバイト単位で無改造。 */
 void nx_style_markers(const char *s, int n, Buf *out) {
     int bom = nx_style_skip_bom(s, n);
-    int copied = 0;  /* out に送済みの元位置 */
-    int open_at = -1; /* マーカー内の本文開始位置 (-1 は外) */
-    NxMarker m;
-
     buf_put(out, s, (size_t)bom);
-    copied = bom;
-
-    for (int from = bom; next_marker(s, n, from, &m); from = after_marker(s, n, m.mark)) {
-        if (m.is_open && open_at < 0) {
-            buf_put(out, s + copied, (size_t)(m.body_start - copied));
-            open_at = m.body_start;
-        } else if (!m.is_open && open_at >= 0) {
-            nx_style_span_auto(s, open_at, m.mark, out);
-            copied = m.mark;
-            open_at = -1;
-        }
-    }
-    if (open_at < 0) buf_put(out, s + copied, (size_t)((size_t)n - (size_t)copied));
-    else nx_style_span_auto(s, open_at, n, out);
+    style_walk(s, n, bom, 0, 1, 0, out);
 }
 
 /* [8] マーカー内はそのまま残し、マーカー外だけを整形する。
+ * 整形した外側の区間には `//[` / `//]` を付ける。
  * マーカーが 1 つも無ければ nx_style_all と同じ結果になる。 */
 void nx_style_outside(const char *s, int n, Buf *out) {
-    /* マーカーが無いファイルは「整形してマーカーを付ける」に回す。 */
     if (!has_marker(s, n)) { nx_style_all(s, n, out); return; }
-    int copied = nx_style_skip_bom(s, n); /* 整形区間の先頭 */
-    int inside = 0;                      /* 1 = マーカー内 (無改造) */
-    NxMarker m;
-
-    for (int from = copied; next_marker(s, n, from, &m); from = after_marker(s, n, m.mark)) {
-        if (m.is_open && !inside) {
-            nx_style_span_auto(s, copied, m.mark, out); /* マーカー手前まで整形 */
-            buf_put(out, s + m.mark, (size_t)(m.body_start - m.mark)); /* `//[` 行は無改造 */
-            copied = m.body_start;
-            inside = 1;
-        } else if (!m.is_open && inside) {
-            /* マーカー内は無改造。`//]` 行まで通す */
-            buf_put(out, s + copied, (size_t)(after_marker(s, n, m.mark) - copied));
-            copied = after_marker(s, n, m.mark);
-            inside = 0;
-        }
-    }
-    if (!inside) nx_style_span_auto(s, copied, n, out);
-    else buf_put(out, s + copied, (size_t)((size_t)n - (size_t)copied));
+    int bom = nx_style_skip_bom(s, n);
+    buf_put(out, s, (size_t)bom);
+    style_walk(s, n, bom, 0, 0, 1, out);
 }
 
 /* [9] 2 つの出力を比べて同じバイト列か。差分判定と --check の共通部品。 */
