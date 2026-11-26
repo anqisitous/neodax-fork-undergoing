@@ -9,7 +9,7 @@
 #   1. GIT_PUSH_TOKEN / GH_TOKEN / GITHUB_TOKEN
 #   2. <git-dir>/neodax-token          (リポジトリ専用。chmod 600)
 #   3. ~/.config/neodax/github-token   (ユーザー共通。chmod 600)
-#   4. macOS keychain (github.com)
+#   4. どれも無ければ、通常の git 認証に任せる (keychain は git が使う)
 #
 # push 前整形は、対象リポジトリで `git config neodax.styleOnPush` を
 # 設定したときだけ動く (true=変更ファイル / all=全ソース)。
@@ -32,9 +32,6 @@ load_token() {
         fi
     done
 
-    if command -v security >/dev/null 2>&1; then
-        security find-internet-password -s github.com -w 2>/dev/null || true
-    fi
 }
 
 style_before_push() {
@@ -89,20 +86,29 @@ style_before_push() {
 style_before_push
 
 token=$(load_token)
-: "${token:?GIT_PUSH_TOKEN / neodax-token / keychain のどれにもトークンがありません}"
 
-askpass=$(mktemp "${TMPDIR:-/tmp}/askpass.XXXXXX")
-trap 'rm -f "$askpass"' EXIT INT TERM
-cat >"$askpass" <<'EOF'
+if [ -n "$token" ]; then
+    askpass=$(mktemp "${TMPDIR:-/tmp}/askpass.XXXXXX")
+    trap 'rm -f "$askpass"' EXIT INT TERM
+    cat >"$askpass" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$GIT_PUSH_TOKEN"
 EOF
-chmod +x "$askpass"
+    chmod +x "$askpass"
 
-if [ -n "${GIT_PUSH_URL:-}" ]; then
-    GIT_ASKPASS="$askpass" GIT_PUSH_TOKEN="$token" \
-        git -c credential.helper= push "$GIT_PUSH_URL" "$refspec"
+    if [ -n "${GIT_PUSH_URL:-}" ]; then
+        GIT_ASKPASS="$askpass" GIT_PUSH_TOKEN="$token" \
+            git -c credential.helper= push "$GIT_PUSH_URL" "$refspec"
+    else
+        GIT_ASKPASS="$askpass" GIT_PUSH_TOKEN="$token" \
+            git -c credential.helper= push origin "$refspec"
+    fi
 else
-    GIT_ASKPASS="$askpass" GIT_PUSH_TOKEN="$token" \
-        git -c credential.helper= push origin "$refspec"
+    # トークンが無いときは、git の通常の credential.helper に任せる。
+    # このスクリプト自身は keychain を読まない。
+    if [ -n "${GIT_PUSH_URL:-}" ]; then
+        git push "$GIT_PUSH_URL" "$refspec"
+    else
+        git push origin "$refspec"
+    fi
 fi
