@@ -153,14 +153,11 @@ export function formatSource(source) {
   return out.join("\n");
 }
 
-// 直接実行されたときだけファイルを書き換える (import 時は何もしない)。
-if (process.argv[1] && process.argv[1].endsWith("chained-style.mjs")) {
+// ファイルを渡されたときだけ書き換える。import されたときは何もしない
+// (名前で判定しない。呼び出し元のパスはどこに置かれるか分からない)。
+const files = process.argv.slice(2);
+if (files.length > 0) {
   const fs = await import("node:fs");
-  const files = process.argv.slice(2);
-  if (files.length === 0) {
-    console.error("usage: chained-style.mjs <file> ...");
-    process.exit(2);
-  }
   for (const f of files) {
     const before = fs.readFileSync(f, "utf8");
     const after = formatSource(before);
