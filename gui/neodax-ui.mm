@@ -42,7 +42,6 @@
  * どの分類を使うかは、この 1 行の include で決まる。 */
 #include "integration/nx_all.h"
 #include "nx_cli_registry.h"
-#include "analysis/chained_style.h"
 
 /* neodax の検索 (ABD 安全化済み) */
 extern "C" int nx_seek(const char *, const char *, const char *, int, int, int, int, FILE *);
@@ -2296,103 +2295,6 @@ static void cmd_serve(void) {
 /* CLI の実体 (下で定義)。GUI はこれをそのまま呼ぶ。 */
 static int nx_cli_dispatch(int argc, char **argv);
 
-/* style — 整形コマンド。当てる関数は nx_style_run だけなので、
- * 新しいモードは chained_style.c の nx_style_run に 1 行足すだけで済む。
- * 対象拡張子の判定は nx_style_is_source (ライブラリ) に置き、ここでは持たない。 */
-static int nx_style_one(const char *path, const char *mode, int write_back, int diff) {
-    NxStyleBuf out = {0};
-    if (nx_style_file(path, mode, &out) != 0) {
-        fprintf(stderr, "style: %s: 読めません\n", path);
-        nx_style_free(&out);
-        return 0; /* 読めないファイルは未整形扱いにしない */
-    }
-    if (diff) {
-        /* 差分だけ出すので、��元を読み直してバイト比較する */
-        FILE *f = fopen(path, "rb");
-        if (!f) { nx_style_free(&out); return 0; }
-        NxStyleBuf in = {0};
-        char tmp[65536];
-        size_t r;
-        while ((r = fread(tmp, 1, sizeof tmp, f)) > 0) {
-            if (in.n + r + 1 > in.cap) {
-                in.cap = (in.n + r + 1) * 2;
-                in.p = (char *)realloc(in.p, in.cap);
-            }
-            memcpy(in.p + in.n, tmp, r);
-            in.n += r;
-        }
-        fclose(f);
-        if (in.p) in.p[in.n] = 0;
-        if (nx_style_same(&in, &out)) { nx_style_free(&in); nx_style_free(&out); return 0; }
-        printf("--- %s\n+++ %s (formatted)\n", path, path);
-        size_t i = 0, j = 0;
-        int la = 1, lb = 1;
-        while (i < in.n || j < out.n) {
-            size_t ie = i, je = j;
-            while (ie < in.n && in.p[ie] != '\n') ie++;
-            while (je < out.n && out.p[je] != '\n') je++;
-            size_t il = ie - i, jl = je - j;
-            if (il == jl && (il == 0 || memcmp(in.p + i, out.p + j, il) == 0)) {
-                i = ie + 1; j = je + 1; la++; lb++;
-                continue;
-            }
-            printf("@@ -%d +%d @@\n- %.*s\n+ %.*s\n", la, lb, (int)il, in.p + i, (int)jl, out.p + j);
-            i = ie + 1; j = je + 1; la++; lb++;
-        }
-        nx_style_free(&in);
-        nx_style_free(&out);
-        return 1;
-    }
-
-    if (write_back) {
-        if (nx_style_save(path, &out) != 0) {
-            fprintf(stderr, "style: %s: 書き込めません\n", path);
-            nx_style_free(&out);
-            return -1;
-        }
-        printf("formatted: %s\n", path);
-    }
-    nx_style_free(&out);
-    return 1;
-}
-
-static int nx_style_cli(int argc, char **argv) {
-    int write_back = has_flag(argc, argv, "--write");
-    int diff = has_flag(argc, argv, "--diff");
-    int check = has_flag(argc, argv, "--check");
-    const char *mode = flag(argc, argv, "--mode");
-    if (has_flag(argc, argv, "--markers")) mode = "markers";
-    if (has_flag(argc, argv, "--outside")) mode = "outside";
-    if (!mode) mode = "all";
-    if (!write_back && !diff && !check) check = 1;
-
-    int changed = 0, checked = 0, bad = 0;
-    for (int i = 2; i < argc; i++) {
-        const char *p = argv[i];
-        if (p[0] == '-' && p[1] == '-') {
-            /* --mode の値、--check などの後の引数は飛ばす */
-            if (strcmp(p, "--mode") == 0) i++;
-            continue;
-        }
-        struct stat st;
-        if (stat(p, &st) != 0) { fprintf(stderr, "style: %s: %s\n", p, strerror(errno)); continue; }
-        if (!S_ISREG(st.st_mode)) continue;
-        if (!nx_style_is_source(p)) continue;
-        checked++;
-        int rc = nx_style_one(p, mode, write_back, diff);
-        if (rc < 0) bad = 1;
-        else if (rc > 0) changed++;
-    }
-
-    if (bad) return 2;
-    if (check && changed) {
-        fprintf(stderr, "%d ファイルが未整形です。/ 検査 %d ファイル\n", changed, checked);
-        return 1;
-    }
-    if (check) fprintf(stderr, "OK: %d ファイルすべて整形済み\n", checked);
-    return 0;
-}
-
 /* 1 つのコマンド定義。argv テンプレート + 説明。 */
 typedef struct {
     const char *title;      /* ボタンに出る名前 */
@@ -3732,11 +3634,22 @@ extern "C" int nx_cli_dispatch_public(int argc, char **argv) {
             int rc = system(c);
             printf("kill -9 -f '%s' rc=%d\n", m, rc);
             return 0;
-        } else if (strcmp(cmd, "style") == 0) {
-            /* 整形 (}{連結スタイル)。当てる関数は nx_style_run だけ。
-             *   style --check|--diff|--write FILE... [--mode all|outside|markers]
-             * 戻り値: 0=整形済み / 1=未整形あり / 2=失敗 */
-            return nx_style_cli(argc, argv);
+        } else if (strcmp(cmd, "node-new") == 0) {
+            return nx_ui_node_new(flag(argc, argv, "--dir"), flag(argc, argv, "--app"),
+                                  flag(argc, argv, "--kind"), flag(argc, argv, "--key"),
+                                  flag(argc, argv, "--label"), stdout);
+        } else if (strcmp(cmd, "node-set") == 0) {
+            return nx_ui_node_set(flag(argc, argv, "--dir"), flag(argc, argv, "--app"),
+                                  flag(argc, argv, "--kind"), flag(argc, argv, "--key"),
+                                  flag(argc, argv, "--label"), stdout);
+        } else if (strcmp(cmd, "node-link") == 0) {
+            return nx_ui_node_link(flag(argc, argv, "--dir"), flag(argc, argv, "--app"),
+                                   flag(argc, argv, "--from"), flag(argc, argv, "--kind"),
+                                   flag(argc, argv, "--to"), stdout);
+        } else if (strcmp(cmd, "node-rm") == 0) {
+            return nx_ui_node_rm(flag(argc, argv, "--dir"), flag(argc, argv, "--app"),
+                                 flag(argc, argv, "--key"),
+                                 has_flag(argc, argv, "--cascade"), stdout);
         } else if (strcmp(cmd, "seek") == 0) {
             if (argc < 3) { fprintf(stderr, "seek: PATTERN required\n"); return 1; }
             const char *pattern = argv[2];

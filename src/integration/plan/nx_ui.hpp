@@ -18,6 +18,18 @@ int nx_ui_scan(const char *app_path, const char *out_dir, int depth,
 int nx_ui_flow(const char *dir, const char *app, const char *action,
                const char *match, const char *format, int depth, FILE *out);
 
+/* ノードの作成・編集。ui.tsv / ui.node を直接書き換えるので、
+   直後に nx_ui_flow(..., "cpp") を呼べば反映済みの cpp が出る。
+   dir が空なら app の保存フォルダ (default_dir) を使う。 */
+int nx_ui_node_new(const char *dir, const char *app, const char *kind,
+                   const char *key, const char *label, FILE *out);
+int nx_ui_node_set(const char *dir, const char *app, const char *kind,
+                   const char *key, const char *label, FILE *out);
+int nx_ui_node_link(const char *dir, const char *app, const char *from,
+                    const char *kind, const char *to, FILE *out);
+int nx_ui_node_rm(const char *dir, const char *app, const char *key,
+                  int cascade, FILE *out);
+
 #ifdef __cplusplus
 }
 #endif

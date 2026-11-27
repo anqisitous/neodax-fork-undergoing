@@ -1202,3 +1202,155 @@ extern "C" int nx_ui_flow(const char *dir, const char *app, const char *action,
     if (d.empty()) { fprintf(out, "ui-flow: --dir or --app required\n"); return 2; }
     return run_flow(d, action ? action : "", match ? match : "", format ? format : "tsv", out);
 }
+
+/* ================================================================= */
+/* ノードの作成・編集                                                */
+/*                                                                    */
+/* ui.tsv は "kind<TAB>key<TAB>value"、ui.node は "node ..." と        */
+/* "link FROM KIND TO" を持つ。読み手 (ui-flow / tpl-cpp) の書式を      */
+/* そのまま書き手にする。新しい形式は作らない。                        */
+/* ================================================================= */
+
+static std::string node_dir(const char *dir, const char *app) {
+    std::string d = dir && *dir ? dir : "";
+    if (d.empty() && app && *app) d = default_dir(app);
+    return d;
+}
+
+/* 1 行 1 レコードの TSV を読む。空行は落とす。 */
+static std::vector<std::string> read_lines(const std::string &p) {
+    std::vector<std::string> v;
+    std::ifstream f(p);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty()) v.push_back(line);
+    }
+    return v;
+}
+
+static std::string node_arrow(const Link &l) {
+    return "link " + l.from + " " + l.kind + " " + l.to;
+}
+
+/* node-new: ノードを 1 つ作る。同じ kind+key があれば作らない。 */
+extern "C" int nx_ui_node_new(const char *dir, const char *app, const char *kind,
+                              const char *key, const char *label, FILE *out) {
+    if (!out) out = stdout;
+    std::string d = node_dir(dir, app);
+    if (d.empty()) { fprintf(out, "node-new: --dir or --app required\n"); return 2; }
+    if (!kind || !*kind || !key || !*key) {
+        fprintf(out, "node-new: --kind and --key required\n");
+        return 2;
+    }
+    std::string p = join(d, "ui.tsv");
+    std::vector<std::string> lines = read_lines(p);
+    for (const std::string &line : lines) {
+        std::vector<std::string> v = split_tsv(line);
+        if (v.size() >= 2 && v[0] == kind && v[1] == key) {
+            fprintf(out, "node-new: already exists %s\t%s\n", kind, key);
+            return 1;
+        }
+    }
+    lines.push_back(std::string(kind) + "\t" + key + "\t" + (label ? label : ""));
+    std::string buf;
+    for (const std::string &line : lines) buf += line + "\n";
+    write_all(p, buf);
+    fprintf(out, "node-new: %s\t%s\n", kind, key);
+    (void)node_arrow;
+    return 0;
+}
+
+/* node-set: ノードの値を書き換える。kind 省略なら key で引く。 */
+extern "C" int nx_ui_node_set(const char *dir, const char *app, const char *kind,
+                              const char *key, const char *label, FILE *out) {
+    if (!out) out = stdout;
+    std::string d = node_dir(dir, app);
+    if (d.empty()) { fprintf(out, "node-set: --dir or --app required\n"); return 2; }
+    if (!key || !*key || !label) { fprintf(out, "node-set: --key and --label required\n"); return 2; }
+    std::string p = join(d, "ui.tsv");
+    std::vector<std::string> lines = read_lines(p);
+    int hit = 0;
+    for (std::string &line : lines) {
+        std::vector<std::string> v = split_tsv(line);
+        if (v.size() < 3) continue;
+        if (v[1] != key) continue;
+        if (kind && *kind && v[0] != kind) continue;
+        line = v[0] + "\t" + v[1] + "\t" + label;
+        hit++;
+    }
+    if (hit == 0) { fprintf(out, "node-set: not found %s\n", key); return 1; }
+    std::string buf;
+    for (const std::string &line : lines) buf += line + "\n";
+    write_all(p, buf);
+    fprintf(out, "node-set: %s\t%d\n", key, hit);
+    return 0;
+}
+
+/* node-link: ui.node に辺を足す。同じ辺は二度書かない。 */
+extern "C" int nx_ui_node_link(const char *dir, const char *app, const char *from,
+                               const char *kind, const char *to, FILE *out) {
+    if (!out) out = stdout;
+    std::string d = node_dir(dir, app);
+    if (d.empty()) { fprintf(out, "node-link: --dir or --app required\n"); return 2; }
+    if (!from || !*from || !to || !*to || !kind || !*kind) {
+        fprintf(out, "node-link: --from --kind --to required\n");
+        return 2;
+    }
+    std::string p = join(d, "ui.node");
+    std::vector<std::string> lines = read_lines(p);
+    Link l{from, to, kind};
+    for (const std::string &line : lines) {
+        if (line == node_arrow(l)) {
+            fprintf(out, "node-link: already exists\n");
+            return 1;
+        }
+    }
+    lines.push_back(node_arrow(l));
+    std::string buf;
+    for (const std::string &line : lines) buf += line + "\n";
+    write_all(p, buf);
+    fprintf(out, "node-link: %s\n", node_arrow(l).c_str());
+    return 0;
+}
+
+/* node-rm: ノードを消す。--cascade のときだけ繋がる辺も消す。 */
+extern "C" int nx_ui_node_rm(const char *dir, const char *app, const char *key,
+                             int cascade, FILE *out) {
+    if (!out) out = stdout;
+    std::string d = node_dir(dir, app);
+    if (d.empty()) { fprintf(out, "node-rm: --dir or --app required\n"); return 2; }
+    if (!key || !*key) { fprintf(out, "node-rm: --key required\n"); return 2; }
+    std::string p = join(d, "ui.tsv");
+    std::vector<std::string> lines = read_lines(p);
+    std::vector<std::string> keep;
+    int hit = 0;
+    for (const std::string &line : lines) {
+        std::vector<std::string> v = split_tsv(line);
+        if (v.size() >= 2 && v[1] == key) { hit++; continue; }
+        keep.push_back(line);
+    }
+    if (hit == 0) { fprintf(out, "node-rm: not found %s\n", key); return 1; }
+    std::string buf;
+    for (const std::string &line : keep) buf += line + "\n";
+    write_all(p, buf);
+    fprintf(out, "node-rm: %s\t%d\n", key, hit);
+
+    if (cascade) {
+        std::string np = join(d, "ui.node");
+        std::vector<std::string> nl = read_lines(np);
+        std::string nbuf;
+        int cut = 0;
+        for (const std::string &line : nl) {
+            if (line.rfind("link ", 0) == 0) {
+                std::istringstream is(line.substr(5));
+                Link l;
+                if (is >> l.from >> l.kind >> l.to && (l.from == key || l.to == key)) { cut++; continue; }
+            }
+            nbuf += line + "\n";
+        }
+        write_all(np, nbuf);
+        fprintf(out, "node-rm: links %d\n", cut);
+    }
+    return 0;
+}
+

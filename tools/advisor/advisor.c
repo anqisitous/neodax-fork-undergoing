@@ -10,7 +10,7 @@
  *   ./bin/neodax-advisor funcs [DIR]          定義済み関数の一覧
  *
  * 対象は C 系 (.c .cc .cpp .cxx .h .hh .hpp .hxx .mm .java)。
- * 依存は libc のみ。整形の検査は style サブコマンドから chained_style を使う。
+ * 依存は libc のみ。
  */
 #define _POSIX_C_SOURCE 200809L
 #include <dirent.h>
@@ -20,7 +20,6 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "chained_style.h"
 
 #define MAX_NAME 128
 
@@ -264,7 +263,16 @@ static void add_edge(int **arr, int *n, int *cap, int v) {
 /* ================================================================= */
 /* ファイル読み込みと走査                                             */
 /* ================================================================= */
-static int is_source(const char *path) { return nx_style_is_source(path); }
+/* 解析対象の拡張子。 */
+static int is_source(const char *path) {
+    static const char *ext[] = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh",
+                                ".hpp", ".hxx", ".mm", ".java", NULL};
+    const char *dot = strrchr(path, '.');
+    if (!dot) return 0;
+    for (int i = 0; ext[i]; i++)
+        if (!strcmp(dot, ext[i])) return 1;
+    return 0;
+}
 
 typedef struct { char *path; } Found;
 

@@ -3,19 +3,19 @@
 #   make -C tools/advisor          -> ../../bin/neodax-advisor
 #   make -C tools/advisor check    -> 警告をエラー扱いでビルド確認
 #
-# 実装は advisor.c 1 本。整形の検査だけ src/analysis/chained_style.c を使う。
+# 実装は advisor.c 1 本。
 
 CC      ?= cc
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra
 ROOT    := ../..
 OUT     := $(ROOT)/bin/neodax-advisor
 
-SRCS := advisor.c $(ROOT)/src/analysis/chained_style.c
-INCS := -I$(ROOT)/src/analysis
+SRCS := advisor.c
+INCS :=
 
 all: $(OUT)
 
-$(OUT): $(SRCS) $(ROOT)/src/analysis/chained_style.h
+$(OUT): $(SRCS)
 	@mkdir -p $(ROOT)/bin
 	$(CC) $(CFLAGS) $(INCS) -o $@ $(SRCS)
 
